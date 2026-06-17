@@ -194,11 +194,14 @@ class WorldGenerator:
 
 
 class Game(arcade.View):
-    def __init__(self):
+    def __init__(self, difficulty="Normal", bot_count=4, map_size=None):
         super().__init__()
         arcade.set_background_color(arcade.color.BLACK)
         self.paused = False
         self.game_over = False
+        self.difficulty = difficulty
+        self.bot_count = bot_count
+        self.map_size = map_size or WORLD_SIZE
         self.keys_pressed = set()
         self.hex_grid = []
         self.hex_draw_list = arcade.shape_list.ShapeElementList()
@@ -226,8 +229,8 @@ class Game(arcade.View):
         self.setup()
 
     def setup(self):
-        self.grid_width = WORLD_SIZE
-        self.grid_height = WORLD_SIZE
+        self.grid_width = self.map_size
+        self.grid_height = self.map_size
         self.world_generator = WorldGenerator(self.grid_width, self.grid_height, self.world_seed)
         self.create_hex_grid()
         self.selection_border = arcade.Sprite(create_hex_border_texture())
@@ -392,8 +395,20 @@ class Game(arcade.View):
             self.last_mouse_check = current_time
 
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
-        new_zoom = self.world_camera.zoom + scroll_y * ZOOM_SPEED
-        self.world_camera.zoom = max(MIN_ZOOM, min(MAX_ZOOM, new_zoom))
+        old_zoom = self.world_camera.zoom
+        new_zoom = max(MIN_ZOOM, min(MAX_ZOOM, old_zoom + scroll_y * ZOOM_SPEED))
+        if new_zoom == old_zoom:
+            return
+
+        world_x, world_y = self.screen_to_world(x, y)
+        self.world_camera.zoom = new_zoom
+
+        camera_x = world_x - (x - self.window.width / 2) / new_zoom
+        camera_y = world_y - (y - self.window.height / 2) / new_zoom
+        self.world_camera.position = (camera_x, camera_y)
+        self.target_camera_x = camera_x
+        self.target_camera_y = camera_y
+        self.last_visible_update = 0
 
     def screen_to_world(self, screen_x, screen_y):
         camera_x, camera_y = self.world_camera.position

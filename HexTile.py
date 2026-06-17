@@ -75,14 +75,14 @@ class HexTile(arcade.Sprite):
             self.grass_cover = max(0.0, remaining)
 
         else:  # Равнины
-            if self.moisture > 0.2:  # Влажно - лес
+            if self.moisture > 0.5:  # Умеренно - луг
+                self.grass_cover = 0.8
+                self.tree_cover = 0.2
+            elif self.moisture > 0.2:  # Влажно - лес
                 self.tree_cover = 0.5 + (self.moisture - 0.4) * 2
                 self.tree_cover = min(0.8, self.tree_cover)
                 self.grass_cover = max(0.0, 1.0 - self.tree_cover)
 
-            elif self.moisture > 0.5:  # Умеренно - луг
-                self.grass_cover = 0.8
-                self.tree_cover = 0.2
 
             else:  # Сухо - пустыня/саванна
                 if self.temperature > 0.6:
