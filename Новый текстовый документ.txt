@@ -1,0 +1,1033 @@
+import arcade
+import random
+import math
+import time
+from perlin_noise import PerlinNoise
+from pyglet.graphics import Batch
+
+# Константы для гексагональной сетки
+HEX_SIZE = 90  # Радиус гексагона
+HEX_WIDTH = HEX_SIZE * 2
+HEX_HEIGHT = math.sqrt(3) * HEX_SIZE
+HEX_WID = HEX_SIZE * math.sqrt(3)  # Ширина для вертикальной ориентации
+HEX_HGT = HEX_SIZE * 2  # Высота для вертикальной ориентации
+CAMERA_LERP = 0.3
+MOVE_SPEED = 5
+ZOOM_SPEED = 0.1
+MIN_ZOOM = 0.25
+MAX_ZOOM = 2.5
+
+# Константы для генерации мира - ИЗМЕНЯЙ ИХ ДЛЯ РАЗНЫХ ВАРИАНТОВ
+WORLD_SIZE = 100  # Размер мира (чем больше, тем дольше генерация)
+
+# Параметры воды и суши
+SEA_LEVEL = 0.28  # Уровень моря (0.2-0.4)
+WATER_LEVEL = 0.25  # Уровень воды (0.2-0.3)
+DEEP_OCEAN_LEVEL = 0.15  # Глубокий океан (< этого значения)
+
+# Параметры рельефа
+MOUNTAIN_FREQUENCY = 0.2  # Частота гор (0.1-0.8)
+MOUNTAIN_HEIGHT = 0.8  # Высота гор (0.6-1.0)
+HILL_FREQUENCY = 0.35  # Частота холмов (0.3-0.7)
+CONTINENT_SIZE = 0.6  # Размер континентов (0.3-1.0)
+ISLAND_MODE = False  # Режим островов (True/False)
+
+# Параметры температуры
+TROPICAL_WIDTH = 0.1  # Ширина тропической зоны (0.2-0.5)
+TEMPERATE_WIDTH = 0.7  # Ширина умеренной зоны (0.3-0.6)
+POLAR_TEMP = 0.15  # Температура на полюсах (0.0-0.3)
+TROPICAL_TEMP = 0.85  # Температура на экваторе (0.7-1.0)
+
+# Параметры влажности
+GLOBAL_MOISTURE = 0.8  # Глобальная влажность (0.3-0.8)
+DESERT_DRYNESS = 0.3  # Сухость пустынь (0.2-0.5)
+JUNGLE_WETNESS = 0.7  # Влажность джунглей (0.6-0.9)
+
+# Параметры озер
+LAKE_FREQUENCY = 0.4  # Частота озер (0.1-0.5)
+LAKE_SIZE = 0.4  # Размер озер (0.2-0.6)
+
+# Параметры горных хребтов
+RIDGE_FREQUENCY = 0.3  # Частота горных хребтов (0.2-0.6)
+RIDGE_SHARPNESS = 0.7  # Резкость хребтов (0.3-1.0)
+MOUNTAIN_CHAIN_LENGTH = 0.5  # Длина горных цепей (0.3-0.8)
+
+# Параметры болот и топей
+SWAMP_MOISTURE = 0.75  # Влажность для болот (0.7-0.9)
+SWAMP_ELEVATION = 0.32  # Высота для болот (0.25-0.4)
+MARSH_FREQUENCY = 0.4  # Частота появления болот (0.2-0.6)
+BOG_TEMPERATURE = 0.4  # Температура для торфяников (0.3-0.6)
+
+
+class HexTile:
+    def __init__(self, q, r, x, y, elevation, moisture, temperature, ridge_value=0):
+        self.q = q
+        self.r = r
+        self.s = -q - r
+        self.x = x
+        self.y = y
+        self.elevation = elevation
+        self.moisture = moisture
+        self.temperature = temperature
+        self.ridge_value = ridge_value
+
+        # Компоненты тайла (в процентах 0-1)
+        self.water_cover = 0.0  # % покрытия водой
+        self.tree_cover = 0.0  # % покрытия деревьями
+        self.grass_cover = 0.0  # % покрытия травой
+        self.rock_cover = 0.0  # % покрытия камнями/горами
+        self.sand_cover = 0.0  # % покрытия песком
+        self.snow_cover = 0.0  # % покрытия снегом
+
+        # Инициализируем компоненты на основе параметров
+        self._init_components()
+
+        # Определяем текущий биом на основе компонентов
+        self.terrain_type = self.determine_biome()
+
+        self.resources = self.generate_resources()
+        self.owner = None
+        self.buildings = []  # Список построек
+
+        # Предрассчитанные углы для отрисовки
+        self.corners = self._calculate_corners()
+        self.bounding_box = self._calculate_bounding_box()
+
+    def _init_components(self):
+        """Инициализирует компоненты на основе природных параметров"""
+        # Сбрасываем все в 0
+        self.water_cover = 0.0
+        self.tree_cover = 0.0
+        self.grass_cover = 0.0
+        self.rock_cover = 0.0
+        self.sand_cover = 0.0
+        self.snow_cover = 0.0
+
+        # Вода
+        if self.elevation < WATER_LEVEL:
+            self.water_cover = 1.0
+            return
+
+        # Базовое распределение для суши
+        if self.elevation > 0.7:  # Горы
+            self.rock_cover = 0.4 + (self.elevation - 0.7) * 2
+            self.rock_cover = min(0.9, self.rock_cover)
+            self.tree_cover = 0.1 + max(0.0, (self.moisture - 0.3)) * 2
+            self.tree_cover = min(0.4, self.tree_cover)
+
+            if self.temperature < 0.3:
+                self.snow_cover = 0.3 + (0.3 - self.temperature) * 2
+                self.snow_cover = min(0.8, self.snow_cover)
+
+            self.grass_cover = max(0.0, 1.0 - self.rock_cover - self.snow_cover)
+
+        elif self.elevation > 0.5:  # Холмы
+            self.rock_cover = 0.2 + (self.elevation - 0.5) * 1
+            self.rock_cover = min(0.6, self.rock_cover)
+
+            if self.moisture > 0.15:
+                self.tree_cover = 0.4 + (self.moisture - 0.35) * 2
+                self.tree_cover = min(0.7, self.tree_cover)
+
+            remaining = 1.0 - self.rock_cover - self.tree_cover
+            self.grass_cover = max(0.0, remaining)
+
+        else:  # Равнины
+            if self.moisture > 0.2:  # Влажно - лес
+                self.tree_cover = 0.5 + (self.moisture - 0.4) * 2
+                self.tree_cover = min(0.8, self.tree_cover)
+                self.grass_cover = max(0.0, 1.0 - self.tree_cover)
+
+            elif self.moisture > 0.5:  # Умеренно - луг
+                self.grass_cover = 0.8
+                self.tree_cover = 0.2
+
+            else:  # Сухо - пустыня/саванна
+                if self.temperature > 0.6:
+                    self.sand_cover = 0.6
+                    self.grass_cover = 0.4
+                else:
+                    self.grass_cover = 0.5
+                    self.sand_cover = 0.3
+                    self.tree_cover = 0.2
+
+        # Корректируем по температуре
+        if self.temperature < 0.2 and self.elevation < 0.5:
+            self.snow_cover = min(0.7, self.snow_cover + 0.3)
+            # Уменьшаем другие компоненты пропорционально
+            factor = 1.0 - self.snow_cover
+            self.grass_cover *= factor
+            self.tree_cover *= factor
+            self.sand_cover *= factor
+
+        # Финальная нормализация
+        self._normalize_covers()
+
+    def determine_biome(self):
+        """Определяет биом на основе компонентов"""
+        # Проверяем воду
+        if self.water_cover > 0.5:
+            if self.water_cover > 0.9:
+                if self.elevation < DEEP_OCEAN_LEVEL:
+                    return 'deep_ocean'
+                return 'ocean'
+            elif self.water_cover > 0.7:
+                return 'shallow_water'
+            else:
+                return 'lake'
+
+        # Проверяем реки (много воды, но не озеро)
+        if 0.3 < self.water_cover <= 0.5:
+            return 'river'
+
+        # Проверяем болота (вода + растительность)
+        if self.water_cover > 0.2 and self.tree_cover > 0.3:
+            if self.temperature > 0.6:
+                return 'mangrove'
+            elif self.temperature > 0.3:
+                return 'swamp'
+            else:
+                return 'bog'
+
+        # Преобладающий компонент определяет биом
+        components = [
+            (self.rock_cover, 'rocky'),
+            (self.sand_cover, 'sandy'),
+            (self.snow_cover, 'snowy'),
+            (self.tree_cover, 'forested'),
+            (self.grass_cover, 'grassy')
+        ]
+
+        primary = max(components, key=lambda x: x[0])
+        primary_type = primary[1]
+        primary_value = primary[0]
+
+        # Определяем биом по преобладающему компоненту
+        if primary_type == 'rocky':
+            if self.temperature < 0.3:
+                return 'snowy_mountains'
+            elif primary_value > 0.7:
+                return 'mountains'
+            else:
+                return 'hills'
+
+        elif primary_type == 'sandy':
+            if self.temperature > 0.6:
+                return 'desert'
+            else:
+                return 'plains'
+
+        elif primary_type == 'snowy':
+            return 'tundra'
+
+        elif primary_type == 'forested':
+            if self.temperature > 0.7:
+                return 'tropical_rainforest'
+            elif self.temperature > 0.5:
+                return 'jungle'
+            elif self.temperature > 0.3:
+                return 'temperate_forest'
+            else:
+                return 'taiga'
+
+        else:  # grassy
+            if self.temperature > 0.7:
+                return 'savanna'
+            elif self.temperature > 0.4:
+                return 'grassland'
+            else:
+                return 'tundra'
+
+    def modify_terrain(self, changes):
+        """
+        Изменяет компоненты тайла
+        changes: словарь с изменениями, например {'tree_cover': -0.3, 'grass_cover': +0.3}
+        """
+        # Сначала применяем изменения
+        for key, value in changes.items():
+            if hasattr(self, key):
+                current = getattr(self, key)
+                new_value = current + value
+                # Жестко ограничиваем от 0 до 1
+                setattr(self, key, max(0, min(1, new_value)))
+
+        # Проверяем, что не ушли в минус по другим компонентам
+        # Если сумма стала больше 1, пропорционально уменьшаем всё
+        total = self.water_cover + self.tree_cover + self.grass_cover + self.rock_cover + self.sand_cover + self.snow_cover
+
+        if total > 1.0:
+            factor = 1.0 / total
+            self.water_cover *= factor
+            self.tree_cover *= factor
+            self.grass_cover *= factor
+            self.rock_cover *= factor
+            self.sand_cover *= factor
+            self.snow_cover *= factor
+
+        # Обновляем биом
+        self.terrain_type = self.determine_biome()
+
+    def _normalize_covers(self):
+        """Нормализует сумму компонентов до 1 с защитой от отрицательных"""
+        # Сначала убираем отрицательные значения
+        self.water_cover = max(0.0, self.water_cover)
+        self.tree_cover = max(0.0, self.tree_cover)
+        self.grass_cover = max(0.0, self.grass_cover)
+        self.rock_cover = max(0.0, self.rock_cover)
+        self.sand_cover = max(0.0, self.sand_cover)
+        self.snow_cover = max(0.0, self.snow_cover)
+
+        # Считаем сумму
+        total = self.water_cover + self.tree_cover + self.grass_cover + self.rock_cover + self.sand_cover + self.snow_cover
+
+        # Если сумма слишком мала или велика, нормализуем
+        if total > 0.001:  # Защита от деления на ноль
+            # Ограничиваем каждый компонент
+            self.water_cover = min(1.0, self.water_cover / total)
+            self.tree_cover = min(1.0, self.tree_cover / total)
+            self.grass_cover = min(1.0, self.grass_cover / total)
+            self.rock_cover = min(1.0, self.rock_cover / total)
+            self.sand_cover = min(1.0, self.sand_cover / total)
+            self.snow_cover = min(1.0, self.snow_cover / total)
+        else:
+            # Если все нули, ставим траву по умолчанию
+            self.grass_cover = 1.0
+
+    def get_color(self):
+        """Возвращает цвет на основе компонентов - старые цвета"""
+        if self.terrain_type in ['deep_ocean', 'ocean', 'shallow_water', 'lake', 'river']:
+            # Вода - градиент по глубине
+            base_color = {
+                'deep_ocean': (20, 40, 100),
+                'ocean': (30, 70, 150),
+                'shallow_water': (64, 164, 223),
+                'lake': (80, 140, 200),
+                'river': (100, 180, 230)
+            }.get(self.terrain_type, (64, 164, 223))
+            return base_color
+
+        # Старые цвета из оригинального кода
+        colors = {
+            # Вода
+            'deep_ocean': (20, 40, 100),
+            'ocean': (30, 70, 150),
+            'shallow_water': (64, 164, 223),
+            'lake': (80, 140, 200),
+
+            # Побережья
+            'beach': (238, 214, 175),
+            'marsh': (120, 140, 120),
+
+            # Равнины
+            'grassland': (100, 180, 100),
+            'plains': (150, 200, 100),
+            'savanna': (210, 180, 140),
+            'tundra': (200, 220, 200),
+            'desert': (238, 203, 173),
+
+            # Леса
+            'temperate_forest': (34, 139, 34),
+            'boreal_forest': (50, 100, 50),
+            'tropical_rainforest': (20, 150, 20),
+            'jungle': (30, 120, 30),
+            'swamp': (80, 110, 80),
+            'taiga': (60, 90, 60),
+
+            # Холмы
+            'hills': (139, 119, 101),
+            'wooded_hills': (100, 130, 70),
+            'arid_hills': (180, 150, 120),
+
+            # Горы
+            'mountains': (120, 120, 120),
+            'snowy_mountains': (220, 240, 255),
+            'wooded_mountains': (90, 110, 90),
+            'high_peak': (240, 248, 255),
+            'glacier': (250, 250, 250),
+
+            # Болота
+            'mangrove': (60, 100, 70),
+            'bog': (80, 90, 70),
+            'tundra_swamp': (150, 160, 140),
+            'taiga_swamp': (70, 100, 70),
+            'tropical_swamp': (50, 120, 60),
+        }
+
+        # Если есть точное совпадение по terrain_type, используем его
+        # if self.terrain_type in colors:
+        #     return colors[self.terrain_type]
+
+        # Иначе смешиваем на основе компонентов
+        color = list(colors[self.terrain_type])
+        for i in range(3):
+            color[i] = color[i]*0.5
+        # Цвета компонентов (базовые)
+        comp_colors = {
+            'rock': (120, 120, 120),
+            'sand': (238, 203, 173),
+            'snow': (240, 248, 255),
+            'tree': (34, 139, 34),
+            'grass': (100, 180, 100)
+        }
+        # Взвешенная сумма
+        total_weight = 0
+        for comp, weight in [
+            ('rock', self.rock_cover),
+            ('sand', self.sand_cover),
+            ('snow', self.snow_cover),
+            ('tree', self.tree_cover),
+            ('grass', self.grass_cover)
+        ]:
+            if weight > 0:
+                for i in range(3):
+                    color[i] += comp_colors[comp][i] * weight
+                total_weight += weight
+
+        if total_weight > 0:
+            for i in range(3):
+                color[i] = int(color[i] / (total_weight+0.5))
+
+        return tuple(color)
+
+    def generate_resources(self):
+        """Генерирует ресурсы на тайле"""
+        resources = []
+        forest_types = ['forest', 'jungle', 'taiga', 'temperate_forest', 'boreal_forest',
+                        'tropical_rainforest', 'temperate_rainforest']
+        hill_types = ['hills', 'mountains', 'wooded_hills', 'arid_hills', 'snowy_mountains']
+        plain_types = ['grassland', 'plains', 'savanna', 'tropical_savanna']
+        swamp_types = ['swamp', 'mangrove', 'bog', 'marsh', 'tundra_swamp', 'taiga_swamp', 'tropical_swamp']
+
+        if self.terrain_type in forest_types:
+            if random.random() < 0.3:
+                resources.append('wood')
+        elif self.terrain_type in hill_types:
+            if random.random() < 0.2:
+                resources.append(random.choice(['iron', 'gold', 'copper']))
+        elif self.terrain_type in plain_types:
+            if random.random() < 0.3:
+                resources.append(random.choice(['wheat', 'horses', 'cattle']))
+        elif self.terrain_type in swamp_types:
+            # Болота дают торф и лечебные травы
+            if random.random() < 0.4:
+                resources.append('peat')
+            if random.random() < 0.2:
+                resources.append('herbs')
+        return resources
+
+    def _calculate_corners(self):
+        """Возвращает список угловых точек гексагона"""
+        corners = []
+        for i in range(6):
+            angle_deg = 60 * i + 30
+            angle_rad = math.pi / 180 * angle_deg
+            corner_x = self.x + HEX_SIZE * math.cos(angle_rad)
+            corner_y = self.y + HEX_SIZE * math.sin(angle_rad)
+            corners.append((corner_x, corner_y))
+        return corners
+
+    def _calculate_bounding_box(self):
+        """Вычисляет ограничивающий прямоугольник"""
+        min_x = min(x for x, _ in self.corners)
+        max_x = max(x for x, _ in self.corners)
+        min_y = min(y for _, y in self.corners)
+        max_y = max(y for _, y in self.corners)
+        return (min_x, min_y, max_x, max_y)
+
+    def contains_point(self, x, y):
+        """Проверяет, находится ли точка внутри гексагона"""
+        min_x, min_y, max_x, max_y = self.bounding_box
+        if x < min_x or x > max_x or y < min_y or y > max_y:
+            return False
+        return self.point_in_polygon(x, y, self.corners)
+
+    def clear_forest(self):
+        """Вырубка леса - превращает в луг"""
+        if self.tree_cover > 0:
+            self.modify_terrain({'tree_cover': -self.tree_cover, 'grass_cover': self.tree_cover})
+            return True
+        return False
+
+    def build_industry(self):
+        """Строительство завода - увеличивает каменистость"""
+        if self.rock_cover < 0.7:
+            conversion = min(0.3, 1 - self.rock_cover)
+            self.modify_terrain({
+                'rock_cover': conversion,
+                'grass_cover': -conversion/2,
+                'tree_cover': -conversion/2
+            })
+            return True
+        return False
+
+    def irrigate(self):
+        """Орошение - увеличивает влажность"""
+        if self.water_cover < 0.3:
+            self.modify_terrain({'water_cover': 0.1, 'grass_cover': 0.1, 'sand_cover': -0.2})
+            return True
+        return False
+
+    @staticmethod
+    def point_in_polygon(x, y, poly):
+        """Алгоритм проверки точки в полигоне"""
+        n = len(poly)
+        inside = False
+        p1x, p1y = poly[0]
+        for i in range(1, n + 1):
+            p2x, p2y = poly[i % n]
+            if y > min(p1y, p2y):
+                if y <= max(p1y, p2y):
+                    if x <= max(p1x, p2x):
+                        if p1y != p2y:
+                            xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                        if p1x == p2x or x <= xinters:
+                            inside = not inside
+            p1x, p1y = p2x, p2y
+        return inside
+
+
+class WorldGenerator:
+    def __init__(self, width, height, seed=None):
+        self.width = width
+        self.height = height
+        self.seed = seed if seed is not None else random.randint(0, 999999)
+
+        # Основные шумы для рельефа
+        self.noise_elevation = PerlinNoise(octaves=2, seed=self.seed)
+        self.noise_elevation_large = PerlinNoise(octaves=3, seed=self.seed + 50)
+        self.noise_elevation_medium = PerlinNoise(octaves=4, seed=self.seed + 100)
+        self.noise_elevation_small = PerlinNoise(octaves=6, seed=self.seed + 150)
+
+        # Шумы для формы континентов
+        self.noise_continent = PerlinNoise(octaves=2, seed=self.seed + 200)
+        self.noise_continent_detail = PerlinNoise(octaves=3, seed=self.seed + 250)
+
+        # Шумы для горных хребтов
+        self.noise_mountains = PerlinNoise(octaves=2, seed=self.seed + 300)
+        self.noise_mountains_detail = PerlinNoise(octaves=4, seed=self.seed + 350)
+        self.noise_ridge_direction = PerlinNoise(octaves=1, seed=self.seed + 380)
+
+        # Шумы для влажности
+        self.noise_moisture_base = PerlinNoise(octaves=5, seed=self.seed + 400)
+        self.noise_moisture_detail = PerlinNoise(octaves=3, seed=self.seed + 450)
+        self.noise_rain_shadow = PerlinNoise(octaves=2, seed=self.seed + 480)
+
+        # Шумы для температуры
+        self.noise_temp_base = PerlinNoise(octaves=4, seed=self.seed + 500)
+        self.noise_temp_variation = PerlinNoise(octaves=2, seed=self.seed + 550)
+
+        # Шумы для озер и рек
+        self.noise_water_features = PerlinNoise(octaves=3, seed=self.seed + 600)
+        self.noise_lake_basins = PerlinNoise(octaves=2, seed=self.seed + 650)
+
+        print(f"Генерация мира с сидом: {self.seed}")
+
+    def generate_elevation(self, x, y):
+        """Генерирует карту высот с реалистичным рельефом"""
+        # Нормализуем координаты для разных масштабов
+        # nx_large = x / self.width
+        # ny_large = y / self.height
+        # nx_medium = x / self.width * 2
+        # ny_medium = y / self.height * 2
+        # nx_small = x / self.width * 4
+        # ny_small = y / self.height * 4
+        # # Форма континентов (очень крупные формы)
+        # continent = self.noise_continent([nx_large * 0.5, ny_large * 0.5])
+        # continent = (continent + 1) / 2  # в 0-1
+        # # Детали континентов
+        # continent_detail = self.noise_continent_detail([nx_medium, ny_medium])
+        # continent_detail = (continent_detail + 1) / 2
+        # # Комбинируем для создания маски суши
+        # land_mask = continent * 0.7 + continent_detail * 0.3
+        # land_mask = max(0.0, min(1.0, land_mask))
+        # # Порог для суши (настраивается CONTINENT_SIZE)
+        # threshold = 0.45 - CONTINENT_SIZE * 0.2
+        # if land_mask < threshold:
+        #     # Океан
+        #     base = land_mask * 0.3  # Глубина зависит от маски
+        #     return max(0.05, base)
+        # # Суша - генерируем рельеф
+        # # Крупные формы (горные цепи)
+        # large = self.noise_elevation_large([nx_large, ny_large])
+        # large = (large + 1) / 2
+        # # Средние формы (холмы, долины)
+        # medium = self.noise_elevation_medium([nx_medium, ny_medium])
+        # medium = (medium + 1) / 2
+        # # Мелкие детали
+        # small = self.noise_elevation_small([nx_small, ny_small])
+        # small = (small + 1) / 2
+        # # Комбинируем с весами
+        # elevation = large * 0.5 + medium * 0.3 + small * 0.2
+        # # Добавляем горные хребты
+        # ridge = self.generate_ridges(x, y)
+        # elevation += ridge * MOUNTAIN_HEIGHT * 0.3
+        # # Масштабируем высоту
+        # elevation = elevation * 0.8   # Минимальная высота суши
+
+        period = (self.width+self.height)/16 #частота гор + детали
+        elevation = self.noise_elevation([x / period, y / period])*MOUNTAIN_HEIGHT
+
+        return min(1.0, max(0.0, elevation))
+
+    def generate_ridges(self, x, y):
+        """Генерирует горные хребты"""
+        nx = x / self.width * 1.5
+        ny = y / self.height * 1.5
+
+        # Основной шум для хребтов
+        ridge_base = self.noise_mountains([nx, ny])
+        ridge_detail = self.noise_mountains_detail([nx * 2, ny * 2])
+
+        # Направление хребтов
+        dir_x = self.noise_ridge_direction([nx + 10, ny])
+        dir_y = self.noise_ridge_direction([nx, ny + 10])
+
+        # Создаем линейные структуры
+        ridge = (ridge_base + ridge_detail) / 2
+        ridge = (ridge + 1) / 2
+
+        # Усиливаем вдоль определенного направления
+        direction_strength = abs(dir_x * dir_y) * 2
+        ridge = ridge * (0.7 + direction_strength * 0.3)
+
+        # Применяем частоту
+        if ridge < RIDGE_FREQUENCY:
+            ridge = 0
+        else:
+            ridge = (ridge - RIDGE_FREQUENCY) / (1 - RIDGE_FREQUENCY)
+            ridge = math.pow(ridge, RIDGE_SHARPNESS)
+
+        return ridge
+
+    def generate_temperature(self, x, y, elevation):
+        """Генерирует температуру с учетом широты и высоты"""
+        # Нормализованные координаты
+        nx = x / self.width
+        ny = y / self.height
+
+        # Расстояние от центра (для создания градиента)
+        dist_from_center = math.sqrt((nx - 0.5) ** 2 + (ny - 0.5) ** 2) * 2
+
+        # Базовая температура от центра к краям
+        base_temp = 1.0 - dist_from_center * 0.8
+        base_temp = max(0.1, min(1.0, base_temp))
+
+        # Добавляем широтный градиент (полюса холоднее)
+        lat_factor = 1.0 - abs(ny - 0.5) * 1.5
+        lat_factor = max(0.3, min(1.0, lat_factor))
+
+        # Шум для разнообразия
+        noise = self.noise_temp_base([nx * 3, ny * 3])
+        noise = (noise + 1) / 2 * 0.2 - 0.1
+
+        # Высота понижает температуру
+        elevation_factor = 1.0 - elevation * 0.4
+
+        # Итоговая температура
+        temp = (base_temp * 0.6 + lat_factor * 0.4 + noise) * elevation_factor
+
+        # Применяем настройки климатических зон
+        if temp > TROPICAL_TEMP:
+            temp = TROPICAL_TEMP
+        elif temp < POLAR_TEMP:
+            temp = POLAR_TEMP
+
+        return max(0.05, min(1.0, temp))
+
+    def generate_moisture(self, x, y, elevation):
+        """Генерирует влажность с учетом рельефа и proximity к воде"""
+        nx = x / self.width * 2
+        ny = y / self.height * 2
+
+        # Базовая влажность
+        moisture_base = self.noise_moisture_base([nx, ny])
+        moisture_base = (moisture_base + 1) / 2
+
+        # Детали
+        moisture_detail = self.noise_moisture_detail([nx * 2, ny * 2])
+        moisture_detail = (moisture_detail + 1) / 2
+
+        # Эффект дождевой тени от гор
+        rain_shadow = self.noise_rain_shadow([nx, ny])
+        rain_shadow = (rain_shadow + 1) / 2
+        if elevation > 0.6:
+            # С подветренной стороны гор - суше
+            shadow_effect = rain_shadow * 0.5
+            moisture_base = moisture_base * (1 - shadow_effect)
+
+        # Влажность зависит от высоты (низины влажнее)
+        elevation_factor = 1.0 - elevation * 0.4
+
+        # Близость к океану (края карты)
+        nx_pos = x / self.width
+        ny_pos = y / self.height
+        dist_to_edge = min(nx_pos, ny_pos, 1 - nx_pos, 1 - ny_pos) * 4
+        ocean_influence = max(0, 1 - dist_to_edge) * 0.3
+
+        # В низинах скапливается влага
+        lowland_bonus = 0
+        if WATER_LEVEL < elevation < SWAMP_ELEVATION:
+            lowland_bonus = 0.2 * (1 - (elevation - WATER_LEVEL) / (SWAMP_ELEVATION - WATER_LEVEL))
+
+        # Итоговая влажность
+        moisture = (moisture_base * 0.6 + moisture_detail * 0.4) * GLOBAL_MOISTURE
+        moisture = moisture * elevation_factor + ocean_influence + lowland_bonus
+
+        return max(0.1, min(1.0, moisture))
+
+    def is_lake(self, x, y):
+        """Определяет, является ли тайл озером"""
+        elevation = self.generate_elevation(x, y)
+
+        # Озера только на суше
+        if elevation < WATER_LEVEL:
+            return False
+
+        # Озера только в не-холодных зонах
+        temp = self.generate_temperature(x, y, elevation)
+        if temp < 0.2:
+            return False
+
+        # Шум для определения озерных котловин
+        nx = x / self.width * 3
+        ny = y / self.height * 3
+        lake_basin = self.noise_lake_basins([nx, ny])
+        lake_basin = (lake_basin + 1) / 2
+
+        # Дополнительный шум для формы озер
+        water_feature = self.noise_water_features([nx * 2, ny * 2])
+        water_feature = (water_feature + 1) / 2
+
+        # Озера в низинах
+        is_depression = WATER_LEVEL < elevation < WATER_LEVEL + LAKE_SIZE * 0.3
+
+        # Комбинируем условия
+        lake_chance = lake_basin * water_feature
+        return lake_chance > (1 - LAKE_FREQUENCY * 0.7) and is_depression
+
+    def is_river(self, x, y):
+        """Определяет, есть ли здесь река (для будущего использования)"""
+        elevation = self.generate_elevation(x, y)
+
+        # Реки только на суше
+        if elevation < WATER_LEVEL or elevation > 0.6:
+            return False
+
+        # Шум для определения русел
+        nx = x / self.width * 5
+        ny = y / self.height * 5
+        river_noise = self.noise_water_features([nx, ny])
+        river_noise = (river_noise + 1) / 2
+
+        # Реки в местах с уклоном
+        return river_noise > 0.7 and 0.25 < elevation < 0.5
+
+
+class Game(arcade.View):
+    def __init__(self):
+        super().__init__()
+        arcade.set_background_color(arcade.color.BLACK)
+        self.paused = False
+        self.game_over = False
+        self.keys_pressed = set()
+        self.hex_grid = []
+        self.hex_draw_list = arcade.shape_list.ShapeElementList()
+        self.selected_tile = None
+        self.hovered_tile = None
+
+        self.world_camera = arcade.camera.Camera2D()
+        self.gui_camera = arcade.camera.Camera2D()
+
+        self.is_dragging = False
+        self.drag_start_x = 0
+        self.drag_start_y = 0
+        self.drag_start_camera_x = 0
+        self.drag_start_camera_y = 0
+
+        self.target_camera_x = 0
+        self.target_camera_y = 0
+
+        self.visible_tiles = []
+        self.last_visible_update = 0
+        self.visible_update_interval = 0.1
+
+        self.world_generator = None
+        self.world_seed = random.randint(0, 999999)
+
+        self.setup()
+
+    def setup(self):
+        self.grid_width = WORLD_SIZE
+        self.grid_height = WORLD_SIZE
+        self.world_generator = WorldGenerator(self.grid_width, self.grid_height, self.world_seed)
+        self.create_hex_grid()
+
+        center_x = (self.grid_width * HEX_WID) / 2
+        center_y = (self.grid_height * HEX_HGT * 0.75) / 2
+        self.world_camera.position = (center_x, center_y)
+        self.target_camera_x, self.target_camera_y = self.world_camera.position
+
+    def create_hex_grid(self):
+        x_offset = 100
+        y_offset = 100
+
+        for q in range(self.grid_width):
+            for r in range(self.grid_height):
+                x = x_offset + q * HEX_WID + (r % 2) * HEX_WID / 2
+                y = y_offset + r * HEX_HGT * 0.75
+
+                elevation = self.world_generator.generate_elevation(q, r)
+                ridge = self.world_generator.generate_ridges(q, r)
+                moisture = self.world_generator.generate_moisture(q, r, elevation)
+                temperature = self.world_generator.generate_temperature(q, r, elevation)
+
+                hex_tile = HexTile(q, r, x, y, elevation, moisture, temperature, ridge)
+
+                # Проверяем, является ли тайл озером
+                if hex_tile.elevation > WATER_LEVEL:
+                    is_lake = self.world_generator.is_lake(q, r)
+                    if is_lake:
+                        hex_tile.terrain_type = 'lake'
+                        hex_tile.elevation = WATER_LEVEL - 0.02
+
+                self.hex_grid.append(hex_tile)
+
+        print(f"Создано {len(self.hex_grid)} тайлов")
+
+    def get_visible_tiles(self):
+        camera_x, camera_y = self.world_camera.position
+        zoom = self.world_camera.zoom
+        view_width = self.window.width / zoom
+        view_height = self.window.height / zoom
+        left = camera_x - view_width / 2 - HEX_SIZE * 4
+        right = camera_x + view_width / 2 + HEX_SIZE * 4
+        bottom = camera_y - view_height / 2 - HEX_SIZE * 4
+        top = camera_y + view_height / 2 + HEX_SIZE * 4
+        visible = []
+        for tile in self.hex_grid:
+            min_x, min_y, max_x, max_y = tile.bounding_box
+            if (max_x >= left and min_x <= right and
+                    max_y >= bottom and min_y <= top):
+                visible.append(tile)
+        return visible
+
+    def on_draw(self):
+        self.clear()
+        start_time = time.time()
+        self.world_camera.use()
+        self.hex_draw_list.draw()
+        self.gui_camera.use()
+        self.draw_gui()
+        draw_time = (time.time() - start_time) * 1000
+        fps = arcade.get_fps(frame_count=60)
+        debug_text = f"FPS: {fps:.0f} | Draw: {draw_time:.1f}ms | Tiles: {len(self.visible_tiles)} | Seed: {self.world_seed}"
+        arcade.draw_text(debug_text, 10, 30, arcade.color.YELLOW, 12)
+
+    def draw_gui(self):
+        if self.selected_tile:
+            y_pos = self.window.height - 30
+            arcade.draw_text(f"Тип: {self.selected_tile.terrain_type}", 10, y_pos, arcade.color.WHITE, 14)
+            arcade.draw_text(f"Высота: {self.selected_tile.elevation:.2f}", 10, y_pos - 20, arcade.color.WHITE, 14)
+            arcade.draw_text(f"Температура: {self.selected_tile.temperature:.2f}", 10, y_pos - 40, arcade.color.WHITE,
+                             14)
+            arcade.draw_text(f"Влажность: {self.selected_tile.moisture:.2f}", 10, y_pos - 60, arcade.color.WHITE,
+                             14)
+            # Показываем компоненты
+            arcade.draw_text(f"Вода: {self.selected_tile.water_cover:.0%}", 10, y_pos - 80, arcade.color.BLUE, 12)
+            arcade.draw_text(f"Деревья: {self.selected_tile.tree_cover:.0%}", 10, y_pos - 95, arcade.color.GREEN, 12)
+            arcade.draw_text(f"Трава: {self.selected_tile.grass_cover:.0%}", 10, y_pos - 110, arcade.color.LIGHT_GREEN,
+                             12)
+            arcade.draw_text(f"Камни: {self.selected_tile.rock_cover:.0%}", 10, y_pos - 125, arcade.color.DARK_GRAY, 12)
+            arcade.draw_text(f"Песок: {self.selected_tile.sand_cover:.0%}", 10, y_pos - 140, arcade.color.YELLOW, 12)
+            arcade.draw_text(f"Снег: {self.selected_tile.snow_cover:.0%}", 10, y_pos - 155, arcade.color.WHITE, 12)
+            if self.selected_tile.resources:
+                res_text = f"Ресурсы: {', '.join(self.selected_tile.resources)}"
+                arcade.draw_text(res_text, 10, y_pos - 175, arcade.color.YELLOW, 14)
+
+        # Кнопка регенерации
+        arcade.draw_rect_filled(arcade.rect.XYWH(self.window.width - 100, self.window.height - 30, 140, 30),
+                                arcade.color.DARK_GRAY)
+        arcade.draw_text("Новый мир (R)", self.window.width - 160, self.window.height - 40, arcade.color.WHITE, 14)
+        arcade.draw_rect_filled(arcade.rect.XYWH(self.window.width - 100, self.window.height - 70, 140, 30),
+                                arcade.color.DARK_GREEN)
+        arcade.draw_text("Вырубка леса (F)", self.window.width - 160, self.window.height - 80, arcade.color.WHITE, 12)
+
+        arcade.draw_rect_filled(arcade.rect.XYWH(self.window.width - 100, self.window.height - 110, 140, 30),
+                                arcade.color.DARK_RED)
+        arcade.draw_text("Завод (I)", self.window.width - 160, self.window.height - 120, arcade.color.WHITE, 12)
+
+    def update_draw_list(self):
+        """Обновление списка отрисовки"""
+        self.hex_draw_list = arcade.shape_list.ShapeElementList()
+        for hex_tile in self.visible_tiles:
+            if hex_tile != self.selected_tile and hex_tile != self.hovered_tile:
+                color = hex_tile.get_color()
+                # Заливка
+                polygon = arcade.shape_list.create_polygon(hex_tile.corners, color)
+                self.hex_draw_list.append(polygon)
+                # Границы
+                if hex_tile == self.selected_tile:
+                    outline_color = arcade.color.YELLOW
+                    line_width = 4
+                elif hex_tile == self.hovered_tile:
+                    outline_color = arcade.color.WHITE
+                    line_width = 3
+                else:
+                    outline_color = (0, 0, 0, 100)
+                    line_width = 1
+                for i in range(len(hex_tile.corners)):
+                    start = hex_tile.corners[i]
+                    end = hex_tile.corners[(i + 1) % len(hex_tile.corners)]
+                    line = arcade.shape_list.create_line(
+                        start[0], start[1], end[0], end[1],
+                        outline_color, line_width
+                    )
+                    self.hex_draw_list.append(line)
+                # Ресурсы
+                # if hex_tile.resources and hex_tile == self.selected_tile:
+                #     for i, resource in enumerate(hex_tile.resources[:2]):
+                #         rx = hex_tile.x + (i - 0.5) * 20
+                #         ry = hex_tile.y + 20
+                #         point = arcade.shape_list.create_rectangle_filled(rx, ry, 5, 5, arcade.color.GOLD)
+                #         self.hex_draw_list.append(point)
+        for hex_tile in [self.selected_tile, self.hovered_tile]:
+            if hex_tile is not None:
+                color = hex_tile.get_color()
+                # Заливка
+                polygon = arcade.shape_list.create_polygon(hex_tile.corners, color)
+                self.hex_draw_list.append(polygon)
+                # Границы
+                if hex_tile == self.selected_tile:
+                    outline_color = arcade.color.YELLOW
+                    line_width = 4
+                elif hex_tile == self.hovered_tile:
+                    outline_color = arcade.color.WHITE
+                    line_width = 3
+                else:
+                    outline_color = (0, 0, 0, 100)
+                    line_width = 1
+                for i in range(len(hex_tile.corners)):
+                    start = hex_tile.corners[i]
+                    end = hex_tile.corners[(i + 1) % len(hex_tile.corners)]
+                    line = arcade.shape_list.create_line(
+                        start[0], start[1], end[0], end[1],
+                        outline_color, line_width
+                    )
+                    self.hex_draw_list.append(line)
+
+    def on_update(self, delta_time):
+        if self.paused or self.game_over:
+            return
+
+        self.world_camera.position = arcade.math.lerp_2d(
+            self.world_camera.position,
+            (self.target_camera_x, self.target_camera_y),
+            CAMERA_LERP,
+        )
+
+        self.handle_camera_keys(delta_time)
+
+        current_time = time.time()
+        if current_time - self.last_visible_update > self.visible_update_interval:
+            self.visible_tiles = self.get_visible_tiles()
+            self.update_draw_list()
+            self.last_visible_update = current_time
+
+    def handle_camera_keys(self, delta_time):
+        move_distance = MOVE_SPEED * 60 * delta_time
+        if arcade.key.LEFT in self.keys_pressed:
+            self.target_camera_x -= move_distance
+        if arcade.key.RIGHT in self.keys_pressed:
+            self.target_camera_x += move_distance
+        if arcade.key.UP in self.keys_pressed:
+            self.target_camera_y += move_distance
+        if arcade.key.DOWN in self.keys_pressed:
+            self.target_camera_y -= move_distance
+
+    def on_mouse_press(self, x, y, button, modifiers):
+        world_x, world_y = self.screen_to_world(x, y)
+
+        if button == arcade.MOUSE_BUTTON_RIGHT:
+            self.is_dragging = True
+            self.drag_start_x = x
+            self.drag_start_y = y
+            self.drag_start_camera_x, self.drag_start_camera_y = self.target_camera_x, self.target_camera_y
+        elif button == arcade.MOUSE_BUTTON_LEFT:
+            self.selected_tile = self.get_tile_at(world_x, world_y)
+            if self.selected_tile:
+                self.last_visible_update = 0
+
+    def on_mouse_release(self, x, y, button, modifiers):
+        if button == arcade.MOUSE_BUTTON_RIGHT:
+            self.is_dragging = False
+
+    def on_mouse_drag(self, x, y, dx, dy, buttons, modifiers):
+        if arcade.MOUSE_BUTTON_RIGHT & buttons and self.is_dragging:
+            self.target_camera_x = self.drag_start_camera_x - (x - self.drag_start_x) / self.world_camera.zoom
+            self.target_camera_y = self.drag_start_camera_y - (y - self.drag_start_y) / self.world_camera.zoom
+
+    def on_mouse_motion(self, x, y, dx, dy):
+        world_x, world_y = self.screen_to_world(x, y)
+        old_hover = self.hovered_tile
+        self.hovered_tile = self.get_tile_at(world_x, world_y)
+        if old_hover != self.hovered_tile:
+            self.last_visible_update = 0
+
+    def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
+        new_zoom = self.world_camera.zoom + scroll_y * ZOOM_SPEED
+        self.world_camera.zoom = max(MIN_ZOOM, min(MAX_ZOOM, new_zoom))
+
+    def screen_to_world(self, screen_x, screen_y):
+        camera_x, camera_y = self.world_camera.position
+        zoom = self.world_camera.zoom
+        world_x = camera_x + (screen_x - self.window.width / 2) / zoom
+        world_y = camera_y + (screen_y - self.window.height / 2) / zoom
+        return world_x, world_y
+
+    def get_tile_at(self, x, y):
+        for tile in self.visible_tiles:
+            if tile.contains_point(x, y):
+                return tile
+        for tile in self.hex_grid:
+            if tile.contains_point(x, y):
+                return tile
+        return None
+
+    def on_key_press(self, key, modifiers):
+        self.keys_pressed.add(key)
+
+        if key == arcade.key.EQUAL or key == arcade.key.PLUS:
+            self.world_camera.zoom = min(MAX_ZOOM, self.world_camera.zoom + ZOOM_SPEED)
+        elif key == arcade.key.MINUS:
+            self.world_camera.zoom = max(MIN_ZOOM, self.world_camera.zoom - ZOOM_SPEED)
+        elif key == arcade.key.R:
+            self.world_seed = random.randint(0, 999999)
+            self.world_generator = WorldGenerator(self.grid_width, self.grid_height, self.world_seed)
+            self.hex_grid = []
+            self.create_hex_grid()
+            self.last_visible_update = 0
+        elif key == arcade.key.F:  # Вырубка леса на выбранном тайле
+            if self.selected_tile:
+                if self.selected_tile.clear_forest():
+                    print(f"Лес вырублен на ({self.selected_tile.q}, {self.selected_tile.r})")
+                    self.last_visible_update = 0
+        elif key == arcade.key.I:  # Строительство завода
+            if self.selected_tile:
+                if self.selected_tile.build_industry():
+                    print(f"Завод построен на ({self.selected_tile.q}, {self.selected_tile.r})")
+                    self.last_visible_update = 0
+
+    def on_key_release(self, key, modifiers):
+        if key in self.keys_pressed:
+            self.keys_pressed.remove(key)
+
+
+def main():
+    window = arcade.Window(1400, 900, "HOI 5 - Генерация мира")
+    start_view = Game()
+    window.show_view(start_view)
+    arcade.run()
+
+
+if __name__ == "__main__":
+    main()

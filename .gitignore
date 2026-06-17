@@ -1,0 +1,27 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build outputs
+build/
+dist/
+*.spec
+
+# Logs and local runtime files
+*.log
+*.tmp
+
+# IDE/editor settings
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
