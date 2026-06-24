@@ -131,6 +131,7 @@ class Dropdown:
         return None
 
     def draw(self, is_open=False):
+        list_width = self.width
         arcade.draw_text(self.label, self.x, self.y + self.height + 8, (225, 232, 240), 16)
         arcade.draw_lbwh_rectangle_filled(self.x, self.y, self.width, self.height, (42, 55, 72))
         arcade.draw_lbwh_rectangle_outline(self.x, self.y, self.width, self.height, (100, 126, 155), 2)
@@ -148,6 +149,11 @@ class Dropdown:
         if is_open:
             self.clamp_scroll()
             opens_up = self.opens_up()
+            list_height = self.height * self.visible_count()
+            list_y = self.y + self.height if opens_up else self.y - list_height
+            arcade.draw_lbwh_rectangle_filled(self.x, list_y, list_width, list_height, (31, 41, 53))
+            arcade.draw_lbwh_rectangle_outline(self.x, list_y, list_width, list_height, (80, 102, 128), 2)
+
             for visible_index in range(self.visible_count()):
                 index = self.scroll_offset + visible_index
                 option = self.options[index]
@@ -161,15 +167,14 @@ class Dropdown:
                     fill = (63, 86, 116)
                 else:
                     fill = (31, 41, 53)
-                arcade.draw_lbwh_rectangle_filled(self.x, option_y, self.width, self.height, fill)
-                arcade.draw_lbwh_rectangle_outline(self.x, option_y, self.width, self.height, (80, 102, 128), 1)
+                arcade.draw_lbwh_rectangle_filled(self.x + 1, option_y, list_width - 2, self.height, fill)
+                if visible_index > 0:
+                    arcade.draw_line(self.x, option_y, self.x + list_width, option_y, (80, 102, 128), 1)
                 arcade.draw_text(option, self.x + 14, option_y + self.height / 2, (225, 232, 240), 16,
                                  anchor_y="center")
 
             if self.max_scroll_offset() > 0:
-                list_height = self.height * self.visible_count()
-                list_y = self.y + self.height if opens_up else self.y - list_height
-                track_x = self.x + self.width - 7
+                track_x = self.x + list_width - 7
                 thumb_height = max(18, list_height * self.visible_count() / len(self.options))
                 scroll_range = max(1, self.max_scroll_offset())
                 thumb_space = list_height - thumb_height

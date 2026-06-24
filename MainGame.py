@@ -5,11 +5,11 @@ import time
 from perlin_noise import PerlinNoise
 from PIL import Image, ImageDraw
 from pyglet.graphics import Batch
-import matplotlib.pyplot as plt
 from Constants import *
 from HexTile import HexTile
 
-arcade.enable_timings()
+OVERVIEW_LOD_ZOOM = 0.2
+OVERVIEW_TEXTURE_MAX_SIZE = 1024
 
 
 
@@ -204,6 +204,7 @@ class Game(arcade.View):
         self.map_size = map_size or WORLD_SIZE
         self.keys_pressed = set()
         self.hex_grid = []
+        self.hex_lookup = {}
         self.hex_draw_list = arcade.shape_list.ShapeElementList()
         self.selected_tile = None
         self.hovered_tile = None
@@ -220,11 +221,18 @@ class Game(arcade.View):
         self.last_visible_update = 0
         self.last_mouse_check = 0
         self.visible_update_interval = 0.1
+        self.map_bounds = (0, 0, 0, 0)
+        self.map_overview_sprite = None
+        self.map_overview_sprite_list = arcade.SpriteList()
+        self.fps = 0
+        self.fps_frame_count = 0
+        self.fps_timer = 0
         self.world_generator = None
         self.world_seed = random.randint(0, 999999)
         self.selection_border = None
         self.selection_border_sprite_list = arcade.SpriteList()
         self.batch = Batch()
+        self.debug_text = arcade.Text("", 10, 30, arcade.color.YELLOW, 12)
 
         self.setup()
 
@@ -233,23 +241,26 @@ class Game(arcade.View):
         self.grid_height = self.map_size
         self.world_generator = WorldGenerator(self.grid_width, self.grid_height, self.world_seed)
         self.create_hex_grid()
+        self.update_map_bounds()
+        self.create_map_overview()
         self.selection_border = arcade.Sprite(create_hex_border_texture())
         self.selection_border_sprite_list.append(self.selection_border)
         self.selection_border.visible = False
-        center_x = (self.grid_width * HEX_WID) / 2
-        center_y = (self.grid_height * HEX_HGT * 0.75) / 2
-        self.world_camera.position = (center_x, center_y)
+        min_x, min_y, max_x, max_y = self.map_bounds
+        center_x = (min_x + max_x) / 2
+        center_y = (min_y + max_y) / 2
+        self.world_camera.position = self.clamp_camera_position(center_x, center_y)
         self.target_camera_x, self.target_camera_y = self.world_camera.position
 
     def create_hex_grid(self):
-        x_offset = 100
-        y_offset = 100
+        self.x_offset = 100
+        self.y_offset = 100
         hex_texture = create_hex_texture()
         # landscale = [[0 for i in range(self.grid_width)] for i in range(self.grid_height)]
         for q in range(self.grid_width):
             for r in range(self.grid_height):
-                x = x_offset + q * HEX_WID + (r % 2) * HEX_WID / 2
-                y = y_offset + r * HEX_HGT * 0.75
+                x = self.x_offset + q * HEX_WID + (r % 2) * HEX_WID / 2
+                y = self.y_offset + r * HEX_HGT * 0.75
                 elevation = self.world_generator.generate_elevation(q, r)
                 ridge = self.world_generator.generate_ridges(q, r)
                 moisture = self.world_generator.generate_moisture(q, r, elevation)
@@ -262,9 +273,68 @@ class Game(arcade.View):
                         hex_tile.terrain_type = 'lake'
                         hex_tile.elevation = WATER_LEVEL - 0.02
                 self.hex_grid.append(hex_tile)
+                self.hex_lookup[(q, r)] = hex_tile
         # plt.imshow(landscale)
         # plt.show()
         print(f"Создано {len(self.hex_grid)} тайлов")
+
+    def update_map_bounds(self):
+        min_x = min(tile.bounding_box[0] for tile in self.hex_grid)
+        min_y = min(tile.bounding_box[1] for tile in self.hex_grid)
+        max_x = max(tile.bounding_box[2] for tile in self.hex_grid)
+        max_y = max(tile.bounding_box[3] for tile in self.hex_grid)
+        self.map_bounds = (min_x, min_y, max_x, max_y)
+
+    def create_map_overview(self):
+        min_x, min_y, max_x, max_y = self.map_bounds
+        world_width = max_x - min_x
+        world_height = max_y - min_y
+        scale = min(
+            OVERVIEW_TEXTURE_MAX_SIZE / world_width,
+            OVERVIEW_TEXTURE_MAX_SIZE / world_height,
+            1.0,
+        )
+        texture_width = max(1, int(world_width * scale))
+        texture_height = max(1, int(world_height * scale))
+        image = Image.new('RGBA', (texture_width, texture_height), (13, 18, 24, 255))
+        draw = ImageDraw.Draw(image)
+
+        for tile in self.hex_grid:
+            points = [
+                (
+                    int((corner_x - min_x) * scale),
+                    int((max_y - corner_y) * scale),
+                )
+                for corner_x, corner_y in tile.corners
+            ]
+            draw.polygon(points, fill=(*tile.get_color(), 255))
+
+        texture = arcade.Texture(
+            name=f"map_overview_{self.world_seed}_{self.grid_width}x{self.grid_height}",
+            image=image,
+        )
+        self.map_overview_sprite = arcade.Sprite(texture)
+        self.map_overview_sprite.center_x = min_x + world_width / 2
+        self.map_overview_sprite.center_y = min_y + world_height / 2
+        self.map_overview_sprite.width = world_width
+        self.map_overview_sprite.height = world_height
+        self.map_overview_sprite_list.clear()
+        self.map_overview_sprite_list.append(self.map_overview_sprite)
+
+    def clamp_camera_position(self, x, y):
+        min_x, min_y, max_x, max_y = self.map_bounds
+        clamped_x = max(min_x, min(max_x, x))
+        clamped_y = max(min_y, min(max_y, y))
+        return clamped_x, clamped_y
+
+    def use_overview_lod(self):
+        return self.map_overview_sprite is not None and self.world_camera.zoom <= OVERVIEW_LOD_ZOOM
+
+    def clamp_target_camera(self):
+        self.target_camera_x, self.target_camera_y = self.clamp_camera_position(
+            self.target_camera_x,
+            self.target_camera_y,
+        )
 
     def get_visible_tiles(self):
         camera_x, camera_y = self.world_camera.position
@@ -286,15 +356,18 @@ class Game(arcade.View):
         self.clear()
         start_time = time.time()
         self.world_camera.use()
-        self.visible_tiles.draw()
+        if self.use_overview_lod():
+            self.map_overview_sprite_list.draw()
+        else:
+            self.visible_tiles.draw()
         if self.selection_border.visible:
             self.selection_border_sprite_list.draw()
         self.gui_camera.use()
         self.draw_gui()
         draw_time = (time.time() - start_time) * 1000
-        fps = arcade.get_fps(frame_count=60)
-        debug_text = f"FPS: {fps:.0f} | Draw: {draw_time:.1f}ms | Tiles: {len(self.visible_tiles)} | Seed: {self.world_seed}"
-        arcade.draw_text(debug_text, 10, 30, arcade.color.YELLOW, 12)
+        draw_mode = "Overview" if self.use_overview_lod() else "Tiles"
+        self.debug_text.text = f"FPS: {self.fps:.0f} | Draw: {draw_time:.1f}ms | Mode: {draw_mode} | Tiles: {len(self.visible_tiles)} | Seed: {self.world_seed}"
+        self.debug_text.draw()
 
     def draw_gui(self):
         if self.selected_tile:
@@ -317,6 +390,12 @@ class Game(arcade.View):
                 res_text = f"Ресурсы: {', '.join([f"{i[0]}, глубина: {i[1]}, масса {i[2]}" for i in self.selected_tile.resources])}"
                 arcade.draw_text(res_text, 10, y_pos - 175, arcade.color.YELLOW, 14)
 
+    def on_resize(self, width, height):
+        super().on_resize(width, height)
+        self.world_camera.position = self.clamp_camera_position(*self.world_camera.position)
+        self.target_camera_x, self.target_camera_y = self.world_camera.position
+        self.last_visible_update = 0
+
     def update_draw_list(self):
         """Обновление списка отрисовки"""
         for tile in self.visible_tiles:
@@ -338,18 +417,30 @@ class Game(arcade.View):
         if self.paused or self.game_over:
             return
 
-        self.world_camera.position = arcade.math.lerp_2d(
+        self.fps_frame_count += 1
+        self.fps_timer += delta_time
+        if self.fps_timer >= 0.5:
+            self.fps = self.fps_frame_count / self.fps_timer
+            self.fps_frame_count = 0
+            self.fps_timer = 0
+
+        self.handle_camera_keys(delta_time)
+        self.clamp_target_camera()
+
+        camera_x, camera_y = arcade.math.lerp_2d(
             self.world_camera.position,
             (self.target_camera_x, self.target_camera_y),
             CAMERA_LERP,
         )
-
-        self.handle_camera_keys(delta_time)
+        self.world_camera.position = self.clamp_camera_position(camera_x, camera_y)
 
         current_time = time.time()
         if current_time - self.last_visible_update > self.visible_update_interval:
-            self.get_visible_tiles()
-            self.update_draw_list()
+            if self.use_overview_lod():
+                self.visible_tiles.clear()
+            else:
+                self.get_visible_tiles()
+                self.update_draw_list()
             self.last_visible_update = current_time
 
     def handle_camera_keys(self, delta_time):
@@ -386,8 +477,13 @@ class Game(arcade.View):
         if arcade.MOUSE_BUTTON_RIGHT & buttons and self.is_dragging:
             self.target_camera_x = self.drag_start_camera_x - (x - self.drag_start_x) / self.world_camera.zoom
             self.target_camera_y = self.drag_start_camera_y - (y - self.drag_start_y) / self.world_camera.zoom
+            self.clamp_target_camera()
 
     def on_mouse_motion(self, x, y, dx, dy):
+        if self.use_overview_lod():
+            self.hovered_tile = None
+            return
+
         current_time = time.time()
         if current_time - self.last_mouse_check > self.visible_update_interval * 0.25:
             world_x, world_y = self.screen_to_world(x, y)
@@ -405,6 +501,7 @@ class Game(arcade.View):
 
         camera_x = world_x - (x - self.window.width / 2) / new_zoom
         camera_y = world_y - (y - self.window.height / 2) / new_zoom
+        camera_x, camera_y = self.clamp_camera_position(camera_x, camera_y)
         self.world_camera.position = (camera_x, camera_y)
         self.target_camera_x = camera_x
         self.target_camera_y = camera_y
@@ -418,10 +515,24 @@ class Game(arcade.View):
         return world_x, world_y
 
     def get_tile_at(self, x, y):
+        if self.use_overview_lod():
+            return self.get_tile_at_world_position(x, y)
+
         sprites = arcade.get_sprites_at_point((x, y), self.visible_tiles)
         for sprite in sprites:
             if isinstance(sprite, HexTile):
                 return sprite
+        return None
+
+    def get_tile_at_world_position(self, x, y):
+        approx_r = round((y - self.y_offset) / (HEX_HGT * 0.75))
+        approx_q = round((x - self.x_offset - (approx_r % 2) * HEX_WID / 2) / HEX_WID)
+
+        for q in range(approx_q - 1, approx_q + 2):
+            for r in range(approx_r - 1, approx_r + 2):
+                tile = self.hex_lookup.get((q, r))
+                if tile and tile.contains_point(x, y):
+                    return tile
         return None
 
     def on_key_press(self, key, modifiers):
@@ -431,6 +542,9 @@ class Game(arcade.View):
             self.world_camera.zoom = min(MAX_ZOOM, self.world_camera.zoom + ZOOM_SPEED)
         elif key == arcade.key.MINUS:
             self.world_camera.zoom = max(MIN_ZOOM, self.world_camera.zoom - ZOOM_SPEED)
+        self.world_camera.position = self.clamp_camera_position(*self.world_camera.position)
+        self.target_camera_x, self.target_camera_y = self.world_camera.position
+        self.last_visible_update = 0
 
     def on_key_release(self, key, modifiers):
         if key in self.keys_pressed:
