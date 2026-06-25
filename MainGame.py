@@ -9,9 +9,11 @@ from PIL import Image, ImageDraw
 from pyglet.graphics import Batch
 from Constants import *
 from HexTile import HexTile
+from MapData import MapTileData
 
 OVERVIEW_LOD_ZOOM = 0.2
 OVERVIEW_TEXTURE_MAX_SIZE = 1024
+RESOLUTIONS = [(1024, 768), (1200, 800), (1366, 768), (1600, 900), (1920, 1080)]
 SIMULATION_START_TIME = datetime(2000, 1, 1, 0)
 SIMULATION_REAL_SECONDS_PER_TICK = 0.25
 SIMULATION_HOURS_PER_TICK = [1, 2, 4, 8, 24]
@@ -47,6 +49,133 @@ class PauseButton:
             anchor_x="center",
             anchor_y="center",
         )
+
+
+class PauseSlider:
+    def __init__(self, label, x, y, width, value, on_change):
+        self.label = label
+        self.x = x
+        self.y = y
+        self.width = width
+        self.value = value
+        self.on_change = on_change
+        self.height = 28
+
+    def contains(self, x, y):
+        return self.x <= x <= self.x + self.width and self.y <= y <= self.y + self.height
+
+    def set_from_mouse(self, x):
+        self.value = max(0.0, min(1.0, (x - self.x) / self.width))
+        self.on_change(self.value)
+
+    def draw(self):
+        arcade.draw_text(self.label, self.x, self.y + 42, (225, 232, 240), 16)
+        arcade.draw_text(
+            f"{int(self.value * 100)}%",
+            self.x + self.width,
+            self.y + 42,
+            (180, 192, 205),
+            16,
+            anchor_x="right",
+        )
+        arcade.draw_lbwh_rectangle_filled(self.x, self.y + 11, self.width, 6, (55, 66, 78))
+        arcade.draw_lbwh_rectangle_filled(self.x, self.y + 11, self.width * self.value, 6, (109, 155, 210))
+        arcade.draw_circle_filled(self.x + self.width * self.value, self.y + 14, 10, (230, 238, 248))
+
+
+class PauseDropdown:
+    def __init__(self, key, label, options, selected_index, x, y, width, height, on_select):
+        self.key = key
+        self.label = label
+        self.options = options
+        self.selected_index = selected_index
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.on_select = on_select
+        self.hovered_index = None
+        self.scroll_offset = 0
+        self.max_visible_options = 5
+
+    def contains_header(self, x, y):
+        return self.x <= x <= self.x + self.width and self.y <= y <= self.y + self.height
+
+    def visible_count(self):
+        return min(len(self.options), self.max_visible_options)
+
+    def max_scroll_offset(self):
+        return max(0, len(self.options) - self.visible_count())
+
+    def clamp_scroll(self):
+        self.scroll_offset = max(0, min(self.scroll_offset, self.max_scroll_offset()))
+
+    def scroll(self, amount):
+        self.scroll_offset += int(amount)
+        self.clamp_scroll()
+
+    def option_at(self, x, y):
+        if not (self.x <= x <= self.x + self.width):
+            return None
+
+        self.clamp_scroll()
+        list_height = self.height * self.visible_count()
+        list_y = self.y - list_height
+        if not (list_y <= y <= list_y + list_height):
+            return None
+
+        visible_index = int((list_y + list_height - y) // self.height)
+        visible_index = max(0, min(self.visible_count() - 1, visible_index))
+        return self.scroll_offset + visible_index
+
+    def draw(self, is_open=False):
+        arcade.draw_text(self.label, self.x, self.y + self.height + 8, (225, 232, 240), 16)
+        arcade.draw_lbwh_rectangle_filled(self.x, self.y, self.width, self.height, (42, 55, 72))
+        arcade.draw_lbwh_rectangle_outline(self.x, self.y, self.width, self.height, (100, 126, 155), 2)
+        arcade.draw_text(
+            self.options[self.selected_index],
+            self.x + 14,
+            self.y + self.height / 2,
+            (225, 232, 240),
+            17,
+            anchor_y="center",
+        )
+        arcade.draw_text("v", self.x + self.width - 18, self.y + self.height / 2, (180, 192, 205), 16,
+                         anchor_x="center", anchor_y="center")
+
+        if not is_open:
+            return
+
+        self.clamp_scroll()
+        list_height = self.height * self.visible_count()
+        list_y = self.y - list_height
+        arcade.draw_lbwh_rectangle_filled(self.x, list_y, self.width, list_height, (31, 41, 53))
+        arcade.draw_lbwh_rectangle_outline(self.x, list_y, self.width, list_height, (80, 102, 128), 2)
+
+        for visible_index in range(self.visible_count()):
+            index = self.scroll_offset + visible_index
+            option = self.options[index]
+            option_y = self.y - self.height * (visible_index + 1)
+            if index == self.hovered_index:
+                fill = (54, 72, 94)
+            elif index == self.selected_index:
+                fill = (63, 86, 116)
+            else:
+                fill = (31, 41, 53)
+            arcade.draw_lbwh_rectangle_filled(self.x + 1, option_y, self.width - 2, self.height, fill)
+            if visible_index > 0:
+                arcade.draw_line(self.x, option_y, self.x + self.width, option_y, (80, 102, 128), 1)
+            arcade.draw_text(option, self.x + 14, option_y + self.height / 2, (225, 232, 240), 16,
+                             anchor_y="center")
+
+        if self.max_scroll_offset() > 0:
+            track_x = self.x + self.width - 7
+            thumb_height = max(18, list_height * self.visible_count() / len(self.options))
+            scroll_range = max(1, self.max_scroll_offset())
+            thumb_space = list_height - thumb_height
+            thumb_y = list_y + thumb_space * (1 - self.scroll_offset / scroll_range)
+            arcade.draw_lbwh_rectangle_filled(track_x, list_y + 4, 3, list_height - 8, (64, 77, 92))
+            arcade.draw_lbwh_rectangle_filled(track_x - 2, thumb_y + 4, 7, thumb_height - 8, (150, 170, 194))
 
 
 class HudButton:
@@ -307,15 +436,53 @@ class WorldGenerator:
 
         return max(0.1, min(1.0, moisture))
 
-    def is_lake(self, x, y):
+    def resource_seed_for_tile(self, q, r):
+        return (self.seed * 1_000_003 + q * 9_176 + r * 131_071) & 0xFFFFFFFF
+
+    def generate_tile_data(self, q, r, x, y):
+        base_elevation = self.generate_elevation(q, r)
+        ridge = self.generate_ridges(q, r)
+        ridge_lift = ridge * MOUNTAIN_HEIGHT * 0.35
+        if base_elevation < WATER_LEVEL:
+            ridge_lift *= 0.35
+        elevation = min(1.0, max(0.0, base_elevation + ridge_lift))
+
+        moisture = self.generate_moisture(q, r, elevation)
+        temperature = self.generate_temperature(q, r, elevation)
+        terrain_type = None
+
+        if elevation > WATER_LEVEL and self.is_lake(q, r, elevation, temperature):
+            terrain_type = "lake"
+            elevation = WATER_LEVEL - 0.02
+            moisture = self.generate_moisture(q, r, elevation)
+            temperature = self.generate_temperature(q, r, elevation)
+
+        tile_data = MapTileData(
+            q=q,
+            r=r,
+            x=x,
+            y=y,
+            elevation=elevation,
+            moisture=moisture,
+            temperature=temperature,
+            ridge_value=ridge,
+            terrain_type=terrain_type,
+        )
+        resource_rng = random.Random(self.resource_seed_for_tile(q, r))
+        tile_data.finalize_generation(resource_rng)
+        return tile_data
+
+    def is_lake(self, x, y, elevation=None, temperature=None):
         """Определяет, является ли тайл озером"""
-        elevation = self.generate_elevation(x, y)
+        if elevation is None:
+            elevation = self.generate_elevation(x, y)
         # Озера только на суше
         if elevation < WATER_LEVEL:
             return False
         # Озера только в не-холодных зонах
-        temp = self.generate_temperature(x, y, elevation)
-        if temp < 0.2:
+        if temperature is None:
+            temperature = self.generate_temperature(x, y, elevation)
+        if temperature < 0.2:
             return False
         # Шум для определения озерных котловин
         nx = x / self.width * 3
@@ -382,6 +549,17 @@ class Game(arcade.View):
         self.pause_buttons = []
         self.hovered_pause_button = None
         self.pause_message = ""
+        self.pause_screen = "menu"
+        self.pause_sliders = []
+        self.pause_dropdowns = []
+        self.active_pause_slider = None
+        self.open_pause_dropdown = None
+        self.sound_volume = 0.8
+        self.music_volume = 0.6
+        self.fullscreen = False
+        self.resolution_index = self.get_current_resolution_index()
+        self.pending_fullscreen = self.fullscreen
+        self.pending_resolution_index = self.resolution_index
 
         self.setup()
 
@@ -418,21 +596,80 @@ class Game(arcade.View):
             HudButton("+", panel_x + 92, panel_y + 10, 28, 24, self.increase_time_speed),
         ]
 
+    def get_current_resolution_index(self):
+        if not self.window:
+            return 1
+
+        current_size = (self.window.width, self.window.height)
+        if current_size in RESOLUTIONS:
+            return RESOLUTIONS.index(current_size)
+
+        return min(
+            range(len(RESOLUTIONS)),
+            key=lambda index: abs(RESOLUTIONS[index][0] - current_size[0]) + abs(RESOLUTIONS[index][1] - current_size[1]),
+        )
+
     def rebuild_pause_menu(self):
         if not self.window:
+            return
+
+        self.pause_buttons = []
+        self.pause_sliders = []
+        self.pause_dropdowns = []
+        if self.pause_screen == "settings":
+            self.rebuild_pause_settings()
             return
 
         button_width = 320
         button_height = 44
         gap = 56
         x = self.window.width / 2 - button_width / 2
-        y = self.window.height / 2 + 70
+        y = self.window.height / 2 + 98
         self.pause_buttons = [
             PauseButton("Вернуться в игру", x, y, button_width, button_height, self.resume_game),
             PauseButton("Сохранить", x, y - gap, button_width, button_height, self.save_game),
             PauseButton("Загрузить", x, y - gap * 2, button_width, button_height, self.load_game),
             PauseButton("Выйти в главное меню", x, y - gap * 3, button_width, button_height, self.exit_to_main_menu),
             PauseButton("Выйти на рабочий стол", x, y - gap * 4, button_width, button_height, self.exit_to_desktop),
+        ]
+        self.pause_buttons.insert(
+            3,
+            PauseButton("Настройки", x, y - gap * 3, button_width, button_height, self.open_pause_settings),
+        )
+        self.pause_buttons[4].y = y - gap * 4
+        self.pause_buttons[5].y = y - gap * 5
+
+    def rebuild_pause_settings(self):
+        panel_x = self.window.width / 2 - 230
+        top = self.window.height / 2 + 135
+        self.pause_sliders = [
+            PauseSlider("Громкость звука", panel_x, top - 70, 460, self.sound_volume, self.set_sound_volume),
+            PauseSlider("Громкость музыки", panel_x, top - 140, 460, self.music_volume, self.set_music_volume),
+        ]
+        self.pause_buttons = [
+            PauseButton(
+                f"Полный экран: {'Вкл' if self.pending_fullscreen else 'Выкл'}",
+                panel_x,
+                top - 210,
+                220,
+                42,
+                self.toggle_pending_fullscreen,
+            ),
+            PauseButton("Применить", panel_x, top - 285, 220, 44, self.apply_pause_settings),
+            PauseButton("Назад", panel_x + 240, top - 285, 220, 44, self.close_pause_settings),
+        ]
+        self.pause_dropdowns = [
+            PauseDropdown(
+                "resolution",
+                "Разрешение",
+                [f"{width}x{height}" for width, height in RESOLUTIONS],
+                self.pending_resolution_index,
+                panel_x + 240,
+                top - 210,
+                220,
+                42,
+                self.set_pending_resolution,
+            )
         ]
 
     def create_hex_grid(self):
@@ -444,17 +681,9 @@ class Game(arcade.View):
             for r in range(self.grid_height):
                 x = self.x_offset + q * HEX_WID + (r % 2) * HEX_WID / 2
                 y = self.y_offset + r * HEX_HGT * 0.75
-                elevation = self.world_generator.generate_elevation(q, r)
-                ridge = self.world_generator.generate_ridges(q, r)
-                moisture = self.world_generator.generate_moisture(q, r, elevation)
-                temperature = self.world_generator.generate_temperature(q, r, elevation)
-                hex_tile = HexTile(q, r, x, y, elevation, moisture, temperature, ridge, hex_texture)
-                # landscale[q][r] = moisture
-                if hex_tile.elevation > WATER_LEVEL:
-                    is_lake = self.world_generator.is_lake(q, r)
-                    if is_lake:
-                        hex_tile.terrain_type = 'lake'
-                        hex_tile.elevation = WATER_LEVEL - 0.02
+                tile_data = self.world_generator.generate_tile_data(q, r, x, y)
+                hex_tile = HexTile(hex_texture=hex_texture, tile_data=tile_data)
+                # landscale[q][r] = tile_data.moisture
                 self.hex_grid.append(hex_tile)
                 self.hex_lookup[(q, r)] = hex_tile
         # plt.imshow(landscale)
@@ -536,6 +765,7 @@ class Game(arcade.View):
                 self.visible_tiles.append(tile)
 
     def on_draw(self):
+        self.sync_cameras_to_window()
         self.clear()
         start_time = time.time()
         self.world_camera.use()
@@ -554,6 +784,25 @@ class Game(arcade.View):
         draw_mode = "Overview" if self.use_overview_lod() else "Tiles"
         self.debug_text.text = f"FPS: {self.fps:.0f} | Draw: {draw_time:.1f}ms | Mode: {draw_mode} | Tiles: {len(self.visible_tiles)} | Seed: {self.world_seed}"
         self.debug_text.draw()
+
+    def refresh_visible_tiles(self):
+        if not self.window or not self.hex_grid:
+            return
+
+        if self.use_overview_lod():
+            self.visible_tiles.clear()
+        else:
+            self.get_visible_tiles()
+            self.update_draw_list()
+        self.last_visible_update = time.time()
+
+    def sync_cameras_to_window(self):
+        if not self.window:
+            return
+
+        self.window.viewport = (0, 0, self.window.width, self.window.height)
+        self.world_camera.match_window(viewport=True, projection=True, position=False)
+        self.gui_camera.match_window(viewport=True, projection=True, position=True)
 
     def draw_time_hud(self):
         panel_x, panel_y, panel_width, panel_height = self.time_panel_rect
@@ -581,15 +830,15 @@ class Game(arcade.View):
             button.draw(button == self.hovered_time_button)
 
     def draw_pause_menu(self):
-        arcade.draw_lbwh_rectangle_filled(0, 0, self.window.width, self.window.height, (0, 0, 0, 150))
-        panel_width = 420
-        panel_height = 390
+        arcade.draw_lbwh_rectangle_filled(0, 0, self.window.width, self.window.height, (0, 0, 0, 185))
+        panel_width = 420 if self.pause_screen == "menu" else 540
+        panel_height = 440 if self.pause_screen == "menu" else 460
         panel_x = self.window.width / 2 - panel_width / 2
         panel_y = self.window.height / 2 - panel_height / 2
-        arcade.draw_lbwh_rectangle_filled(panel_x, panel_y, panel_width, panel_height, (20, 29, 38, 235))
+        arcade.draw_lbwh_rectangle_filled(panel_x, panel_y, panel_width, panel_height, (20, 29, 38))
         arcade.draw_lbwh_rectangle_outline(panel_x, panel_y, panel_width, panel_height, (100, 126, 155), 2)
         arcade.draw_text(
-            "Пауза",
+            "Настройки" if self.pause_screen == "settings" else "Пауза",
             self.window.width / 2,
             panel_y + panel_height - 45,
             arcade.color.WHITE,
@@ -599,6 +848,10 @@ class Game(arcade.View):
             bold=True,
         )
 
+        if self.pause_screen == "settings":
+            self.draw_pause_settings()
+            return
+
         for button in self.pause_buttons:
             button.draw(button == self.hovered_pause_button)
 
@@ -607,6 +860,31 @@ class Game(arcade.View):
                 self.pause_message,
                 self.window.width / 2,
                 panel_y + 24,
+                (220, 180, 90),
+                15,
+                anchor_x="center",
+                anchor_y="center",
+            )
+
+    def draw_pause_settings(self):
+        for slider in self.pause_sliders:
+            slider.draw()
+
+        for button in self.pause_buttons:
+            button.draw(button == self.hovered_pause_button)
+
+        for dropdown in self.pause_dropdowns:
+            if dropdown.key != self.open_pause_dropdown:
+                dropdown.draw(False)
+        for dropdown in self.pause_dropdowns:
+            if dropdown.key == self.open_pause_dropdown:
+                dropdown.draw(True)
+
+        if self.pause_message:
+            arcade.draw_text(
+                self.pause_message,
+                self.window.width / 2,
+                self.window.height / 2 - 185,
                 (220, 180, 90),
                 15,
                 anchor_x="center",
@@ -636,11 +914,12 @@ class Game(arcade.View):
 
     def on_resize(self, width, height):
         super().on_resize(width, height)
+        self.sync_cameras_to_window()
         self.world_camera.position = self.clamp_camera_position(*self.world_camera.position)
         self.target_camera_x, self.target_camera_y = self.world_camera.position
         self.rebuild_pause_menu()
         self.rebuild_time_hud()
-        self.last_visible_update = 0
+        self.refresh_visible_tiles()
 
     def toggle_time_pause(self):
         self.simulation_client.request_toggle_pause()
@@ -651,17 +930,71 @@ class Game(arcade.View):
     def decrease_time_speed(self):
         self.simulation_client.request_speed_change(-1)
 
+    def open_pause_settings(self):
+        self.pause_screen = "settings"
+        if not self.fullscreen:
+            self.resolution_index = self.get_current_resolution_index()
+        self.pending_fullscreen = self.fullscreen
+        self.pending_resolution_index = self.resolution_index
+        self.pause_message = ""
+        self.hovered_pause_button = None
+        self.open_pause_dropdown = None
+        self.rebuild_pause_menu()
+
+    def close_pause_settings(self):
+        self.pause_screen = "menu"
+        self.pause_message = ""
+        self.hovered_pause_button = None
+        self.active_pause_slider = None
+        self.open_pause_dropdown = None
+        self.rebuild_pause_menu()
+
+    def set_sound_volume(self, value):
+        self.sound_volume = value
+
+    def set_music_volume(self, value):
+        self.music_volume = value
+
+    def toggle_pending_fullscreen(self):
+        self.pending_fullscreen = not self.pending_fullscreen
+        self.rebuild_pause_menu()
+
+    def set_pending_resolution(self, index):
+        self.pending_resolution_index = index
+        self.rebuild_pause_menu()
+
+    def apply_pause_settings(self):
+        self.fullscreen = self.pending_fullscreen
+        self.resolution_index = self.pending_resolution_index
+        width, height = RESOLUTIONS[self.resolution_index]
+        self.window.set_fullscreen(self.fullscreen)
+        if not self.fullscreen:
+            self.window.set_size(width, height)
+        self.sync_cameras_to_window()
+        self.pause_message = "Настройки применены."
+        self.rebuild_pause_menu()
+        self.rebuild_time_hud()
+        self.refresh_visible_tiles()
+
     def toggle_pause_menu(self):
         self.paused = not self.paused
         self.pause_message = ""
         self.hovered_pause_button = None
+        self.active_pause_slider = None
+        self.open_pause_dropdown = None
+        if self.paused:
+            self.pause_screen = "menu"
+            self.rebuild_pause_menu()
         self.is_dragging = False
         self.keys_pressed.clear()
 
     def resume_game(self):
         self.paused = False
+        self.pause_screen = "menu"
         self.pause_message = ""
         self.hovered_pause_button = None
+        self.active_pause_slider = None
+        self.open_pause_dropdown = None
 
     def save_game(self):
         self.pause_message = "Сохранение пока не реализовано."
@@ -741,6 +1074,32 @@ class Game(arcade.View):
     def on_mouse_press(self, x, y, button, modifiers):
         if self.paused:
             if button == arcade.MOUSE_BUTTON_LEFT:
+                if self.pause_screen == "settings":
+                    for dropdown in self.pause_dropdowns:
+                        if dropdown.key == self.open_pause_dropdown:
+                            option_index = dropdown.option_at(x, y)
+                            if option_index is not None:
+                                self.open_pause_dropdown = None
+                                dropdown.hovered_index = None
+                                dropdown.on_select(option_index)
+                                return
+
+                    for dropdown in self.pause_dropdowns:
+                        if dropdown.contains_header(x, y):
+                            self.open_pause_dropdown = None if self.open_pause_dropdown == dropdown.key else dropdown.key
+                            dropdown.hovered_index = None
+                            return
+
+                    for slider in self.pause_sliders:
+                        if slider.contains(x, y):
+                            self.active_pause_slider = slider
+                            slider.set_from_mouse(x)
+                            return
+
+                    self.open_pause_dropdown = None
+                    for dropdown in self.pause_dropdowns:
+                        dropdown.hovered_index = None
+
                 for pause_button in self.pause_buttons:
                     if pause_button.contains(x, y):
                         pause_button.action()
@@ -767,11 +1126,15 @@ class Game(arcade.View):
                 self.last_visible_update = 0
 
     def on_mouse_release(self, x, y, button, modifiers):
+        if button == arcade.MOUSE_BUTTON_LEFT:
+            self.active_pause_slider = None
         if button == arcade.MOUSE_BUTTON_RIGHT:
             self.is_dragging = False
 
     def on_mouse_drag(self, x, y, dx, dy, buttons, modifiers):
         if self.paused:
+            if self.active_pause_slider and buttons & arcade.MOUSE_BUTTON_LEFT:
+                self.active_pause_slider.set_from_mouse(x)
             return
 
         if arcade.MOUSE_BUTTON_RIGHT & buttons and self.is_dragging:
@@ -781,6 +1144,13 @@ class Game(arcade.View):
 
     def on_mouse_motion(self, x, y, dx, dy):
         if self.paused:
+            if self.pause_screen == "settings" and self.open_pause_dropdown:
+                for dropdown in self.pause_dropdowns:
+                    if dropdown.key == self.open_pause_dropdown:
+                        dropdown.hovered_index = dropdown.option_at(x, y)
+                        break
+                return
+
             self.hovered_pause_button = None
             for pause_button in self.pause_buttons:
                 if pause_button.contains(x, y):
@@ -806,6 +1176,12 @@ class Game(arcade.View):
 
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
         if self.paused:
+            if self.pause_screen == "settings" and self.open_pause_dropdown:
+                for dropdown in self.pause_dropdowns:
+                    if dropdown.key == self.open_pause_dropdown:
+                        dropdown.scroll(-scroll_y)
+                        dropdown.hovered_index = dropdown.option_at(x, y)
+                        return
             return
 
         old_zoom = self.world_camera.zoom
@@ -854,6 +1230,14 @@ class Game(arcade.View):
 
     def on_key_press(self, key, modifiers):
         if key == arcade.key.ESCAPE:
+            if self.paused and self.pause_screen == "settings":
+                if self.open_pause_dropdown:
+                    self.open_pause_dropdown = None
+                    for dropdown in self.pause_dropdowns:
+                        dropdown.hovered_index = None
+                else:
+                    self.close_pause_settings()
+                return
             self.toggle_pause_menu()
             return
 

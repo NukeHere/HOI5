@@ -4,8 +4,31 @@ from Constants import *
 
 
 class HexTile(arcade.Sprite):
-    def __init__(self, q, r, x, y, elevation, moisture, temperature, ridge_value=0, hex_texture=None):
+    def __init__(
+        self,
+        q=None,
+        r=None,
+        x=None,
+        y=None,
+        elevation=None,
+        moisture=None,
+        temperature=None,
+        ridge_value=0,
+        hex_texture=None,
+        tile_data=None,
+        resource_rng=None,
+    ):
         super().__init__(path_or_texture=hex_texture)
+        self.map_data = tile_data
+        if tile_data is not None:
+            q = tile_data.q
+            r = tile_data.r
+            x = tile_data.x
+            y = tile_data.y
+            elevation = tile_data.elevation
+            moisture = tile_data.moisture
+            temperature = tile_data.temperature
+            ridge_value = tile_data.ridge_value
         self.q = q
         self.r = r
         self.s = -q - r
@@ -23,10 +46,28 @@ class HexTile(arcade.Sprite):
         self.sand_cover = 0.0  # % покрытия песком
         self.snow_cover = 0.0  # % покрытия снегом
         # Инициализируем компоненты на основе параметров
-        self._init_components()
+        if tile_data is None:
+            self._init_components()
         # Определяем текущий биом на основе компонентов
-        self.terrain_type = self.determine_biome()
-        self.resources = self.generate_resources()
+        if tile_data is None:
+            self.terrain_type = self.determine_biome()
+        if tile_data is not None:
+            self.water_cover = tile_data.water_cover
+            self.tree_cover = tile_data.tree_cover
+            self.grass_cover = tile_data.grass_cover
+            self.rock_cover = tile_data.rock_cover
+            self.sand_cover = tile_data.sand_cover
+            self.snow_cover = tile_data.snow_cover
+            self.terrain_type = tile_data.terrain_type
+            self.resources = [list(resource) for resource in tile_data.resources]
+        else:
+            self.resources = self.generate_resources(resource_rng)
+        if tile_data is not None:
+            self.movement_cost = tile_data.movement_cost
+            self.passability = tile_data.passability
+        else:
+            self.movement_cost = self.calculate_movement_cost()
+            self.passability = 0.0 if self.movement_cost == float("inf") else 1.0 / self.movement_cost
         self.owner = None
         self.buildings = []  # Список построек
         # Предрассчитанные углы для отрисовки
@@ -34,6 +75,24 @@ class HexTile(arcade.Sprite):
         self.bounding_box = self._calculate_bounding_box()
         self.color = arcade.color.WHITE
         self.hex_texture = hex_texture
+
+    def calculate_movement_cost(self):
+        if self.terrain_type in ['deep_ocean', 'ocean']:
+            return float("inf")
+        if self.terrain_type in ['shallow_water', 'lake', 'river', 'swamp', 'bog', 'mangrove']:
+            return 3.0
+
+        cost = 1.0
+        cost += self.ridge_value * 1.5
+        cost += self.rock_cover * 1.2
+        cost += self.snow_cover * 0.5
+        if self.terrain_type == 'mountains':
+            cost += 1.5
+        elif self.terrain_type == 'snowy_mountains':
+            cost += 2.0
+        elif self.terrain_type == 'hills':
+            cost += 0.75
+        return max(1.0, cost)
 
     def _init_components(self):
         """Инициализирует компоненты на основе природных параметров"""
@@ -128,6 +187,13 @@ class HexTile(arcade.Sprite):
                 return 'bog'
 
         # Преобладающий компонент определяет биом
+        if self.ridge_value > 0.75 and self.temperature < 0.35:
+            return 'snowy_mountains'
+        if self.ridge_value > 0.7:
+            return 'mountains'
+        if self.ridge_value > 0.4:
+            return 'hills'
+
         components = [
             (self.rock_cover, 'rocky'),
             (self.sand_cover, 'sandy'),
@@ -193,6 +259,8 @@ class HexTile(arcade.Sprite):
             self.sand_cover *= factor
             self.snow_cover *= factor
         self.terrain_type = self.determine_biome()
+        self.movement_cost = self.calculate_movement_cost()
+        self.passability = 0.0 if self.movement_cost == float("inf") else 1.0 / self.movement_cost
 
     def _normalize_covers(self):
         """Нормализует сумму компонентов до 1 с защитой от отрицательных"""
@@ -309,7 +377,10 @@ class HexTile(arcade.Sprite):
                 color[i] = int(color[i])
         return tuple(color)
 
-    def generate_resources(self):
+    def generate_resources(self, rng=None):
+        rng = rng or globals()["random"]
+        # Keep legacy random.* calls deterministic when an RNG is passed in.
+        random = rng
         resources = []  # [ресурс, глубина, масса] пример ['coal', '0.2', '10000'] уголь, 200м под землей, 10000 тонн
         elevation_above_sea = self.elevation - WATER_LEVEL
         biome = self.terrain_type
