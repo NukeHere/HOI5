@@ -2,6 +2,8 @@ import arcade
 import random
 import math
 import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from perlin_noise import PerlinNoise
 from PIL import Image, ImageDraw
 from pyglet.graphics import Batch
@@ -10,6 +12,143 @@ from HexTile import HexTile
 
 OVERVIEW_LOD_ZOOM = 0.2
 OVERVIEW_TEXTURE_MAX_SIZE = 1024
+SIMULATION_START_TIME = datetime(2000, 1, 1, 0)
+SIMULATION_REAL_SECONDS_PER_TICK = 0.25
+SIMULATION_HOURS_PER_TICK = [1, 2, 4, 8, 24]
+MONTH_NAMES = [
+    "янв", "фев", "мар", "апр", "май", "июн",
+    "июл", "авг", "сен", "окт", "ноя", "дек",
+]
+
+
+class PauseButton:
+    def __init__(self, label, x, y, width, height, action):
+        self.label = label
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.action = action
+
+    def contains(self, x, y):
+        return self.x <= x <= self.x + self.width and self.y <= y <= self.y + self.height
+
+    def draw(self, hovered=False):
+        fill = (63, 86, 116) if hovered else (42, 55, 72)
+        border = (165, 195, 230) if hovered else (100, 126, 155)
+        arcade.draw_lbwh_rectangle_filled(self.x, self.y, self.width, self.height, fill)
+        arcade.draw_lbwh_rectangle_outline(self.x, self.y, self.width, self.height, border, 2)
+        arcade.draw_text(
+            self.label,
+            self.x + self.width / 2,
+            self.y + self.height / 2,
+            arcade.color.WHITE,
+            18,
+            anchor_x="center",
+            anchor_y="center",
+        )
+
+
+class HudButton:
+    def __init__(self, label, x, y, width, height, action):
+        self.label = label
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.action = action
+        self.text = arcade.Text(label, 0, 0, arcade.color.WHITE, 14, anchor_x="center", anchor_y="center")
+
+    def set_label(self, label):
+        self.label = label
+        self.text.text = label
+
+    def contains(self, x, y):
+        return self.x <= x <= self.x + self.width and self.y <= y <= self.y + self.height
+
+    def draw(self, hovered=False):
+        fill = (64, 82, 105) if hovered else (38, 48, 61)
+        border = (160, 186, 214) if hovered else (92, 112, 136)
+        arcade.draw_lbwh_rectangle_filled(self.x, self.y, self.width, self.height, fill)
+        arcade.draw_lbwh_rectangle_outline(self.x, self.y, self.width, self.height, border, 1)
+        self.text.x = self.x + self.width / 2
+        self.text.y = self.y + self.height / 2
+        self.text.draw()
+
+
+@dataclass
+class GameTimeSnapshot:
+    current_time: datetime
+    paused: bool
+    speed_level: int
+    hours_per_tick: int
+    tick_count: int
+
+
+class LocalSimulationServer:
+    def __init__(self):
+        self.current_time = SIMULATION_START_TIME
+        self.paused = True
+        self.speed_level = 1
+        self.tick_count = 0
+        self.accumulator = 0.0
+
+    @property
+    def hours_per_tick(self):
+        return SIMULATION_HOURS_PER_TICK[self.speed_level - 1]
+
+    def update(self, delta_time):
+        if self.paused:
+            return
+
+        self.accumulator += delta_time
+        ticks_to_process = min(16, int(self.accumulator / SIMULATION_REAL_SECONDS_PER_TICK))
+        if ticks_to_process <= 0:
+            return
+
+        self.accumulator -= ticks_to_process * SIMULATION_REAL_SECONDS_PER_TICK
+        self.current_time += timedelta(hours=self.hours_per_tick * ticks_to_process)
+        self.tick_count += ticks_to_process
+
+    def set_paused(self, paused):
+        self.paused = paused
+        if paused:
+            self.accumulator = 0.0
+
+    def toggle_pause(self):
+        self.set_paused(not self.paused)
+
+    def set_speed_level(self, speed_level):
+        self.speed_level = max(1, min(5, speed_level))
+
+    def change_speed(self, delta):
+        self.set_speed_level(self.speed_level + delta)
+
+    def snapshot(self):
+        return GameTimeSnapshot(
+            current_time=self.current_time,
+            paused=self.paused,
+            speed_level=self.speed_level,
+            hours_per_tick=self.hours_per_tick,
+            tick_count=self.tick_count,
+        )
+
+
+class LocalSimulationClient:
+    def __init__(self, server):
+        self.server = server
+        self.snapshot = server.snapshot()
+
+    def sync_from_server(self):
+        self.snapshot = self.server.snapshot()
+
+    def request_toggle_pause(self):
+        self.server.toggle_pause()
+        self.sync_from_server()
+
+    def request_speed_change(self, delta):
+        self.server.change_speed(delta)
+        self.sync_from_server()
 
 
 
@@ -233,6 +372,16 @@ class Game(arcade.View):
         self.selection_border_sprite_list = arcade.SpriteList()
         self.batch = Batch()
         self.debug_text = arcade.Text("", 10, 30, arcade.color.YELLOW, 12)
+        self.simulation_server = LocalSimulationServer()
+        self.simulation_client = LocalSimulationClient(self.simulation_server)
+        self.time_panel_rect = (0, 0, 0, 0)
+        self.time_buttons = []
+        self.hovered_time_button = None
+        self.time_date_text = arcade.Text("", 0, 0, (225, 232, 240), 15, anchor_x="center", anchor_y="center")
+        self.time_clock_text = arcade.Text("", 0, 0, (225, 232, 240), 13, anchor_x="center", anchor_y="center")
+        self.pause_buttons = []
+        self.hovered_pause_button = None
+        self.pause_message = ""
 
         self.setup()
 
@@ -251,6 +400,40 @@ class Game(arcade.View):
         center_y = (min_y + max_y) / 2
         self.world_camera.position = self.clamp_camera_position(center_x, center_y)
         self.target_camera_x, self.target_camera_y = self.world_camera.position
+        self.rebuild_pause_menu()
+        self.rebuild_time_hud()
+
+    def rebuild_time_hud(self):
+        if not self.window:
+            return
+
+        panel_width = 300
+        panel_height = 72
+        panel_x = self.window.width - panel_width - 12
+        panel_y = self.window.height - panel_height - 10
+        self.time_panel_rect = (panel_x, panel_y, panel_width, panel_height)
+        self.time_buttons = [
+            HudButton("-", panel_x + 14, panel_y + 10, 28, 24, self.decrease_time_speed),
+            HudButton(">", panel_x + 48, panel_y + 10, 38, 24, self.toggle_time_pause),
+            HudButton("+", panel_x + 92, panel_y + 10, 28, 24, self.increase_time_speed),
+        ]
+
+    def rebuild_pause_menu(self):
+        if not self.window:
+            return
+
+        button_width = 320
+        button_height = 44
+        gap = 56
+        x = self.window.width / 2 - button_width / 2
+        y = self.window.height / 2 + 70
+        self.pause_buttons = [
+            PauseButton("Вернуться в игру", x, y, button_width, button_height, self.resume_game),
+            PauseButton("Сохранить", x, y - gap, button_width, button_height, self.save_game),
+            PauseButton("Загрузить", x, y - gap * 2, button_width, button_height, self.load_game),
+            PauseButton("Выйти в главное меню", x, y - gap * 3, button_width, button_height, self.exit_to_main_menu),
+            PauseButton("Выйти на рабочий стол", x, y - gap * 4, button_width, button_height, self.exit_to_desktop),
+        ]
 
     def create_hex_grid(self):
         self.x_offset = 100
@@ -364,10 +547,71 @@ class Game(arcade.View):
             self.selection_border_sprite_list.draw()
         self.gui_camera.use()
         self.draw_gui()
+        self.draw_time_hud()
+        if self.paused:
+            self.draw_pause_menu()
         draw_time = (time.time() - start_time) * 1000
         draw_mode = "Overview" if self.use_overview_lod() else "Tiles"
         self.debug_text.text = f"FPS: {self.fps:.0f} | Draw: {draw_time:.1f}ms | Mode: {draw_mode} | Tiles: {len(self.visible_tiles)} | Seed: {self.world_seed}"
         self.debug_text.draw()
+
+    def draw_time_hud(self):
+        panel_x, panel_y, panel_width, panel_height = self.time_panel_rect
+        snapshot = self.simulation_client.snapshot
+        current_time = snapshot.current_time
+
+        arcade.draw_lbwh_rectangle_filled(panel_x, panel_y, panel_width, panel_height, (20, 29, 38, 235))
+        arcade.draw_lbwh_rectangle_outline(panel_x, panel_y, panel_width, panel_height, (100, 126, 155), 2)
+
+        self.time_date_text.text = f"{current_time.day} {MONTH_NAMES[current_time.month - 1]} {current_time.year}  {current_time.hour:02}:00"
+        self.time_date_text.x = panel_x + panel_width / 2
+        self.time_date_text.y = panel_y + panel_height - 18
+        self.time_date_text.draw()
+
+        if snapshot.paused:
+            self.time_clock_text.text = f"Пауза  |  Скорость {snapshot.speed_level}/5"
+        else:
+            self.time_clock_text.text = f"Скорость {snapshot.speed_level}/5"
+        self.time_clock_text.x = panel_x + 210
+        self.time_clock_text.y = panel_y + 22
+        self.time_clock_text.draw()
+
+        self.time_buttons[1].set_label(">" if snapshot.paused else "II")
+        for button in self.time_buttons:
+            button.draw(button == self.hovered_time_button)
+
+    def draw_pause_menu(self):
+        arcade.draw_lbwh_rectangle_filled(0, 0, self.window.width, self.window.height, (0, 0, 0, 150))
+        panel_width = 420
+        panel_height = 390
+        panel_x = self.window.width / 2 - panel_width / 2
+        panel_y = self.window.height / 2 - panel_height / 2
+        arcade.draw_lbwh_rectangle_filled(panel_x, panel_y, panel_width, panel_height, (20, 29, 38, 235))
+        arcade.draw_lbwh_rectangle_outline(panel_x, panel_y, panel_width, panel_height, (100, 126, 155), 2)
+        arcade.draw_text(
+            "Пауза",
+            self.window.width / 2,
+            panel_y + panel_height - 45,
+            arcade.color.WHITE,
+            32,
+            anchor_x="center",
+            anchor_y="center",
+            bold=True,
+        )
+
+        for button in self.pause_buttons:
+            button.draw(button == self.hovered_pause_button)
+
+        if self.pause_message:
+            arcade.draw_text(
+                self.pause_message,
+                self.window.width / 2,
+                panel_y + 24,
+                (220, 180, 90),
+                15,
+                anchor_x="center",
+                anchor_y="center",
+            )
 
     def draw_gui(self):
         if self.selected_tile:
@@ -394,7 +638,44 @@ class Game(arcade.View):
         super().on_resize(width, height)
         self.world_camera.position = self.clamp_camera_position(*self.world_camera.position)
         self.target_camera_x, self.target_camera_y = self.world_camera.position
+        self.rebuild_pause_menu()
+        self.rebuild_time_hud()
         self.last_visible_update = 0
+
+    def toggle_time_pause(self):
+        self.simulation_client.request_toggle_pause()
+
+    def increase_time_speed(self):
+        self.simulation_client.request_speed_change(1)
+
+    def decrease_time_speed(self):
+        self.simulation_client.request_speed_change(-1)
+
+    def toggle_pause_menu(self):
+        self.paused = not self.paused
+        self.pause_message = ""
+        self.hovered_pause_button = None
+        self.is_dragging = False
+        self.keys_pressed.clear()
+
+    def resume_game(self):
+        self.paused = False
+        self.pause_message = ""
+        self.hovered_pause_button = None
+
+    def save_game(self):
+        self.pause_message = "Сохранение пока не реализовано."
+
+    def load_game(self):
+        self.pause_message = "Загрузка пока не реализована."
+
+    def exit_to_main_menu(self):
+        from MainMenu import MainMenuView
+
+        self.window.show_view(MainMenuView())
+
+    def exit_to_desktop(self):
+        arcade.exit()
 
     def update_draw_list(self):
         """Обновление списка отрисовки"""
@@ -423,6 +704,9 @@ class Game(arcade.View):
             self.fps = self.fps_frame_count / self.fps_timer
             self.fps_frame_count = 0
             self.fps_timer = 0
+
+        self.simulation_server.update(delta_time)
+        self.simulation_client.sync_from_server()
 
         self.handle_camera_keys(delta_time)
         self.clamp_target_camera()
@@ -455,8 +739,21 @@ class Game(arcade.View):
             self.target_camera_y -= move_distance
 
     def on_mouse_press(self, x, y, button, modifiers):
-        world_x, world_y = self.screen_to_world(x, y)
+        if self.paused:
+            if button == arcade.MOUSE_BUTTON_LEFT:
+                for pause_button in self.pause_buttons:
+                    if pause_button.contains(x, y):
+                        pause_button.action()
+                        return
+            return
 
+        if button == arcade.MOUSE_BUTTON_LEFT:
+            for time_button in self.time_buttons:
+                if time_button.contains(x, y):
+                    time_button.action()
+                    return
+
+        world_x, world_y = self.screen_to_world(x, y)
         if button == arcade.MOUSE_BUTTON_RIGHT:
             self.is_dragging = True
             self.drag_start_x = x
@@ -474,12 +771,29 @@ class Game(arcade.View):
             self.is_dragging = False
 
     def on_mouse_drag(self, x, y, dx, dy, buttons, modifiers):
+        if self.paused:
+            return
+
         if arcade.MOUSE_BUTTON_RIGHT & buttons and self.is_dragging:
             self.target_camera_x = self.drag_start_camera_x - (x - self.drag_start_x) / self.world_camera.zoom
             self.target_camera_y = self.drag_start_camera_y - (y - self.drag_start_y) / self.world_camera.zoom
             self.clamp_target_camera()
 
     def on_mouse_motion(self, x, y, dx, dy):
+        if self.paused:
+            self.hovered_pause_button = None
+            for pause_button in self.pause_buttons:
+                if pause_button.contains(x, y):
+                    self.hovered_pause_button = pause_button
+                    break
+            return
+
+        self.hovered_time_button = None
+        for time_button in self.time_buttons:
+            if time_button.contains(x, y):
+                self.hovered_time_button = time_button
+                return
+
         if self.use_overview_lod():
             self.hovered_tile = None
             return
@@ -491,6 +805,9 @@ class Game(arcade.View):
             self.last_mouse_check = current_time
 
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
+        if self.paused:
+            return
+
         old_zoom = self.world_camera.zoom
         new_zoom = max(MIN_ZOOM, min(MAX_ZOOM, old_zoom + scroll_y * ZOOM_SPEED))
         if new_zoom == old_zoom:
@@ -536,6 +853,17 @@ class Game(arcade.View):
         return None
 
     def on_key_press(self, key, modifiers):
+        if key == arcade.key.ESCAPE:
+            self.toggle_pause_menu()
+            return
+
+        if self.paused:
+            return
+
+        if key == arcade.key.SPACE:
+            self.toggle_time_pause()
+            return
+
         self.keys_pressed.add(key)
 
         if key == arcade.key.EQUAL or key == arcade.key.PLUS:
@@ -547,6 +875,9 @@ class Game(arcade.View):
         self.last_visible_update = 0
 
     def on_key_release(self, key, modifiers):
+        if self.paused:
+            return
+
         if key in self.keys_pressed:
             self.keys_pressed.remove(key)
 

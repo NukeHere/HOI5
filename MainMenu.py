@@ -209,9 +209,12 @@ class MainMenuView(arcade.View):
         self.bot_count_index = 4
         self.map_size_index = 2
 
-    def on_show(self):
+    def on_show_view(self):
         arcade.set_background_color((13, 18, 24))
         self.rebuild_layout()
+
+    def on_show(self):
+        self.on_show_view()
 
     def on_resize(self, width, height):
         super().on_resize(width, height)
