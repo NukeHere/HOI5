@@ -53,6 +53,15 @@ MAP_LAYERS = [
     ("climate", "Климат", True),
     ("weather", "Погодная", False),
 ]
+BUILDING_TYPES = [
+    ("city", "Город"),
+    ("village", "Село"),
+    ("industry", "Промзона"),
+    ("farms", "Поля/фермы"),
+    ("mine", "Шахта"),
+    ("port", "Порт"),
+]
+BUILDING_STEP = 0.05
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 LAYER_ICON_PATH = ASSET_DIR / "layers_icon.png"
 SIMULATION_START_TIME = datetime(2000, 1, 1, 0)
@@ -619,6 +628,12 @@ class Game(arcade.View):
         self.hovered_map_layer_option = None
         self.map_layer_message = ""
         self.map_layer_message_timer = 0.0
+        self.building_dropdown = None
+        self.selected_building_index = 0
+        self.open_building_dropdown = False
+        self.hovered_build_button = False
+        self.building_message = ""
+        self.building_message_timer = 0.0
         self.map_layer_icon_texture = arcade.load_texture(str(LAYER_ICON_PATH))
         self.premium_shader_program = None
         self.premium_shader_geometry = None
@@ -662,6 +677,7 @@ class Game(arcade.View):
         self.target_camera_x, self.target_camera_y = self.world_camera.position
         self.rebuild_pause_menu()
         self.rebuild_time_hud()
+        self.rebuild_build_controls()
 
     def rebuild_time_hud(self):
         if not self.window:
@@ -677,6 +693,58 @@ class Game(arcade.View):
             HudButton(">", panel_x + 48, panel_y + 10, 38, 24, self.toggle_time_pause),
             HudButton("+", panel_x + 92, panel_y + 10, 28, 24, self.increase_time_speed),
         ]
+
+    def rebuild_build_controls(self):
+        if not self.window:
+            return
+
+        panel_x, panel_y, panel_width, panel_height = self.build_panel_rect()
+        control_y = panel_y + panel_height - 62
+        self.building_dropdown = PauseDropdown(
+            "building",
+            "Строение",
+            [label for _key, label in BUILDING_TYPES],
+            self.selected_building_index,
+            panel_x + 222,
+            control_y,
+            190,
+            34,
+            self.set_selected_building,
+        )
+
+    def build_panel_rect(self):
+        return 12, 74, 430, 250
+
+    def build_button_rect(self):
+        panel_x, panel_y, panel_width, panel_height = self.build_panel_rect()
+        return panel_x + 14, panel_y + panel_height - 62, 150, 34
+
+    def set_selected_building(self, index):
+        self.selected_building_index = max(0, min(len(BUILDING_TYPES) - 1, index))
+        if self.building_dropdown:
+            self.building_dropdown.selected_index = self.selected_building_index
+
+    def selected_building_type(self):
+        return BUILDING_TYPES[self.selected_building_index]
+
+    def build_selected_structure(self):
+        if not self.selected_tile:
+            self.building_message = "Выберите клетку"
+            self.building_message_timer = 2.0
+            return
+
+        key, label = self.selected_building_type()
+        coverage = getattr(self.selected_tile, "building_coverage", None)
+        if coverage is None:
+            coverage = {}
+            self.selected_tile.building_coverage = coverage
+
+        coverage[key] = min(1.0, coverage.get(key, 0.0) + BUILDING_STEP)
+        if key not in self.selected_tile.buildings:
+            self.selected_tile.buildings.append(key)
+
+        self.building_message = f"{label}: {coverage[key]:.0%}"
+        self.building_message_timer = 2.0
 
     def get_current_resolution_index(self):
         if not self.window:
@@ -1183,6 +1251,7 @@ class Game(arcade.View):
         self.draw_premium_shader_overlay()
         self.gui_camera.use()
         self.draw_gui()
+        self.draw_build_controls()
         self.draw_time_hud()
         self.draw_map_layer_control()
         if self.paused:
@@ -1429,6 +1498,47 @@ class Game(arcade.View):
                 res_text = f"Ресурсы: {', '.join([f"{i[0]}, глубина: {i[1]}, масса {i[2]}" for i in self.selected_tile.resources])}"
                 arcade.draw_text(res_text, 10, y_pos - 190, arcade.color.YELLOW, 14)
 
+    def draw_build_controls(self):
+        if not self.selected_tile or not self.building_dropdown:
+            return
+
+        panel_x, panel_y, panel_width, panel_height = self.build_panel_rect()
+        arcade.draw_lbwh_rectangle_filled(panel_x, panel_y, panel_width, panel_height, (18, 25, 33, 230))
+        arcade.draw_lbwh_rectangle_outline(panel_x, panel_y, panel_width, panel_height, (100, 126, 155), 2)
+
+        self.building_dropdown.selected_index = self.selected_building_index
+        self.building_dropdown.draw(self.open_building_dropdown)
+
+        button_x, button_y, button_width, button_height = self.build_button_rect()
+        fill = (64, 92, 118) if self.hovered_build_button else (42, 55, 72)
+        border = (165, 195, 230) if self.hovered_build_button else (100, 126, 155)
+        arcade.draw_lbwh_rectangle_filled(button_x, button_y, button_width, button_height, fill)
+        arcade.draw_lbwh_rectangle_outline(button_x, button_y, button_width, button_height, border, 2)
+        arcade.draw_text(
+            "+5% построить",
+            button_x + button_width / 2,
+            button_y + button_height / 2,
+            arcade.color.WHITE,
+            14,
+            anchor_x="center",
+            anchor_y="center",
+        )
+
+        coverage = getattr(self.selected_tile, "building_coverage", {})
+        y = panel_y + 94
+        if coverage:
+            arcade.draw_text("На клетке:", panel_x + 14, y, (220, 230, 240), 13)
+            y -= 20
+            labels = dict(BUILDING_TYPES)
+            for key, value in sorted(coverage.items(), key=lambda item: item[1], reverse=True):
+                arcade.draw_text(f"{labels.get(key, key)}: {value:.0%}", panel_x + 24, y, (220, 230, 240), 13)
+                y -= 18
+        else:
+            arcade.draw_text("На клетке пока нет строений", panel_x + 14, y, (180, 192, 205), 13)
+
+        if self.building_message:
+            arcade.draw_text(self.building_message, panel_x + 14, panel_y + 16, (235, 205, 120), 13)
+
     def on_resize(self, width, height):
         super().on_resize(width, height)
         self.sync_cameras_to_window()
@@ -1436,6 +1546,7 @@ class Game(arcade.View):
         self.target_camera_x, self.target_camera_y = self.world_camera.position
         self.rebuild_pause_menu()
         self.rebuild_time_hud()
+        self.rebuild_build_controls()
         self.refresh_visible_tiles()
 
     def toggle_time_pause(self):
@@ -1548,6 +1659,10 @@ class Game(arcade.View):
     def on_update(self, delta_time):
         self.shader_time += delta_time
         self.update_map_layer_menu_animation(delta_time)
+        if self.building_message_timer > 0:
+            self.building_message_timer = max(0.0, self.building_message_timer - delta_time)
+            if self.building_message_timer == 0:
+                self.building_message = ""
 
         if self.paused or self.game_over:
             return
@@ -1628,6 +1743,29 @@ class Game(arcade.View):
             return
 
         if button == arcade.MOUSE_BUTTON_LEFT:
+            if self.selected_tile and self.building_dropdown:
+                if self.open_building_dropdown:
+                    option_index = self.building_dropdown.option_at(x, y)
+                    if option_index is not None:
+                        self.open_building_dropdown = False
+                        self.building_dropdown.hovered_index = None
+                        self.set_selected_building(option_index)
+                        return
+
+                if self.building_dropdown.contains_header(x, y):
+                    self.open_building_dropdown = not self.open_building_dropdown
+                    self.building_dropdown.hovered_index = None
+                    return
+
+                if self.point_in_rect(x, y, self.build_button_rect()):
+                    self.open_building_dropdown = False
+                    self.build_selected_structure()
+                    return
+
+                if self.point_in_rect(x, y, self.build_panel_rect()):
+                    self.open_building_dropdown = False
+                    return
+
             option_index = self.map_layer_option_at(x, y)
             if option_index is not None:
                 layer_key, _label, enabled = MAP_LAYERS[option_index]
@@ -1682,6 +1820,7 @@ class Game(arcade.View):
     def on_mouse_motion(self, x, y, dx, dy):
         if self.paused:
             self.hovered_tile = None
+            self.hovered_build_button = False
             if self.pause_screen == "settings" and self.open_pause_dropdown:
                 for dropdown in self.pause_dropdowns:
                     if dropdown.key == self.open_pause_dropdown:
@@ -1695,6 +1834,26 @@ class Game(arcade.View):
                     self.hovered_pause_button = pause_button
                     break
             return
+
+        self.hovered_build_button = False
+        if self.selected_tile and self.building_dropdown:
+            if self.open_building_dropdown:
+                self.building_dropdown.hovered_index = self.building_dropdown.option_at(x, y)
+            else:
+                self.building_dropdown.hovered_index = None
+
+            self.hovered_build_button = self.point_in_rect(x, y, self.build_button_rect())
+            if (
+                self.hovered_build_button
+                or self.building_dropdown.contains_header(x, y)
+                or self.point_in_rect(x, y, self.build_panel_rect())
+                or self.building_dropdown.hovered_index is not None
+            ):
+                self.hovered_map_layer_button = False
+                self.hovered_map_layer_option = None
+                self.hovered_time_button = None
+                self.hovered_tile = None
+                return
 
         self.hovered_map_layer_button = self.point_in_rect(x, y, self.map_layer_button_rect())
         self.hovered_map_layer_option = self.map_layer_option_at(x, y)
@@ -1728,6 +1887,11 @@ class Game(arcade.View):
                         dropdown.scroll(-scroll_y)
                         dropdown.hovered_index = dropdown.option_at(x, y)
                         return
+            return
+
+        if self.selected_tile and self.open_building_dropdown and self.building_dropdown:
+            self.building_dropdown.scroll(-scroll_y)
+            self.building_dropdown.hovered_index = self.building_dropdown.option_at(x, y)
             return
 
         old_zoom = self.world_camera.zoom
@@ -1766,6 +1930,12 @@ class Game(arcade.View):
 
     def on_key_press(self, key, modifiers):
         if key == arcade.key.ESCAPE:
+            if not self.paused and self.open_building_dropdown:
+                self.open_building_dropdown = False
+                if self.building_dropdown:
+                    self.building_dropdown.hovered_index = None
+                return
+
             if self.paused and self.pause_screen == "settings":
                 if self.open_pause_dropdown:
                     self.open_pause_dropdown = None

@@ -71,6 +71,7 @@ class HexTile(arcade.Sprite):
         self.owner = None
         self.is_capital = False
         self.buildings = []  # Список построек
+        self.building_coverage = {}
         # Предрассчитанные углы для отрисовки
         self.corners = self._calculate_corners()
         self.bounding_box = self._calculate_bounding_box()
