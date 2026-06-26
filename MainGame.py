@@ -1,12 +1,15 @@
 import arcade
 import random
 import math
+import struct
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from perlin_noise import PerlinNoise
 from PIL import Image, ImageDraw
 from pyglet.graphics import Batch
+from arcade.gl import BufferDescription
 from Constants import *
 from HexTile import HexTile
 from MapData import MapTileData
@@ -14,6 +17,44 @@ from MapData import MapTileData
 OVERVIEW_LOD_ZOOM = 0.2
 OVERVIEW_TEXTURE_MAX_SIZE = 1024
 RESOLUTIONS = [(1024, 768), (1200, 800), (1366, 768), (1600, 900), (1920, 1080)]
+MAX_BOTS = 11
+STATE_COLORS = [
+    (235, 65, 56),
+    (255, 184, 0),
+    (0, 183, 255),
+    (255, 72, 191),
+    (118, 235, 74),
+    (255, 126, 0),
+    (170, 98, 255),
+    (0, 220, 190),
+    (255, 238, 72),
+    (52, 112, 255),
+    (255, 112, 145),
+    (215, 255, 112),
+]
+STATE_BORDER_COLORS = [
+    (255, 30, 20),
+    (255, 230, 0),
+    (0, 220, 255),
+    (255, 0, 210),
+    (80, 255, 40),
+    (255, 135, 0),
+    (190, 65, 255),
+    (0, 255, 215),
+    (255, 255, 80),
+    (40, 105, 255),
+    (255, 75, 135),
+    (215, 255, 55),
+]
+MAP_LAYERS = [
+    ("terrain", "Местность", True),
+    ("political", "Политическая", True),
+    ("height", "Высотная", True),
+    ("climate", "Климат", True),
+    ("weather", "Погодная", False),
+]
+ASSET_DIR = Path(__file__).resolve().parent / "assets"
+LAYER_ICON_PATH = ASSET_DIR / "layers_icon.png"
 SIMULATION_START_TIME = datetime(2000, 1, 1, 0)
 SIMULATION_REAL_SECONDS_PER_TICK = 0.25
 SIMULATION_HOURS_PER_TICK = [1, 2, 4, 8, 24]
@@ -214,6 +255,21 @@ class GameTimeSnapshot:
     tick_count: int
 
 
+@dataclass
+class StatePlayer:
+    id: int
+    name: str
+    color: tuple[int, int, int]
+    border_color: tuple[int, int, int]
+    is_human: bool = False
+    capital_tile: object | None = None
+    tiles: list = None
+
+    def __post_init__(self):
+        if self.tiles is None:
+            self.tiles = []
+
+
 class LocalSimulationServer:
     def __init__(self):
         self.current_time = SIMULATION_START_TIME
@@ -283,10 +339,12 @@ class LocalSimulationClient:
 
 def create_hex_texture():
     """Создает белую текстуру гексагона с помощью PIL"""
-    image = Image.new('RGBA', (HEX_WIDTH, int(HEX_HEIGHT * 1.2)), (0, 0, 0, 0))
+    image_width = HEX_WIDTH
+    image_height = int(HEX_HEIGHT * 1.2)
+    image = Image.new('RGBA', (image_width, image_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    center_x = HEX_HEIGHT // 2
-    center_y = HEX_WIDTH // 2
+    center_x = image_width / 2
+    center_y = image_height / 2
     points = []
     for i in range(6):
         angle_deg = 60 * i + 30
@@ -307,11 +365,13 @@ def create_hex_texture():
     return texture
 
 
-def create_hex_border_texture():
-    image = Image.new('RGBA', (HEX_WIDTH, int(HEX_HEIGHT * 1.2)), (0, 0, 0, 0))
+def create_hex_border_texture(color=(255, 255, 0), width=4, name="hex_texture_border"):
+    image_width = HEX_WIDTH
+    image_height = int(HEX_HEIGHT * 1.2)
+    image = Image.new('RGBA', (image_width, image_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    center_x = HEX_HEIGHT // 2
-    center_y = HEX_WIDTH // 2
+    center_x = image_width / 2
+    center_y = image_height / 2
     points = []
     for i in range(6):
         angle_deg = 60 * i + 30
@@ -320,10 +380,10 @@ def create_hex_border_texture():
         y = center_y + HEX_SIZE * math.sin(angle_rad)
         points.append((x, y))
     # Рисуем черный контур
-    draw.polygon(points, outline=(255, 255, 0), width=4)
+    draw.polygon(points, outline=color, width=width)
     # Конвертируем в текстуру Arcade
     texture = arcade.Texture(
-        name=f"hex_texture_border",
+        name=name,
         image=image,
         hit_box_algorithm=arcade.hitbox.algo_detailed
     )
@@ -500,18 +560,24 @@ class WorldGenerator:
 
 
 class Game(arcade.View):
-    def __init__(self, difficulty="Normal", bot_count=4, map_size=None):
+    def __init__(self, difficulty="Normal", bot_count=3, map_size=None):
         super().__init__()
         arcade.set_background_color(arcade.color.BLACK)
         self.paused = False
         self.game_over = False
         self.difficulty = difficulty
-        self.bot_count = bot_count
+        self.bot_count = max(0, min(MAX_BOTS, bot_count))
         self.map_size = map_size or WORLD_SIZE
+        self.players = []
+        self.human_player = None
+        self.start_territory_radius = 3
         self.keys_pressed = set()
         self.hex_grid = []
         self.hex_lookup = {}
+        self.tile_spatial_hash = {}
+        self.tile_spatial_cell_size = max(HEX_WID, HEX_HGT * 0.75)
         self.hex_draw_list = arcade.shape_list.ShapeElementList()
+        self.state_border_list = arcade.shape_list.ShapeElementList()
         self.selected_tile = None
         self.hovered_tile = None
         self.world_camera = arcade.camera.Camera2D()
@@ -546,6 +612,19 @@ class Game(arcade.View):
         self.hovered_time_button = None
         self.time_date_text = arcade.Text("", 0, 0, (225, 232, 240), 15, anchor_x="center", anchor_y="center")
         self.time_clock_text = arcade.Text("", 0, 0, (225, 232, 240), 13, anchor_x="center", anchor_y="center")
+        self.map_layer = "terrain"
+        self.map_layer_menu_open = False
+        self.map_layer_menu_progress = 0.0
+        self.hovered_map_layer_button = False
+        self.hovered_map_layer_option = None
+        self.map_layer_message = ""
+        self.map_layer_message_timer = 0.0
+        self.map_layer_icon_texture = arcade.load_texture(str(LAYER_ICON_PATH))
+        self.premium_shader_program = None
+        self.premium_shader_geometry = None
+        self.premium_shader_enabled = False
+        self.premium_shader_attempted = False
+        self.shader_time = 0.0
         self.pause_buttons = []
         self.hovered_pause_button = None
         self.pause_message = ""
@@ -568,6 +647,9 @@ class Game(arcade.View):
         self.grid_height = self.map_size
         self.world_generator = WorldGenerator(self.grid_width, self.grid_height, self.world_seed)
         self.create_hex_grid()
+        self.build_tile_spatial_hash()
+        self.setup_players_and_states()
+        self.setup_premium_shader()
         self.update_map_bounds()
         self.create_map_overview()
         self.selection_border = arcade.Sprite(create_hex_border_texture())
@@ -690,12 +772,247 @@ class Game(arcade.View):
         # plt.show()
         print(f"Создано {len(self.hex_grid)} тайлов")
 
+    def spatial_hash_coords(self, x, y):
+        return (
+            math.floor(x / self.tile_spatial_cell_size),
+            math.floor(y / self.tile_spatial_cell_size),
+        )
+
+    def build_tile_spatial_hash(self):
+        self.tile_spatial_hash.clear()
+        for tile in self.hex_grid:
+            min_x, min_y, max_x, max_y = tile.bounding_box
+            min_cell_x, min_cell_y = self.spatial_hash_coords(min_x, min_y)
+            max_cell_x, max_cell_y = self.spatial_hash_coords(max_x, max_y)
+
+            for cell_x in range(min_cell_x, max_cell_x + 1):
+                for cell_y in range(min_cell_y, max_cell_y + 1):
+                    self.tile_spatial_hash.setdefault((cell_x, cell_y), []).append(tile)
+
+    def setup_players_and_states(self):
+        total_players = max(1, self.bot_count + 1)
+        self.start_territory_radius = self.calculate_start_territory_radius(total_players)
+        self.players = []
+
+        for index in range(total_players):
+            player = StatePlayer(
+                id=index,
+                name="Player" if index == 0 else f"Bot {index}",
+                color=STATE_COLORS[index % len(STATE_COLORS)],
+                border_color=STATE_BORDER_COLORS[index % len(STATE_BORDER_COLORS)],
+                is_human=index == 0,
+            )
+            self.players.append(player)
+
+        self.human_player = self.players[0]
+        start_tiles = self.find_state_start_tiles(total_players)
+        for player, start_tile in zip(self.players, start_tiles):
+            player.capital_tile = start_tile
+            self.claim_start_territory(player, start_tile, self.start_territory_radius)
+
+        for tile in self.hex_grid:
+            tile.color = self.get_tile_map_color(tile)
+        self.rebuild_state_borders()
+
+        print(
+            f"Created {len(self.players)} states, "
+            f"start territory radius: {self.start_territory_radius}"
+        )
+
+    def calculate_start_territory_radius(self, total_players):
+        radius = round(self.map_size / max(8, total_players * 2))
+        return max(3, min(12, radius))
+
+    def find_state_start_tiles(self, total_players):
+        center_q = (self.grid_width - 1) / 2
+        center_r = (self.grid_height - 1) / 2
+        placement_radius = max(
+            self.start_territory_radius * 2 + 3,
+            min(self.grid_width, self.grid_height) * 0.28,
+        )
+        start_tiles = []
+
+        for index in range(total_players):
+            angle = math.tau * index / total_players - math.pi / 2
+            target_q = round(center_q + math.cos(angle) * placement_radius)
+            target_r = round(center_r + math.sin(angle) * placement_radius)
+            start_tiles.append(self.find_nearest_start_tile(target_q, target_r, start_tiles))
+
+        return start_tiles
+
+    def find_nearest_start_tile(self, target_q, target_r, existing_starts):
+        max_search_radius = max(self.grid_width, self.grid_height)
+        for radius in range(max_search_radius):
+            candidates = []
+            for dq in range(-radius, radius + 1):
+                for dr in range(-radius, radius + 1):
+                    q = target_q + dq
+                    r = target_r + dr
+                    tile = self.hex_lookup.get((q, r))
+                    if tile and self.is_valid_state_start(tile, existing_starts):
+                        candidates.append(tile)
+            if candidates:
+                return min(candidates, key=lambda tile: (tile.q - target_q) ** 2 + (tile.r - target_r) ** 2)
+
+        return min(
+            self.hex_grid,
+            key=lambda tile: (tile.q - target_q) ** 2 + (tile.r - target_r) ** 2,
+        )
+
+    def is_valid_state_start(self, tile, existing_starts):
+        if tile.terrain_type in ["deep_ocean", "ocean", "shallow_water", "lake"]:
+            return False
+        if tile.owner is not None:
+            return False
+        min_distance = self.start_territory_radius * 2 + 2
+        return all(self.hex_distance(tile, other) >= min_distance for other in existing_starts)
+
+    def claim_start_territory(self, player, start_tile, radius):
+        world_radius = self.start_territory_world_radius(radius)
+        for tile in self.hex_grid:
+            distance = math.hypot(tile.center_x - start_tile.center_x, tile.center_y - start_tile.center_y)
+            if distance <= world_radius:
+                if tile.owner and tile in tile.owner.tiles:
+                    tile.owner.tiles.remove(tile)
+                tile.owner = player
+                if tile not in player.tiles:
+                    player.tiles.append(tile)
+        start_tile.is_capital = True
+
+    @staticmethod
+    def start_territory_world_radius(radius):
+        center_spacing = (HEX_WID + HEX_HGT * 0.75) / 2
+        return (radius + 0.5) * center_spacing
+
+    @staticmethod
+    def hex_distance(first, second):
+        return max(abs(first.q - second.q), abs(first.r - second.r), abs(first.s - second.s))
+
+    def get_neighbor_coords_for_edge(self, tile, edge_index):
+        even_row_offsets = [(0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, 0)]
+        odd_row_offsets = [(1, 1), (0, 1), (-1, 0), (0, -1), (1, -1), (1, 0)]
+        offsets = odd_row_offsets if tile.r % 2 else even_row_offsets
+        dq, dr = offsets[edge_index]
+        return tile.q + dq, tile.r + dr
+
+    def rebuild_state_borders(self):
+        self.state_border_list = arcade.shape_list.ShapeElementList()
+        for tile in self.hex_grid:
+            if not tile.owner:
+                continue
+
+            color = tile.owner.border_color
+            for edge_index in range(6):
+                neighbor = self.hex_lookup.get(self.get_neighbor_coords_for_edge(tile, edge_index))
+                if neighbor and neighbor.owner == tile.owner:
+                    continue
+
+                x1, y1 = tile.corners[edge_index]
+                x2, y2 = tile.corners[(edge_index + 1) % 6]
+                self.state_border_list.append(
+                    arcade.shape_list.create_line(x1, y1, x2, y2, (0, 0, 0), 11)
+                )
+                self.state_border_list.append(
+                    arcade.shape_list.create_line(x1, y1, x2, y2, color, 7)
+                )
+
     def update_map_bounds(self):
         min_x = min(tile.bounding_box[0] for tile in self.hex_grid)
         min_y = min(tile.bounding_box[1] for tile in self.hex_grid)
         max_x = max(tile.bounding_box[2] for tile in self.hex_grid)
         max_y = max(tile.bounding_box[3] for tile in self.hex_grid)
         self.map_bounds = (min_x, min_y, max_x, max_y)
+
+    @staticmethod
+    def clamp_color_value(value):
+        return max(0, min(255, int(value)))
+
+    @classmethod
+    def blend_colors(cls, first, second, amount):
+        amount = max(0.0, min(1.0, amount))
+        return tuple(
+            cls.clamp_color_value(first[index] * (1 - amount) + second[index] * amount)
+            for index in range(3)
+        )
+
+    @classmethod
+    def shade_color(cls, color, amount):
+        if amount >= 0:
+            return cls.blend_colors(color, (255, 255, 255), amount)
+        return cls.blend_colors(color, (0, 0, 0), -amount)
+
+    @classmethod
+    def terrain_color(cls, tile):
+        color = tile.get_color(include_owner=False)
+        if cls.is_water_tile(tile):
+            if tile.terrain_type == "deep_ocean":
+                water = (22, 55, 126)
+            elif tile.terrain_type == "ocean":
+                water = (36, 92, 168)
+            elif tile.terrain_type == "shallow_water":
+                water = (65, 151, 205)
+            else:
+                water = (76, 165, 214)
+            highlight = max(0.0, min(1.0, tile.moisture * 0.18 + tile.temperature * 0.08))
+            return cls.shade_color(water, highlight)
+
+        height_shade = (tile.elevation - 0.48) * 0.28 + tile.ridge_value * 0.08
+        if tile.snow_cover > 0.18:
+            color = cls.blend_colors(color, (240, 248, 255), min(0.35, tile.snow_cover * 0.5))
+        return cls.shade_color(color, height_shade)
+
+    @staticmethod
+    def is_water_tile(tile):
+        return tile.terrain_type in ["ocean", "deep_ocean", "shallow_water", "lake", "river"] or tile.water_cover > 0.55
+
+    @classmethod
+    def political_color(cls, tile):
+        base = cls.blend_colors(cls.terrain_color(tile), (158, 166, 150), 0.55)
+        if not tile.owner:
+            return cls.blend_colors(base, (92, 104, 96), 0.2)
+
+        owner_amount = 0.62 if tile.is_capital else 0.48
+        return cls.blend_colors(base, tile.owner.color, owner_amount)
+
+    @classmethod
+    def height_color(cls, tile):
+        if tile.elevation < WATER_LEVEL:
+            depth = max(0.0, min(1.0, tile.elevation / WATER_LEVEL))
+            return cls.blend_colors((20, 55, 130), (68, 155, 220), depth)
+
+        value = max(0.0, min(1.0, (tile.elevation - WATER_LEVEL) / (1.0 - WATER_LEVEL)))
+        if value < 0.34:
+            color = cls.blend_colors((72, 158, 72), (180, 204, 112), value / 0.34)
+        elif value < 0.68:
+            color = cls.blend_colors((180, 204, 112), (132, 118, 96), (value - 0.34) / 0.34)
+        else:
+            color = cls.blend_colors((132, 118, 96), (238, 242, 238), (value - 0.68) / 0.32)
+        return cls.shade_color(color, tile.ridge_value * 0.18)
+
+    @classmethod
+    def climate_color(cls, tile):
+        cold = (64, 130, 220)
+        mild = (86, 196, 118)
+        hot = (230, 174, 76)
+        if tile.temperature < 0.5:
+            color = cls.blend_colors(cold, mild, tile.temperature / 0.5)
+        else:
+            color = cls.blend_colors(mild, hot, (tile.temperature - 0.5) / 0.5)
+
+        moisture_color = (45, 105, 215) if tile.moisture > 0.5 else (220, 200, 115)
+        color = cls.blend_colors(color, moisture_color, abs(tile.moisture - 0.5) * 0.55)
+        if tile.water_cover > 0.5:
+            color = cls.blend_colors(color, (50, 135, 220), 0.55)
+        return color
+
+    def get_tile_map_color(self, tile):
+        if self.map_layer == "political":
+            return self.political_color(tile)
+        if self.map_layer == "height":
+            return self.height_color(tile)
+        if self.map_layer == "climate":
+            return self.climate_color(tile)
+        return self.terrain_color(tile)
 
     def create_map_overview(self):
         min_x, min_y, max_x, max_y = self.map_bounds
@@ -719,10 +1036,10 @@ class Game(arcade.View):
                 )
                 for corner_x, corner_y in tile.corners
             ]
-            draw.polygon(points, fill=(*tile.get_color(), 255))
+            draw.polygon(points, fill=(*self.get_tile_map_color(tile), 255))
 
         texture = arcade.Texture(
-            name=f"map_overview_{self.world_seed}_{self.grid_width}x{self.grid_height}",
+            name=f"map_overview_{self.world_seed}_{self.grid_width}x{self.grid_height}_{self.map_layer}",
             image=image,
         )
         self.map_overview_sprite = arcade.Sprite(texture)
@@ -741,6 +1058,89 @@ class Game(arcade.View):
 
     def use_overview_lod(self):
         return self.map_overview_sprite is not None and self.world_camera.zoom <= OVERVIEW_LOD_ZOOM
+
+    def draw_capital_markers(self):
+        for player in self.players:
+            tile = player.capital_tile
+            if not tile:
+                continue
+
+            arcade.draw_circle_filled(tile.center_x, tile.center_y, 18, (10, 12, 16, 235))
+            arcade.draw_circle_outline(tile.center_x, tile.center_y, 22, player.border_color, 4)
+            arcade.draw_circle_filled(tile.center_x, tile.center_y, 8, player.border_color)
+
+    def setup_premium_shader(self):
+        if not self.window:
+            return
+        if self.premium_shader_attempted:
+            return
+
+        try:
+            vertex_shader = """
+            #version 330
+            in vec2 in_pos;
+            out vec2 uv;
+
+            void main() {
+                uv = in_pos * 0.5 + 0.5;
+                gl_Position = vec4(in_pos, 0.0, 1.0);
+            }
+            """
+            fragment_shader = """
+            #version 330
+            in vec2 uv;
+            out vec4 fragColor;
+
+            uniform float time;
+            uniform vec2 resolution;
+
+            float hash(vec2 p) {
+                return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+            }
+
+            void main() {
+                vec2 aspect = resolution / max(resolution.x, resolution.y);
+                vec2 centered = (uv - vec2(0.5)) * aspect;
+                float vignette = smoothstep(0.82, 0.28, length(centered));
+                float edge = 1.0 - vignette;
+                float grain = hash(gl_FragCoord.xy + time * 23.0) - 0.5;
+                vec3 color = mix(vec3(0.0, 0.015, 0.025), vec3(0.10, 0.095, 0.065), vignette);
+                float alpha = edge * 0.13 + abs(grain) * 0.018;
+                fragColor = vec4(color, alpha);
+            }
+            """
+            self.premium_shader_program = self.window.ctx.program(
+                vertex_shader=vertex_shader,
+                fragment_shader=fragment_shader,
+            )
+            quad = struct.pack("8f", -1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0)
+            buffer = self.window.ctx.buffer(data=quad)
+            self.premium_shader_geometry = self.window.ctx.geometry(
+                [BufferDescription(buffer, "2f", ["in_pos"])],
+                mode=arcade.gl.TRIANGLE_STRIP,
+            )
+            self.premium_shader_enabled = True
+            self.premium_shader_attempted = True
+        except Exception as exc:
+            self.premium_shader_enabled = False
+            self.premium_shader_attempted = True
+            print(f"Premium shader disabled: {exc}")
+
+    def draw_premium_shader_overlay(self):
+        if not self.premium_shader_enabled or not self.premium_shader_program or not self.premium_shader_geometry:
+            return
+
+        try:
+            try:
+                self.premium_shader_program["time"] = self.shader_time
+                self.premium_shader_program["resolution"] = (float(self.window.width), float(self.window.height))
+            except KeyError:
+                pass
+            self.window.ctx.enable(arcade.gl.BLEND)
+            self.premium_shader_geometry.render(self.premium_shader_program)
+        except Exception as exc:
+            self.premium_shader_enabled = False
+            print(f"Premium shader disabled: {exc}")
 
     def clamp_target_camera(self):
         self.target_camera_x, self.target_camera_y = self.clamp_camera_position(
@@ -767,22 +1167,30 @@ class Game(arcade.View):
     def on_draw(self):
         self.sync_cameras_to_window()
         self.clear()
+        if not self.premium_shader_enabled and not self.premium_shader_attempted:
+            self.setup_premium_shader()
         start_time = time.time()
         self.world_camera.use()
         if self.use_overview_lod():
             self.map_overview_sprite_list.draw()
         else:
             self.visible_tiles.draw()
+        self.state_border_list.draw()
+        if self.map_layer == "political":
+            self.draw_capital_markers()
         if self.selection_border.visible:
             self.selection_border_sprite_list.draw()
+        self.draw_premium_shader_overlay()
         self.gui_camera.use()
         self.draw_gui()
         self.draw_time_hud()
+        self.draw_map_layer_control()
         if self.paused:
             self.draw_pause_menu()
         draw_time = (time.time() - start_time) * 1000
         draw_mode = "Overview" if self.use_overview_lod() else "Tiles"
-        self.debug_text.text = f"FPS: {self.fps:.0f} | Draw: {draw_time:.1f}ms | Mode: {draw_mode} | Tiles: {len(self.visible_tiles)} | Seed: {self.world_seed}"
+        layer_label = next(label for key, label, _enabled in MAP_LAYERS if key == self.map_layer)
+        self.debug_text.text = f"FPS: {self.fps:.0f} | Draw: {draw_time:.1f}ms | Mode: {draw_mode} | Layer: {layer_label} | Tiles: {len(self.visible_tiles)} | Seed: {self.world_seed}"
         self.debug_text.draw()
 
     def refresh_visible_tiles(self):
@@ -828,6 +1236,111 @@ class Game(arcade.View):
         self.time_buttons[1].set_label(">" if snapshot.paused else "II")
         for button in self.time_buttons:
             button.draw(button == self.hovered_time_button)
+
+    def map_layer_button_rect(self):
+        return self.window.width - 62, 18, 44, 44
+
+    def map_layer_option_rects(self):
+        button_x, button_y, button_width, button_height = self.map_layer_button_rect()
+        option_width = 190
+        option_height = 34
+        option_gap = 6
+        x = button_x + button_width - option_width
+        base_y = button_y + button_height + 10 - (1 - self.map_layer_menu_progress) * 18
+        return [
+            (x, base_y + index * (option_height + option_gap), option_width, option_height)
+            for index, _layer in enumerate(MAP_LAYERS)
+        ]
+
+    @staticmethod
+    def point_in_rect(x, y, rect):
+        rect_x, rect_y, rect_width, rect_height = rect
+        return rect_x <= x <= rect_x + rect_width and rect_y <= y <= rect_y + rect_height
+
+    def map_layer_option_at(self, x, y):
+        if self.map_layer_menu_progress < 0.8:
+            return None
+
+        for index, rect in enumerate(self.map_layer_option_rects()):
+            if self.point_in_rect(x, y, rect):
+                return index
+        return None
+
+    def set_map_layer(self, layer_key):
+        if layer_key == "weather":
+            self.map_layer_message = "Погодный слой будет добавлен позже"
+            self.map_layer_message_timer = 2.0
+            return
+
+        if self.map_layer == layer_key:
+            self.map_layer_menu_open = False
+            return
+
+        self.map_layer = layer_key
+        self.map_layer_menu_open = False
+        self.map_layer_message = ""
+        self.map_layer_message_timer = 0.0
+        self.create_map_overview()
+        self.refresh_visible_tiles()
+
+    def update_map_layer_menu_animation(self, delta_time):
+        target = 1.0 if self.map_layer_menu_open else 0.0
+        speed = min(1.0, delta_time * 10)
+        self.map_layer_menu_progress += (target - self.map_layer_menu_progress) * speed
+        if abs(self.map_layer_menu_progress - target) < 0.01:
+            self.map_layer_menu_progress = target
+
+        if self.map_layer_message_timer > 0:
+            self.map_layer_message_timer = max(0.0, self.map_layer_message_timer - delta_time)
+            if self.map_layer_message_timer == 0:
+                self.map_layer_message = ""
+
+    def draw_map_layer_control(self):
+        if self.map_layer_menu_progress > 0.01:
+            alpha = int(235 * self.map_layer_menu_progress)
+            for index, (layer_key, label, enabled) in enumerate(MAP_LAYERS):
+                x, y, width, height = self.map_layer_option_rects()[index]
+                active = layer_key == self.map_layer
+                hovered = index == self.hovered_map_layer_option
+                if not enabled:
+                    fill = (38, 43, 49, alpha)
+                    border = (88, 94, 102, alpha)
+                    text_color = (128, 136, 145, alpha)
+                elif active:
+                    fill = (58, 92, 128, alpha)
+                    border = (120, 210, 255, alpha)
+                    text_color = (238, 248, 255, alpha)
+                elif hovered:
+                    fill = (50, 64, 82, alpha)
+                    border = (150, 178, 210, alpha)
+                    text_color = (232, 238, 245, alpha)
+                else:
+                    fill = (24, 32, 42, alpha)
+                    border = (92, 112, 136, alpha)
+                    text_color = (210, 220, 232, alpha)
+
+                arcade.draw_lbwh_rectangle_filled(x, y, width, height, fill)
+                arcade.draw_lbwh_rectangle_outline(x, y, width, height, border, 1)
+                arcade.draw_text(label, x + 14, y + height / 2, text_color, 13, anchor_y="center")
+
+        button_x, button_y, button_width, button_height = self.map_layer_button_rect()
+        button_fill = (58, 82, 108) if self.hovered_map_layer_button or self.map_layer_menu_open else (30, 40, 52)
+        arcade.draw_lbwh_rectangle_filled(button_x, button_y, button_width, button_height, button_fill)
+        arcade.draw_lbwh_rectangle_outline(button_x, button_y, button_width, button_height, (140, 170, 205), 2)
+        arcade.draw_texture_rect(
+            self.map_layer_icon_texture,
+            arcade.rect.XYWH(button_x + button_width / 2, button_y + button_height / 2, 30, 30),
+        )
+
+        if self.map_layer_message:
+            arcade.draw_text(
+                self.map_layer_message,
+                button_x - 246,
+                button_y + button_height / 2,
+                (240, 205, 110),
+                13,
+                anchor_y="center",
+            )
 
     def draw_pause_menu(self):
         arcade.draw_lbwh_rectangle_filled(0, 0, self.window.width, self.window.height, (0, 0, 0, 185))
@@ -908,9 +1421,13 @@ class Game(arcade.View):
             arcade.draw_text(f"Камни: {self.selected_tile.rock_cover:.0%}", 10, y_pos - 125, arcade.color.DARK_GRAY, 12)
             arcade.draw_text(f"Песок: {self.selected_tile.sand_cover:.0%}", 10, y_pos - 140, arcade.color.YELLOW, 12)
             arcade.draw_text(f"Снег: {self.selected_tile.snow_cover:.0%}", 10, y_pos - 155, arcade.color.WHITE, 12)
+            owner_text = self.selected_tile.owner.name if self.selected_tile.owner else "None"
+            if self.selected_tile.is_capital and self.selected_tile.owner:
+                owner_text += " (capital)"
+            arcade.draw_text(f"Owner: {owner_text}", 10, y_pos - 170, arcade.color.WHITE, 12)
             if self.selected_tile.resources:
                 res_text = f"Ресурсы: {', '.join([f"{i[0]}, глубина: {i[1]}, масса {i[2]}" for i in self.selected_tile.resources])}"
-                arcade.draw_text(res_text, 10, y_pos - 175, arcade.color.YELLOW, 14)
+                arcade.draw_text(res_text, 10, y_pos - 190, arcade.color.YELLOW, 14)
 
     def on_resize(self, width, height):
         super().on_resize(width, height)
@@ -982,6 +1499,7 @@ class Game(arcade.View):
         self.hovered_pause_button = None
         self.active_pause_slider = None
         self.open_pause_dropdown = None
+        self.hovered_tile = None
         if self.paused:
             self.pause_screen = "menu"
             self.rebuild_pause_menu()
@@ -1013,21 +1531,24 @@ class Game(arcade.View):
     def update_draw_list(self):
         """Обновление списка отрисовки"""
         for tile in self.visible_tiles:
+            base_color = self.get_tile_map_color(tile)
             if tile == self.selected_tile:
                 # Желтая подсветка
-                tile.color = tile.get_color()
+                tile.color = self.blend_colors(base_color, (255, 255, 80), 0.22)
             elif tile == self.hovered_tile:
                 # Белая подсветка (чуть светлее)
-                base_color = tile.get_color()
                 tile.color = (
                     min(255, base_color[0] + 50),
                     min(255, base_color[1] + 50),
                     min(255, base_color[2] + 50)
                 )
             else:
-                tile.color = tile.get_color()
+                tile.color = base_color
 
     def on_update(self, delta_time):
+        self.shader_time += delta_time
+        self.update_map_layer_menu_animation(delta_time)
+
         if self.paused or self.game_over:
             return
 
@@ -1107,6 +1628,22 @@ class Game(arcade.View):
             return
 
         if button == arcade.MOUSE_BUTTON_LEFT:
+            option_index = self.map_layer_option_at(x, y)
+            if option_index is not None:
+                layer_key, _label, enabled = MAP_LAYERS[option_index]
+                if enabled:
+                    self.set_map_layer(layer_key)
+                else:
+                    self.set_map_layer("weather")
+                return
+
+            if self.point_in_rect(x, y, self.map_layer_button_rect()):
+                self.map_layer_menu_open = not self.map_layer_menu_open
+                return
+
+            if self.map_layer_menu_open:
+                self.map_layer_menu_open = False
+
             for time_button in self.time_buttons:
                 if time_button.contains(x, y):
                     time_button.action()
@@ -1144,6 +1681,7 @@ class Game(arcade.View):
 
     def on_mouse_motion(self, x, y, dx, dy):
         if self.paused:
+            self.hovered_tile = None
             if self.pause_screen == "settings" and self.open_pause_dropdown:
                 for dropdown in self.pause_dropdowns:
                     if dropdown.key == self.open_pause_dropdown:
@@ -1158,10 +1696,18 @@ class Game(arcade.View):
                     break
             return
 
+        self.hovered_map_layer_button = self.point_in_rect(x, y, self.map_layer_button_rect())
+        self.hovered_map_layer_option = self.map_layer_option_at(x, y)
+        if self.hovered_map_layer_button or self.hovered_map_layer_option is not None:
+            self.hovered_time_button = None
+            self.hovered_tile = None
+            return
+
         self.hovered_time_button = None
         for time_button in self.time_buttons:
             if time_button.contains(x, y):
                 self.hovered_time_button = time_button
+                self.hovered_tile = None
                 return
 
         if self.use_overview_lod():
@@ -1208,24 +1754,14 @@ class Game(arcade.View):
         return world_x, world_y
 
     def get_tile_at(self, x, y):
-        if self.use_overview_lod():
-            return self.get_tile_at_world_position(x, y)
-
-        sprites = arcade.get_sprites_at_point((x, y), self.visible_tiles)
-        for sprite in sprites:
-            if isinstance(sprite, HexTile):
-                return sprite
-        return None
+        return self.get_tile_at_world_position(x, y)
 
     def get_tile_at_world_position(self, x, y):
-        approx_r = round((y - self.y_offset) / (HEX_HGT * 0.75))
-        approx_q = round((x - self.x_offset - (approx_r % 2) * HEX_WID / 2) / HEX_WID)
-
-        for q in range(approx_q - 1, approx_q + 2):
-            for r in range(approx_r - 1, approx_r + 2):
-                tile = self.hex_lookup.get((q, r))
-                if tile and tile.contains_point(x, y):
-                    return tile
+        cell = self.spatial_hash_coords(x, y)
+        candidates = self.tile_spatial_hash.get(cell, [])
+        for tile in candidates:
+            if tile.contains_point(x, y):
+                return tile
         return None
 
     def on_key_press(self, key, modifiers):

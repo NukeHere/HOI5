@@ -69,6 +69,7 @@ class HexTile(arcade.Sprite):
             self.movement_cost = self.calculate_movement_cost()
             self.passability = 0.0 if self.movement_cost == float("inf") else 1.0 / self.movement_cost
         self.owner = None
+        self.is_capital = False
         self.buildings = []  # Список построек
         # Предрассчитанные углы для отрисовки
         self.corners = self._calculate_corners()
@@ -286,7 +287,7 @@ class HexTile(arcade.Sprite):
             # Если все нули, ставим траву по умолчанию
             self.grass_cover = 1.0
 
-    def get_color(self):
+    def get_color(self, include_owner=True):
         """Возвращает цвет на основе компонентов - старые цвета"""
         if self.terrain_type in ['deep_ocean', 'ocean', 'shallow_water', 'lake', 'river']:
             # Вода - градиент по глубине
@@ -297,7 +298,7 @@ class HexTile(arcade.Sprite):
                 'lake': (100, 180, 230),
                 'river': (100, 180, 230)
             }.get(self.terrain_type, (64, 164, 223))
-            return base_color
+            return self.apply_owner_tint(base_color) if include_owner else base_color
         # Старые цвета из оригинального кода
         colors = {
             # Вода
@@ -375,7 +376,19 @@ class HexTile(arcade.Sprite):
         else:
             for i in range(3):
                 color[i] = int(color[i])
-        return tuple(color)
+        base_color = tuple(color)
+        return self.apply_owner_tint(base_color) if include_owner else base_color
+
+    def apply_owner_tint(self, color):
+        if not self.owner:
+            return color
+
+        blend = 0.38 if self.is_capital else 0.24
+        owner_color = self.owner.color
+        return tuple(
+            int(color[index] * (1 - blend) + owner_color[index] * blend)
+            for index in range(3)
+        )
 
     def generate_resources(self, rng=None):
         rng = rng or globals()["random"]

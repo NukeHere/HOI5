@@ -3,12 +3,12 @@ from typing import Callable
 
 import arcade
 
-from MainGame import Game
+from MainGame import Game, MAX_BOTS
 
 
 RESOLUTIONS = [(1024, 768), (1200, 800), (1366, 768), (1600, 900), (1920, 1080)]
 DIFFICULTIES = ["Легкая", "Обычная", "Сложная"]
-BOT_COUNTS = list(range(0, 13))
+BOT_COUNTS = list(range(0, MAX_BOTS + 1))
 MAP_SIZES = [50, 75, 100, 125, 150]
 
 
@@ -206,7 +206,7 @@ class MainMenuView(arcade.View):
         self.pending_resolution_index = self.resolution_index
 
         self.difficulty_index = 1
-        self.bot_count_index = 4
+        self.bot_count_index = 3
         self.map_size_index = 2
 
     def on_show_view(self):
