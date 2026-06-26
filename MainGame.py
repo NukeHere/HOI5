@@ -62,8 +62,41 @@ BUILDING_TYPES = [
     ("port", "Порт"),
 ]
 BUILDING_STEP = 0.05
+TILE_VISUAL_ASSETS = {
+    "forest": "forest.png",
+    "grassland": "grassland.png",
+    "desert": "desert.png",
+    "mountains": "mountains.png",
+    "snowfield": "snowfield.png",
+    "water": "water.png",
+    "city": "city.png",
+    "village": "village.png",
+    "industry": "industry.png",
+    "farms": "farms.png",
+    "mine": "mine.png",
+    "port": "port.png",
+}
+VISUAL_FACTOR_WEIGHTS = {
+    "city": 1.45,
+    "port": 1.4,
+    "industry": 1.3,
+    "farms": 1.22,
+    "mine": 1.2,
+    "village": 1.08,
+    "water": 1.18,
+    "mountains": 1.12,
+    "forest": 1.05,
+    "desert": 1.02,
+    "snowfield": 1.02,
+    "grassland": 0.92,
+}
+VISUAL_MIN_COVERAGE = 0.03
+VISUAL_SYSTEM_MIN_ZOOM = 0.38
+VISUAL_EDGE_MIN_ZOOM = 0.62
+VISUAL_DENSE_TILE_LIMIT = 650
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 LAYER_ICON_PATH = ASSET_DIR / "layers_icon.png"
+TILE_VISUAL_DIR = ASSET_DIR / "tile_visuals"
 SIMULATION_START_TIME = datetime(2000, 1, 1, 0)
 SIMULATION_REAL_SECONDS_PER_TICK = 0.25
 SIMULATION_HOURS_PER_TICK = [1, 2, 4, 8, 24]
@@ -599,6 +632,11 @@ class Game(arcade.View):
         self.target_camera_x = 0
         self.target_camera_y = 0
         self.visible_tiles = arcade.SpriteList()
+        self.visible_tiles_revision = 0
+        self.visible_tiles_signature = ()
+        self.tile_visual_sprite_list = arcade.SpriteList()
+        self.tile_visual_cache_key = None
+        self.tile_visual_revision = 0
         self.last_visible_update = 0
         self.last_mouse_check = 0
         self.visible_update_interval = 0.1
@@ -635,6 +673,7 @@ class Game(arcade.View):
         self.building_message = ""
         self.building_message_timer = 0.0
         self.map_layer_icon_texture = arcade.load_texture(str(LAYER_ICON_PATH))
+        self.tile_visual_textures = self.load_tile_visual_textures()
         self.premium_shader_program = None
         self.premium_shader_geometry = None
         self.premium_shader_enabled = False
@@ -745,6 +784,223 @@ class Game(arcade.View):
 
         self.building_message = f"{label}: {coverage[key]:.0%}"
         self.building_message_timer = 2.0
+        self.tile_visual_revision += 1
+        self.invalidate_tile_visual_cache()
+
+    def invalidate_tile_visual_cache(self):
+        self.tile_visual_cache_key = None
+
+    def refresh_visible_tiles_signature(self):
+        signature = tuple((tile.q, tile.r) for tile in self.visible_tiles)
+        if signature == self.visible_tiles_signature:
+            return
+
+        self.visible_tiles_signature = signature
+        self.visible_tiles_revision += 1
+        self.invalidate_tile_visual_cache()
+
+    def load_tile_visual_textures(self):
+        textures = {}
+        for key, file_name in TILE_VISUAL_ASSETS.items():
+            path = TILE_VISUAL_DIR / file_name
+            if path.exists():
+                textures[key] = arcade.load_texture(str(path))
+        return textures
+
+    @staticmethod
+    def normalized_coverage_items(coverages):
+        return [(key, value) for key, value in coverages.items() if value >= VISUAL_MIN_COVERAGE]
+
+    def natural_coverages(self, tile):
+        if self.is_water_tile(tile):
+            water = max(0.35, tile.water_cover)
+            return {"water": min(1.0, water)}
+
+        return {
+            "forest": tile.tree_cover,
+            "grassland": tile.grass_cover,
+            "desert": tile.sand_cover,
+            "mountains": max(tile.rock_cover, tile.ridge_value),
+            "snowfield": tile.snow_cover,
+        }
+
+    @staticmethod
+    def human_coverages(tile):
+        return dict(getattr(tile, "building_coverage", {}) or {})
+
+    def ranked_visual_factors(self, tile, include_natural=True, include_human=True):
+        factors = {}
+        if include_natural:
+            factors.update(self.natural_coverages(tile))
+        if include_human:
+            for key, value in self.human_coverages(tile).items():
+                factors[key] = max(factors.get(key, 0.0), value)
+
+        return sorted(
+            self.normalized_coverage_items(factors),
+            key=lambda item: item[1] * VISUAL_FACTOR_WEIGHTS.get(item[0], 1.0),
+            reverse=True,
+        )
+
+    def visual_factor_size(self, coverage, minimum, scale, maximum):
+        return min(maximum, minimum + math.sqrt(max(0.0, coverage)) * scale)
+
+    def append_visual_factor_sprite(self, key, x, y, size, alpha=230):
+        texture = self.tile_visual_textures.get(key)
+        if not texture:
+            return
+
+        sprite = arcade.Sprite(texture)
+        sprite.center_x = x
+        sprite.center_y = y
+        sprite.width = size
+        sprite.height = size
+        sprite.alpha = alpha
+        self.tile_visual_sprite_list.append(sprite)
+
+    def edge_anchor(self, tile, edge_index, edge_amount=0.72):
+        x1, y1 = tile.corners[edge_index]
+        x2, y2 = tile.corners[(edge_index + 1) % 6]
+        edge_x = (x1 + x2) / 2
+        edge_y = (y1 + y2) / 2
+        return (
+            tile.center_x * (1 - edge_amount) + edge_x * edge_amount,
+            tile.center_y * (1 - edge_amount) + edge_y * edge_amount,
+        )
+
+    def best_neighbor_edge_for_factor(self, tile, factor_key):
+        best_edge = None
+        best_value = 0.0
+        for edge_index in range(6):
+            neighbor = self.hex_lookup.get(self.get_neighbor_coords_for_edge(tile, edge_index))
+            if not neighbor:
+                continue
+
+            value = self.human_coverages(neighbor).get(factor_key, 0.0)
+            value = max(value, self.natural_coverages(neighbor).get(factor_key, 0.0))
+            if value > best_value:
+                best_edge = edge_index
+                best_value = value
+        return best_edge, best_value
+
+    def fallback_edge_factor(self, tile, excluded_key=None):
+        for key, coverage in self.ranked_visual_factors(tile, include_natural=True, include_human=False):
+            if key != excluded_key:
+                return key, coverage
+        return None, 0.0
+
+    def edge_visual_factor(self, tile, edge_index, center_natural_key):
+        neighbor = self.hex_lookup.get(self.get_neighbor_coords_for_edge(tile, edge_index))
+        if neighbor:
+            ranked = self.ranked_visual_factors(neighbor, include_natural=True, include_human=True)
+            if ranked:
+                return ranked[0]
+
+        return self.fallback_edge_factor(tile, excluded_key=center_natural_key)
+
+    def draw_tile_edge_visuals(self, tile, center_natural_key):
+        used_edges = set()
+        for edge_index in range(6):
+            key, coverage = self.edge_visual_factor(tile, edge_index, center_natural_key)
+            if not key:
+                continue
+
+            x, y = self.edge_anchor(tile, edge_index)
+            size = self.visual_factor_size(coverage, HEX_SIZE * 0.16, HEX_SIZE * 0.18, HEX_SIZE * 0.36)
+            self.append_visual_factor_sprite(key, x, y, size, alpha=145)
+            used_edges.add(edge_index)
+        return used_edges
+
+    def draw_tile_center_visuals(
+        self,
+        tile,
+        center_natural_key,
+        center_natural_coverage,
+        used_edges,
+        draw_natural=True,
+        human_factors=None,
+    ):
+        if draw_natural and center_natural_key:
+            size = self.visual_factor_size(
+                center_natural_coverage,
+                HEX_SIZE * 0.28,
+                HEX_SIZE * 0.38,
+                HEX_SIZE * 0.86,
+            )
+            self.append_visual_factor_sprite(center_natural_key, tile.center_x, tile.center_y, size, alpha=175)
+
+        if human_factors is None:
+            human_factors = self.ranked_visual_factors(tile, include_natural=False, include_human=True)
+        if not human_factors:
+            return
+
+        main_key, main_coverage = human_factors[0]
+        main_size = self.visual_factor_size(main_coverage, HEX_SIZE * 0.2, HEX_SIZE * 0.34, HEX_SIZE * 0.62)
+        self.append_visual_factor_sprite(main_key, tile.center_x, tile.center_y, main_size, alpha=245)
+
+        fallback_angles = [-math.pi / 2, math.pi / 6, 5 * math.pi / 6, math.pi / 2]
+        fallback_index = 0
+        for key, coverage in human_factors[1:5]:
+            edge_index, neighbor_value = self.best_neighbor_edge_for_factor(tile, key)
+            if edge_index is not None and neighbor_value >= VISUAL_MIN_COVERAGE:
+                x, y = self.edge_anchor(tile, edge_index, edge_amount=0.48)
+                used_edges.add(edge_index)
+            else:
+                angle = fallback_angles[fallback_index % len(fallback_angles)]
+                fallback_index += 1
+                x = tile.center_x + math.cos(angle) * HEX_SIZE * 0.33
+                y = tile.center_y + math.sin(angle) * HEX_SIZE * 0.33
+
+            size = self.visual_factor_size(coverage, HEX_SIZE * 0.16, HEX_SIZE * 0.24, HEX_SIZE * 0.42)
+            self.append_visual_factor_sprite(key, x, y, size, alpha=230)
+
+    def tile_visual_zoom_mode(self):
+        zoom = self.world_camera.zoom
+        if self.map_layer != "terrain" or zoom < VISUAL_SYSTEM_MIN_ZOOM:
+            return None
+
+        dense_view = len(self.visible_tiles) > VISUAL_DENSE_TILE_LIMIT
+        if dense_view:
+            return "dense"
+        if zoom >= VISUAL_EDGE_MIN_ZOOM:
+            return "edges"
+        return "center"
+
+    def rebuild_tile_visual_sprites(self, mode):
+        self.tile_visual_sprite_list.clear()
+        if mode is None:
+            return
+
+        draw_edges = mode == "edges"
+        draw_natural = mode != "dense"
+        for tile in self.visible_tiles:
+            if self.is_water_tile(tile):
+                continue
+
+            human_factors = self.ranked_visual_factors(tile, include_natural=False, include_human=True)
+            if mode == "dense" and not human_factors:
+                continue
+
+            natural_factors = self.ranked_visual_factors(tile, include_natural=True, include_human=False)
+            center_natural_key, center_natural_coverage = natural_factors[0] if natural_factors else (None, 0.0)
+            used_edges = self.draw_tile_edge_visuals(tile, center_natural_key) if draw_edges else set()
+            self.draw_tile_center_visuals(
+                tile,
+                center_natural_key,
+                center_natural_coverage,
+                used_edges,
+                draw_natural=draw_natural,
+                human_factors=human_factors,
+            )
+
+    def draw_tile_visual_system(self):
+        mode = self.tile_visual_zoom_mode()
+        cache_key = (self.visible_tiles_revision, self.tile_visual_revision, mode)
+        if cache_key != self.tile_visual_cache_key:
+            self.rebuild_tile_visual_sprites(mode)
+            self.tile_visual_cache_key = cache_key
+
+        self.tile_visual_sprite_list.draw()
 
     def get_current_resolution_index(self):
         if not self.window:
@@ -1243,6 +1499,7 @@ class Game(arcade.View):
             self.map_overview_sprite_list.draw()
         else:
             self.visible_tiles.draw()
+            self.draw_tile_visual_system()
         self.state_border_list.draw()
         if self.map_layer == "political":
             self.draw_capital_markers()
@@ -1268,9 +1525,11 @@ class Game(arcade.View):
 
         if self.use_overview_lod():
             self.visible_tiles.clear()
+            self.refresh_visible_tiles_signature()
         else:
             self.get_visible_tiles()
             self.update_draw_list()
+            self.refresh_visible_tiles_signature()
         self.last_visible_update = time.time()
 
     def sync_cameras_to_window(self):
@@ -1691,9 +1950,11 @@ class Game(arcade.View):
         if current_time - self.last_visible_update > self.visible_update_interval:
             if self.use_overview_lod():
                 self.visible_tiles.clear()
+                self.refresh_visible_tiles_signature()
             else:
                 self.get_visible_tiles()
                 self.update_draw_list()
+                self.refresh_visible_tiles_signature()
             self.last_visible_update = current_time
 
     def handle_camera_keys(self, delta_time):
