@@ -4,6 +4,7 @@ from typing import Callable
 import arcade
 
 from MainGame import Game, MAX_BOTS
+from Settings import load_settings, save_settings
 
 
 RESOLUTIONS = [(1024, 768), (1200, 800), (1366, 768), (1600, 900), (1920, 1080)]
@@ -198,10 +199,11 @@ class MainMenuView(arcade.View):
         self.dropdowns = []
         self.message = ""
 
-        self.sound_volume = 0.8
-        self.music_volume = 0.6
-        self.fullscreen = False
-        self.resolution_index = 1
+        settings = load_settings(RESOLUTIONS)
+        self.sound_volume = settings["sound_volume"]
+        self.music_volume = settings["music_volume"]
+        self.fullscreen = settings["fullscreen"]
+        self.resolution_index = settings["resolution_index"]
         self.pending_fullscreen = self.fullscreen
         self.pending_resolution_index = self.resolution_index
 
@@ -317,6 +319,7 @@ class MainMenuView(arcade.View):
         self.window.set_fullscreen(self.fullscreen)
         if not self.fullscreen:
             self.window.set_size(width, height)
+        save_settings(self.sound_volume, self.music_volume, self.fullscreen, self.resolution_index, RESOLUTIONS)
         self.message = "Настройки применены."
         self.rebuild_layout()
 
@@ -474,7 +477,10 @@ class MainMenuView(arcade.View):
 
 
 def main():
-    window = arcade.Window(1200, 800, "HOI 5")
+    settings = load_settings(RESOLUTIONS)
+    width, height = RESOLUTIONS[settings["resolution_index"]]
+    window = arcade.Window(width, height, "HOI 5")
+    window.set_fullscreen(settings["fullscreen"])
     start_view = MainMenuView()
     window.show_view(start_view)
     arcade.run()

@@ -1,0 +1,59 @@
+import json
+from pathlib import Path
+
+
+SETTINGS_PATH = Path(__file__).resolve().parent / "user_settings.json"
+
+DEFAULT_SETTINGS = {
+    "sound_volume": 0.8,
+    "music_volume": 0.6,
+    "fullscreen": False,
+    "resolution_index": 1,
+}
+
+
+def _clamp_float(value, default, minimum=0.0, maximum=1.0):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, number))
+
+
+def _clamp_resolution_index(value, max_index):
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_SETTINGS["resolution_index"]
+    return max(0, min(max_index, index))
+
+
+def load_settings(resolutions=None):
+    settings = DEFAULT_SETTINGS.copy()
+    if SETTINGS_PATH.exists():
+        try:
+            loaded_settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(loaded_settings, dict):
+                settings.update(loaded_settings)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    max_resolution_index = len(resolutions) - 1 if resolutions else DEFAULT_SETTINGS["resolution_index"]
+    return {
+        "sound_volume": _clamp_float(settings.get("sound_volume"), DEFAULT_SETTINGS["sound_volume"]),
+        "music_volume": _clamp_float(settings.get("music_volume"), DEFAULT_SETTINGS["music_volume"]),
+        "fullscreen": bool(settings.get("fullscreen")),
+        "resolution_index": _clamp_resolution_index(settings.get("resolution_index"), max_resolution_index),
+    }
+
+
+def save_settings(sound_volume, music_volume, fullscreen, resolution_index, resolutions=None):
+    max_resolution_index = len(resolutions) - 1 if resolutions else DEFAULT_SETTINGS["resolution_index"]
+    settings = {
+        "sound_volume": _clamp_float(sound_volume, DEFAULT_SETTINGS["sound_volume"]),
+        "music_volume": _clamp_float(music_volume, DEFAULT_SETTINGS["music_volume"]),
+        "fullscreen": bool(fullscreen),
+        "resolution_index": _clamp_resolution_index(resolution_index, max_resolution_index),
+    }
+    SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    return settings
