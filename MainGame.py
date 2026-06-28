@@ -3,6 +3,7 @@ import random
 import math
 import struct
 import time
+import textwrap
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -13,7 +14,7 @@ from arcade.gl import BufferDescription
 from Constants import *
 from HexTile import HexTile
 from MapData import MapTileData
-from Settings import load_settings, save_settings
+from Settings import create_window_with_fallback, load_settings, save_settings
 
 OVERVIEW_LOD_ZOOM = 0.2
 OVERVIEW_TEXTURE_MAX_SIZE = 1024
@@ -95,6 +96,36 @@ RESOURCE_MAP_GROUPS = [
         80_000,
     ),
 ]
+RAW_RESOURCE_NAMES = list(
+    dict.fromkeys(
+        resource
+        for _key, _label, resources, _color, _scale in RESOURCE_MAP_GROUPS
+        for resource in resources
+    )
+)
+STARTING_STOCK_RANGES = {
+    "raw": (20_000, 70_000),
+    "semi_finished": (5_000, 18_000),
+    "finished": (1_500, 8_000),
+}
+STARTING_STOCK_MULTIPLIERS = {
+    "gold": 0.08,
+    "silver": 0.18,
+    "rare_earth_metals": 0.12,
+    "uranium": 0.16,
+    "oil": 1.35,
+    "natural_gas": 1.35,
+    "coal": 1.35,
+    "salt": 1.5,
+    "sand": 1.45,
+    "gravel": 1.35,
+    "crushed_stone": 1.35,
+    "food": 1.6,
+    "consumer_goods": 1.35,
+    "weapons": 0.55,
+    "ships": 0.25,
+    "electronics": 0.65,
+}
 BUILDING_TYPES = [
     ("city", "Город"),
     ("village", "Село"),
@@ -174,6 +205,52 @@ RESOURCE_DISPLAY_NAMES = {
     "weapons": "Оружие",
     "ships": "Корабли",
 }
+RESOURCE_USAGE_DESCRIPTIONS = {
+    "coal": "Топливо для электростанций, металлургии и тяжелой промышленности.",
+    "peat": "Местное топливо и сырье для химии, удобрений и сельского хозяйства.",
+    "oil": "Основа топлива, пластмасс, химикатов и военного снабжения.",
+    "natural_gas": "Топливо для энергетики, отопления и химической промышленности.",
+    "uranium": "Сырье для атомной энергетики, исследований и стратегических программ.",
+    "iron_ore": "База для стали, строительства, машин, транспорта и вооружений.",
+    "alloying_additives": "Добавки для прочных сплавов, станков, двигателей и оружия.",
+    "bauxite": "Сырье для алюминия, авиации, транспорта и электрооборудования.",
+    "copper_ore": "Нужна для проводов, электроники, энергетики и промышленного оборудования.",
+    "lead": "Используется в аккумуляторах, боеприпасах, защите и химической промышленности.",
+    "nickel": "Нужен для нержавеющей стали, сплавов, батарей и военной техники.",
+    "zinc": "Защита стали от коррозии, сплавы, химия и строительные материалы.",
+    "gold": "Драгоценный металл для бюджета, электроники, резервов и торговли.",
+    "silver": "Используется в электронике, химии, медицине и торговых товарах.",
+    "rare_earth_metals": "Критичны для электроники, датчиков, батарей и высоких технологий.",
+    "potash": "Основа удобрений и аграрного производства.",
+    "salt": "Пищевое сырье, химическая промышленность и базовые товары населения.",
+    "phosphorite": "Сырье для удобрений и роста сельского хозяйства.",
+    "apatite": "Источник фосфатов для удобрений и химической промышленности.",
+    "sulfur": "Химикаты, удобрения, взрывчатка и переработка нефти.",
+    "rubber": "Шины, техника, военное снабжение и потребительские товары.",
+    "sand": "Стекло, бетон, строительство и базовая промышленность.",
+    "gravel": "Дороги, бетон, инфраструктура и строительство.",
+    "crushed_stone": "Фундамент для дорог, бетона, зданий и укреплений.",
+    "limestone": "Цемент, сталь, строительство и химическая промышленность.",
+    "clay": "Кирпич, керамика, цемент и строительные материалы.",
+    "graphite": "Электроды, батареи, металлургия и высокотехнологичная промышленность.",
+    "mica": "Изоляция, электроника, оптика и специальные материалы.",
+    "quartz": "Стекло, электроника, оптика и точная промышленность.",
+    "steel": "Главный материал для строительства, машин, транспорта и армии.",
+    "cement": "Базовый материал для зданий, дорог, портов и укреплений.",
+    "refined_fuel": "Горючее для транспорта, армии, авиации и промышленности.",
+    "chemicals": "Промежуточный ресурс для удобрений, пластмасс, медицины и боеприпасов.",
+    "lumber": "Строительство, мебель, упаковка и простая промышленность.",
+    "food": "Снабжение населения и армии, основа стабильности страны.",
+    "fertilizer": "Повышает выпуск сельского хозяйства и продовольствия.",
+    "copper_wire": "Электросети, техника, электроника и промышленное оборудование.",
+    "consumer_goods": "Товары для населения, влияющие на довольство и экономику.",
+    "machinery": "Станки и оборудование для фабрик, шахт и строительства.",
+    "vehicles": "Гражданский и военный транспорт, логистика и торговля.",
+    "electronics": "Исследования, связь, автоматизация, армия и высокие технологии.",
+    "construction_goods": "Готовые материалы для ускоренного строительства.",
+    "weapons": "Оснащение армии, мобилизация и военное производство.",
+    "ships": "Флот, морская торговля, перевозки и контроль побережья.",
+}
 TILE_VISUAL_ASSETS = {
     "forest": "forest.png",
     "grassland": "grassland.png",
@@ -241,6 +318,7 @@ class PauseButton:
         self.width = width
         self.height = height
         self.action = action
+        self.text = arcade.Text(label, 0, 0, arcade.color.WHITE, 18, anchor_x="center", anchor_y="center")
 
     def contains(self, x, y):
         return self.x <= x <= self.x + self.width and self.y <= y <= self.y + self.height
@@ -250,15 +328,10 @@ class PauseButton:
         border = (165, 195, 230) if hovered else (100, 126, 155)
         arcade.draw_lbwh_rectangle_filled(self.x, self.y, self.width, self.height, fill)
         arcade.draw_lbwh_rectangle_outline(self.x, self.y, self.width, self.height, border, 2)
-        arcade.draw_text(
-            self.label,
-            self.x + self.width / 2,
-            self.y + self.height / 2,
-            arcade.color.WHITE,
-            18,
-            anchor_x="center",
-            anchor_y="center",
-        )
+        self.text.text = self.label
+        self.text.x = self.x + self.width / 2
+        self.text.y = self.y + self.height / 2
+        self.text.draw()
 
 
 class PauseSlider:
@@ -270,6 +343,8 @@ class PauseSlider:
         self.value = value
         self.on_change = on_change
         self.height = 28
+        self.label_text = arcade.Text(label, 0, 0, (225, 232, 240), 16)
+        self.value_text = arcade.Text("", 0, 0, (180, 192, 205), 16, anchor_x="right")
 
     def contains(self, x, y):
         return self.x <= x <= self.x + self.width and self.y <= y <= self.y + self.height
@@ -279,15 +354,14 @@ class PauseSlider:
         self.on_change(self.value)
 
     def draw(self):
-        arcade.draw_text(self.label, self.x, self.y + 42, (225, 232, 240), 16)
-        arcade.draw_text(
-            f"{int(self.value * 100)}%",
-            self.x + self.width,
-            self.y + 42,
-            (180, 192, 205),
-            16,
-            anchor_x="right",
-        )
+        self.label_text.text = self.label
+        self.label_text.x = self.x
+        self.label_text.y = self.y + 42
+        self.label_text.draw()
+        self.value_text.text = f"{int(self.value * 100)}%"
+        self.value_text.x = self.x + self.width
+        self.value_text.y = self.y + 42
+        self.value_text.draw()
         arcade.draw_lbwh_rectangle_filled(self.x, self.y + 11, self.width, 6, (55, 66, 78))
         arcade.draw_lbwh_rectangle_filled(self.x, self.y + 11, self.width * self.value, 6, (109, 155, 210))
         arcade.draw_circle_filled(self.x + self.width * self.value, self.y + 14, 10, (230, 238, 248))
@@ -307,6 +381,13 @@ class PauseDropdown:
         self.hovered_index = None
         self.scroll_offset = 0
         self.max_visible_options = 5
+        self.label_text = arcade.Text(label, 0, 0, (225, 232, 240), 16)
+        self.selected_text = arcade.Text("", 0, 0, (225, 232, 240), 17, anchor_y="center")
+        self.arrow_text = arcade.Text("v", 0, 0, (180, 192, 205), 16, anchor_x="center", anchor_y="center")
+        self.option_texts = [
+            arcade.Text("", 0, 0, (225, 232, 240), 16, anchor_y="center")
+            for _index in range(self.max_visible_options)
+        ]
 
     def contains_header(self, x, y):
         return self.x <= x <= self.x + self.width and self.y <= y <= self.y + self.height
@@ -339,19 +420,19 @@ class PauseDropdown:
         return self.scroll_offset + visible_index
 
     def draw(self, is_open=False):
-        arcade.draw_text(self.label, self.x, self.y + self.height + 8, (225, 232, 240), 16)
+        self.label_text.text = self.label
+        self.label_text.x = self.x
+        self.label_text.y = self.y + self.height + 8
+        self.label_text.draw()
         arcade.draw_lbwh_rectangle_filled(self.x, self.y, self.width, self.height, (42, 55, 72))
         arcade.draw_lbwh_rectangle_outline(self.x, self.y, self.width, self.height, (100, 126, 155), 2)
-        arcade.draw_text(
-            self.options[self.selected_index],
-            self.x + 14,
-            self.y + self.height / 2,
-            (225, 232, 240),
-            17,
-            anchor_y="center",
-        )
-        arcade.draw_text("v", self.x + self.width - 18, self.y + self.height / 2, (180, 192, 205), 16,
-                         anchor_x="center", anchor_y="center")
+        self.selected_text.text = self.options[self.selected_index]
+        self.selected_text.x = self.x + 14
+        self.selected_text.y = self.y + self.height / 2
+        self.selected_text.draw()
+        self.arrow_text.x = self.x + self.width - 18
+        self.arrow_text.y = self.y + self.height / 2
+        self.arrow_text.draw()
 
         if not is_open:
             return
@@ -375,8 +456,11 @@ class PauseDropdown:
             arcade.draw_lbwh_rectangle_filled(self.x + 1, option_y, self.width - 2, self.height, fill)
             if visible_index > 0:
                 arcade.draw_line(self.x, option_y, self.x + self.width, option_y, (80, 102, 128), 1)
-            arcade.draw_text(option, self.x + 14, option_y + self.height / 2, (225, 232, 240), 16,
-                             anchor_y="center")
+            option_text = self.option_texts[visible_index]
+            option_text.text = option
+            option_text.x = self.x + 14
+            option_text.y = option_y + self.height / 2
+            option_text.draw()
 
         if self.max_scroll_offset() > 0:
             track_x = self.x + self.width - 7
@@ -435,6 +519,7 @@ class StatePlayer:
     tiles: list = None
     resource_totals: dict = None
     resource_sources: dict = None
+    resource_stockpiles: dict = None
     population: float | None = None
     budget: float = 250_000_000.0
     monthly_balance: float = 0.0
@@ -448,6 +533,12 @@ class StatePlayer:
             self.resource_totals = {"raw": {}}
         if self.resource_sources is None:
             self.resource_sources = {}
+        if self.resource_stockpiles is None:
+            self.resource_stockpiles = {
+                "raw": {},
+                "semi_finished": {},
+                "finished": {},
+            }
 
 
 class LocalSimulationServer:
@@ -827,6 +918,7 @@ class Game(arcade.View):
         self.hovered_side_panel_close = False
         self.resource_panel_category = "raw"
         self.selected_resource_key = None
+        self.resource_scroll_index = 0
         self.resource_summary_rect = None
         self.hovered_resource_summary = False
         self.map_layer_icon_texture = arcade.load_texture(str(LAYER_ICON_PATH))
@@ -987,6 +1079,56 @@ class Game(arcade.View):
         return {"raw": {}}
 
     @staticmethod
+    def empty_resource_stockpiles():
+        return {
+            "raw": {},
+            "semi_finished": {},
+            "finished": {},
+        }
+
+    @staticmethod
+    def resource_names_for_category(category_key):
+        if category_key == "raw":
+            return RAW_RESOURCE_NAMES
+        if category_key == "semi_finished":
+            return SEMI_FINISHED_RESOURCE_NAMES
+        if category_key == "finished":
+            return FINISHED_RESOURCE_NAMES
+        return []
+
+    def create_starting_stockpiles(self, player):
+        rng = random.Random((self.world_seed + 1) * 1009 + player.id * 7919)
+        stockpiles = self.empty_resource_stockpiles()
+
+        for category_key, (min_amount, max_amount) in STARTING_STOCK_RANGES.items():
+            for resource_key in self.resource_names_for_category(category_key):
+                multiplier = STARTING_STOCK_MULTIPLIERS.get(resource_key, 1.0)
+                amount = rng.uniform(min_amount, max_amount) * multiplier
+                stockpiles[category_key][resource_key] = amount
+
+        player.resource_stockpiles = stockpiles
+        return stockpiles
+
+    def ensure_player_stockpiles(self, player):
+        stockpiles = player.resource_stockpiles or self.empty_resource_stockpiles()
+        changed = False
+
+        for category_key, (min_amount, max_amount) in STARTING_STOCK_RANGES.items():
+            bucket = stockpiles.setdefault(category_key, {})
+            for resource_key in self.resource_names_for_category(category_key):
+                if resource_key in bucket:
+                    continue
+                resource_seed = sum((index + 1) * ord(char) for index, char in enumerate(resource_key))
+                rng = random.Random((self.world_seed + 1) * 1009 + player.id * 7919 + resource_seed)
+                multiplier = STARTING_STOCK_MULTIPLIERS.get(resource_key, 1.0)
+                bucket[resource_key] = rng.uniform(min_amount, max_amount) * multiplier
+                changed = True
+
+        if changed or player.resource_stockpiles is None:
+            player.resource_stockpiles = stockpiles
+        return stockpiles
+
+    @staticmethod
     def add_resource_amount(bucket, key, amount):
         bucket[key] = bucket.get(key, 0.0) + max(0.0, amount)
 
@@ -1041,6 +1183,18 @@ class Game(arcade.View):
         return RESOURCE_DISPLAY_NAMES.get(resource_key, resource_key)
 
     @staticmethod
+    def resource_usage_description(resource_key):
+        return RESOURCE_USAGE_DESCRIPTIONS.get(
+            resource_key,
+            "Будет использоваться в будущих цепочках производства и потребления.",
+        )
+
+    @staticmethod
+    def wrap_text_lines(text, width=29, max_lines=6):
+        lines = textwrap.wrap(text, width=width)
+        return lines[:max_lines]
+
+    @staticmethod
     def format_money(amount):
         sign = "-" if amount < 0 else ""
         value = abs(amount)
@@ -1071,7 +1225,9 @@ class Game(arcade.View):
         return textures
 
     def player_resource_summary(self, player):
-        raw = (player.resource_totals or {}).get("raw", {})
+        stockpiles = self.ensure_player_stockpiles(player)
+        raw = stockpiles.get("raw", {})
+        finished = stockpiles.get("finished", {})
         metal_keys = [
             "iron_ore", "copper_ore", "bauxite", "lead", "zinc", "nickel",
             "gold", "silver", "rare_earth_metals", "alloying_additives",
@@ -1079,7 +1235,7 @@ class Game(arcade.View):
         fuel_keys = ["coal", "oil", "natural_gas", "peat", "uranium"]
         metals = sum(raw.get(key, 0.0) for key in metal_keys)
         fuel = sum(raw.get(key, 0.0) for key in fuel_keys)
-        consumer_goods = 0.0
+        consumer_goods = finished.get("consumer_goods", 0.0)
         return metals, fuel, consumer_goods
 
     def resource_problem_summary(self, player):
@@ -1432,6 +1588,7 @@ class Game(arcade.View):
                 border_color=STATE_BORDER_COLORS[index % len(STATE_BORDER_COLORS)],
                 is_human=index == 0,
             )
+            self.create_starting_stockpiles(player)
             self.players.append(player)
 
         self.human_player = self.players[0]
@@ -1645,6 +1802,30 @@ class Game(arcade.View):
                 total += float(resource[2])
         return total
 
+    @staticmethod
+    def resource_amount_for_key(tile, resource_key):
+        total = 0.0
+        for resource in tile.resources:
+            if len(resource) >= 3 and resource[0] == resource_key:
+                total += float(resource[2])
+        return total
+
+    def selected_resource_overlay_color(self, tile, base_color):
+        if (
+            self.active_top_panel_key != "resources"
+            or self.resource_panel_category != "raw"
+            or not self.selected_resource_key
+        ):
+            return base_color
+
+        amount = self.resource_amount_for_key(tile, self.selected_resource_key)
+        if amount <= 0:
+            return base_color
+
+        intensity = min(1.0, math.log10(amount + 1) / math.log10(500_000 + 1))
+        glow = self.blend_colors((214, 176, 82), (255, 245, 140), intensity)
+        return self.blend_colors(base_color, glow, 0.42 + intensity * 0.36)
+
     def resource_color(self, tile):
         group_key, _label, resources, highlight_color, scale = RESOURCE_MAP_GROUPS[self.resource_group_index]
         amount = self.resource_amount_for_group(tile, resources)
@@ -1659,14 +1840,14 @@ class Game(arcade.View):
 
     def get_tile_map_color(self, tile):
         if self.map_layer == "political":
-            return self.political_color(tile)
+            return self.selected_resource_overlay_color(tile, self.political_color(tile))
         if self.map_layer == "height":
-            return self.height_color(tile)
+            return self.selected_resource_overlay_color(tile, self.height_color(tile))
         if self.map_layer == "climate":
-            return self.climate_color(tile)
+            return self.selected_resource_overlay_color(tile, self.climate_color(tile))
         if self.map_layer == "resources":
-            return self.resource_color(tile)
-        return self.terrain_color(tile)
+            return self.selected_resource_overlay_color(tile, self.resource_color(tile))
+        return self.selected_resource_overlay_color(tile, self.terrain_color(tile))
 
     def create_map_overview(self):
         min_x, min_y, max_x, max_y = self.map_bounds
@@ -1695,7 +1876,7 @@ class Game(arcade.View):
         texture = arcade.Texture(
             name=(
                 f"map_overview_{self.world_seed}_{self.grid_width}x{self.grid_height}_"
-                f"{self.map_layer}_{self.resource_group_index}"
+                f"{self.map_layer}_{self.resource_group_index}_{self.selected_resource_key or 'none'}"
             ),
             image=image,
         )
@@ -1890,6 +2071,7 @@ class Game(arcade.View):
         font_size=12,
         anchor_x="left",
         anchor_y="baseline",
+        bold=False,
     ):
         index = self.ui_text_pool_cursor
         self.ui_text_pool_cursor += 1
@@ -1954,7 +2136,7 @@ class Game(arcade.View):
         x = 10
         for index, text in enumerate(items[:3]):
             color = (238, 244, 250) if index == 0 else (210, 220, 232)
-            arcade.draw_text(text, x, y + TOP_STATUS_BAR_HEIGHT / 2, color, 12, anchor_y="center")
+            self.draw_ui_text(text, x, y + TOP_STATUS_BAR_HEIGHT / 2, color, 12, anchor_y="center")
             x += max(88, len(text) * 7 + 22)
 
         status_reserved_width = 300
@@ -1966,13 +2148,13 @@ class Game(arcade.View):
             resource_fill = self.blend_colors(resource_fill[:3], (255, 255, 255), 0.12) + (resource_fill[3],)
         arcade.draw_lbwh_rectangle_filled(*self.resource_summary_rect, resource_fill)
         arcade.draw_lbwh_rectangle_outline(*self.resource_summary_rect, (116, 140, 162, 180), 1)
-        arcade.draw_text(resource_text, x + 10, y + TOP_STATUS_BAR_HEIGHT / 2, (238, 244, 250), 12, anchor_y="center")
+        self.draw_ui_text(resource_text, x + 10, y + TOP_STATUS_BAR_HEIGHT / 2, (238, 244, 250), 12, anchor_y="center")
         x += resource_width + 14
 
         for text in items[3:]:
             if x > self.window.width - 330:
                 break
-            arcade.draw_text(text, x, y + TOP_STATUS_BAR_HEIGHT / 2, (210, 220, 232), 12, anchor_y="center")
+            self.draw_ui_text(text, x, y + TOP_STATUS_BAR_HEIGHT / 2, (210, 220, 232), 12, anchor_y="center")
             x += max(88, len(text) * 7 + 22)
 
         self.draw_resource_summary_tooltip(player)
@@ -1998,15 +2180,15 @@ class Game(arcade.View):
         arcade.draw_lbwh_rectangle_filled(tooltip_x, tooltip_y, tooltip_width, tooltip_height, (18, 24, 31, 245))
         arcade.draw_lbwh_rectangle_outline(tooltip_x, tooltip_y, tooltip_width, tooltip_height, (140, 160, 184), 1)
         line_y = tooltip_y + tooltip_height - 20
-        arcade.draw_text("Проблемы ресурсов", tooltip_x + 12, line_y, arcade.color.WHITE, 12)
+        self.draw_ui_text("Проблемы ресурсов", tooltip_x + 12, line_y, arcade.color.WHITE, 12)
         line_y -= 18
         for label, items, color in [("Красные", red_items, (240, 108, 98)), ("Желтые", yellow_items, (238, 198, 90))]:
             if not items:
                 continue
-            arcade.draw_text(f"{label}:", tooltip_x + 12, line_y, color, 11)
+            self.draw_ui_text(f"{label}:", tooltip_x + 12, line_y, color, 11)
             line_y -= 16
             for item in items[:5]:
-                arcade.draw_text(f"- {self.resource_display_name(item)}", tooltip_x + 22, line_y, (220, 230, 240), 11)
+                self.draw_ui_text(f"- {self.resource_display_name(item)}", tooltip_x + 22, line_y, (220, 230, 240), 11)
                 line_y -= 15
 
     def draw_top_navigation_bar(self):
@@ -2038,12 +2220,20 @@ class Game(arcade.View):
         return None
 
     def open_top_panel(self, key):
+        previous_key = self.active_top_panel_key
         self.active_top_panel_key = key
         self.side_panel_target = 1.0
+        if self.selected_resource_key and previous_key != key:
+            self.create_map_overview()
+            self.refresh_visible_tiles()
 
     def close_top_panel(self):
         self.side_panel_target = 0.0
         self.hovered_side_panel_close = False
+        if self.selected_resource_key:
+            self.selected_resource_key = None
+            self.create_map_overview()
+            self.refresh_visible_tiles()
 
     def update_side_panel_animation(self, delta_time):
         speed = min(1.0, delta_time * 12)
@@ -2081,14 +2271,19 @@ class Game(arcade.View):
 
         if not self.human_player.resource_totals:
             self.recalculate_state_resources(self.human_player)
+        stockpiles = self.ensure_player_stockpiles(self.human_player)
         if self.resource_panel_category == "raw":
             raw = self.human_player.resource_totals.get("raw", {})
-            keys = [key for key, value in sorted(raw.items(), key=lambda item: item[1], reverse=True) if value > 0]
+            raw_stock = stockpiles.get("raw", {})
+            keys = list(RAW_RESOURCE_NAMES)
+            for key in sorted(raw.keys()):
+                if key not in keys:
+                    keys.append(key)
             return [
                 {
                     "key": key,
                     "ground": raw.get(key, 0.0),
-                    "stock": None,
+                    "stock": raw_stock.get(key, 0.0),
                     "production": None,
                     "consumption": None,
                     "months": None,
@@ -2097,11 +2292,12 @@ class Game(arcade.View):
             ]
 
         names = SEMI_FINISHED_RESOURCE_NAMES if self.resource_panel_category == "semi_finished" else FINISHED_RESOURCE_NAMES
+        stock = stockpiles.get(self.resource_panel_category, {})
         return [
             {
                 "key": key,
                 "ground": None,
-                "stock": None,
+                "stock": stock.get(key, 0.0),
                 "production": None,
                 "consumption": None,
                 "months": None,
@@ -2113,10 +2309,40 @@ class Game(arcade.View):
         panel_x, panel_y, _panel_width, panel_height = self.side_panel_rect()
         start_y = panel_y + panel_height - 300
         row_height = 22
+        bottom_y = panel_y + 26
+        max_visible_count = max(8, int((start_y - bottom_y) / row_height) + 1)
+        visible_count = min(len(rows), max_visible_count)
         return [
             (panel_x + 18, start_y - index * row_height, 500, row_height)
-            for index, _row in enumerate(rows[:18])
+            for index in range(visible_count)
         ]
+
+    def visible_resource_rows(self, rows):
+        visible_count = len(self.resource_row_rects(rows))
+        max_scroll = max(0, len(rows) - visible_count)
+        self.resource_scroll_index = max(0, min(self.resource_scroll_index, max_scroll))
+        end_index = self.resource_scroll_index + visible_count
+        return rows[self.resource_scroll_index:end_index]
+
+    def resource_table_rect(self, rows=None):
+        rows = rows if rows is not None else self.resource_rows()
+        row_rects = self.resource_row_rects(rows)
+        if not row_rects:
+            panel_x, panel_y, _panel_width, panel_height = self.side_panel_rect()
+            return panel_x + 18, panel_y + 26, 500, 0
+
+        x, _y, width, height = row_rects[0]
+        bottom_y = row_rects[-1][1]
+        top_y = row_rects[0][1] + height
+        return x, bottom_y, width, top_y - bottom_y
+
+    def scroll_resource_rows(self, amount):
+        rows = self.resource_rows()
+        visible_count = len(self.resource_row_rects(rows))
+        max_scroll = max(0, len(rows) - visible_count)
+        old_index = self.resource_scroll_index
+        self.resource_scroll_index = max(0, min(max_scroll, self.resource_scroll_index + int(amount)))
+        return self.resource_scroll_index != old_index
 
     def resource_sources_count(self, resource_key):
         if not self.human_player:
@@ -2125,6 +2351,18 @@ class Game(arcade.View):
         if not self.human_player.resource_sources:
             self.recalculate_state_resources(self.human_player)
         return self.human_player.resource_sources.get(resource_key, 0)
+
+    def selected_resource_card_rect(self):
+        panel_x, panel_y, panel_width, panel_height = self.side_panel_rect()
+        card_x = panel_x + 528
+        card_y = panel_y + 58
+        card_width = panel_width - 546
+        card_height = panel_height - 112
+        return card_x, card_y, card_width, card_height
+
+    def selected_resource_close_rect(self):
+        card_x, card_y, card_width, card_height = self.selected_resource_card_rect()
+        return card_x + card_width - 32, card_y + card_height - 34, 24, 24
 
     def draw_resources_panel_content(self, panel_x, panel_y, panel_width, panel_height):
         if not self.human_player:
@@ -2182,10 +2420,12 @@ class Game(arcade.View):
             self.draw_ui_text(text, panel_x + offset, header_y, (150, 166, 184), 10)
 
         row_rects = self.resource_row_rects(rows)
-        for index, row in enumerate(rows[:18]):
+        visible_rows = self.visible_resource_rows(rows)
+        for index, row in enumerate(visible_rows):
             x, y, width, height = row_rects[index]
             selected = row["key"] == self.selected_resource_key
-            fill = (44, 58, 74, 180) if selected else ((24, 32, 42, 120) if index % 2 == 0 else (30, 38, 48, 120))
+            row_number = self.resource_scroll_index + index
+            fill = (44, 58, 74, 180) if selected else ((24, 32, 42, 120) if row_number % 2 == 0 else (30, 38, 48, 120))
             arcade.draw_lbwh_rectangle_filled(x, y, width, height, fill)
             values = [
                 self.resource_display_name(row["key"]),
@@ -2205,18 +2445,44 @@ class Game(arcade.View):
                     anchor_y="center",
                 )
 
+        self.draw_resource_scrollbar(rows, row_rects)
+
         self.draw_selected_resource_card(panel_x, panel_y, panel_width, panel_height)
+
+    def draw_resource_scrollbar(self, rows, row_rects):
+        if not row_rects or len(rows) <= len(row_rects):
+            return
+
+        table_x, table_y, table_width, table_height = self.resource_table_rect(rows)
+        track_x = table_x + table_width + 8
+        arcade.draw_lbwh_rectangle_filled(track_x, table_y, 4, table_height, (42, 52, 64, 180))
+
+        visible_count = len(row_rects)
+        thumb_height = max(24, table_height * visible_count / len(rows))
+        max_scroll = max(1, len(rows) - visible_count)
+        thumb_y = table_y + (table_height - thumb_height) * (1 - self.resource_scroll_index / max_scroll)
+        arcade.draw_lbwh_rectangle_filled(track_x - 2, thumb_y, 8, thumb_height, (130, 154, 184, 220))
 
     def draw_selected_resource_card(self, panel_x, panel_y, panel_width, panel_height):
         if not self.selected_resource_key:
             return
 
-        card_x = panel_x + 528
-        card_y = panel_y + 58
-        card_width = panel_width - 546
-        card_height = panel_height - 112
+        card_x, card_y, card_width, card_height = self.selected_resource_card_rect()
         arcade.draw_lbwh_rectangle_filled(card_x, card_y, card_width, card_height, (22, 29, 38, 230))
         arcade.draw_lbwh_rectangle_outline(card_x, card_y, card_width, card_height, (100, 126, 155), 1)
+
+        close_x, close_y, close_width, close_height = self.selected_resource_close_rect()
+        arcade.draw_lbwh_rectangle_filled(close_x, close_y, close_width, close_height, (50, 58, 68))
+        arcade.draw_lbwh_rectangle_outline(close_x, close_y, close_width, close_height, (150, 166, 184), 1)
+        self.draw_ui_text(
+            "X",
+            close_x + close_width / 2,
+            close_y + close_height / 2,
+            arcade.color.WHITE,
+            12,
+            anchor_x="center",
+            anchor_y="center",
+        )
         self.draw_ui_text(
             self.resource_display_name(self.selected_resource_key),
             card_x + 14,
@@ -2229,21 +2495,40 @@ class Game(arcade.View):
         self.draw_ui_text(f"Источники: {sources} клетки", card_x + 14, y, (220, 230, 240), 12)
         y -= 34
         self.draw_ui_text("Ресурс пока не используется.", card_x + 14, y, (180, 192, 205), 12)
+        y -= 34
+        self.draw_ui_text("Использование", card_x + 14, y, arcade.color.WHITE, 12)
+        y -= 20
+        description = self.resource_usage_description(self.selected_resource_key)
+        for line in self.wrap_text_lines(description):
+            self.draw_ui_text(line, card_x + 14, y, (196, 208, 220), 11)
+            y -= 16
 
     def handle_resources_panel_click(self, x, y):
         if self.active_top_panel_key != "resources":
             return False
 
+        if self.selected_resource_key and self.point_in_rect(x, y, self.selected_resource_close_rect()):
+            self.selected_resource_key = None
+            self.create_map_overview()
+            self.refresh_visible_tiles()
+            return True
+
         for index, (category_key, _label) in enumerate(RESOURCE_PANEL_CATEGORIES):
             if self.point_in_rect(x, y, self.resource_category_rects()[index]):
                 self.resource_panel_category = category_key
                 self.selected_resource_key = None
+                self.resource_scroll_index = 0
+                self.create_map_overview()
+                self.refresh_visible_tiles()
                 return True
 
         rows = self.resource_rows()
+        visible_rows = self.visible_resource_rows(rows)
         for index, rect in enumerate(self.resource_row_rects(rows)):
             if self.point_in_rect(x, y, rect):
-                self.selected_resource_key = rows[index]["key"]
+                self.selected_resource_key = visible_rows[index]["key"]
+                self.create_map_overview()
+                self.refresh_visible_tiles()
                 return True
 
         return False
@@ -2257,19 +2542,26 @@ class Game(arcade.View):
         arcade.draw_lbwh_rectangle_outline(panel_x, panel_y, panel_width, panel_height, (110, 130, 154), 2)
 
         title = next((label for key, label, _icon_name in TOP_NAV_TABS if key == self.active_top_panel_key), "")
-        arcade.draw_text(title, panel_x + 18, panel_y + panel_height - 28, arcade.color.WHITE, 18, anchor_y="center")
+        self.draw_ui_text(title, panel_x + 18, panel_y + panel_height - 28, arcade.color.WHITE, 18, anchor_y="center")
 
         close_x, close_y, close_width, close_height = self.side_panel_close_rect()
         close_fill = (96, 56, 58) if self.hovered_side_panel_close else (50, 58, 68)
         arcade.draw_lbwh_rectangle_filled(close_x, close_y, close_width, close_height, close_fill)
         arcade.draw_lbwh_rectangle_outline(close_x, close_y, close_width, close_height, (150, 166, 184), 1)
-        arcade.draw_text("X", close_x + close_width / 2, close_y + close_height / 2, arcade.color.WHITE, 14,
-                         anchor_x="center", anchor_y="center")
+        self.draw_ui_text(
+            "X",
+            close_x + close_width / 2,
+            close_y + close_height / 2,
+            arcade.color.WHITE,
+            14,
+            anchor_x="center",
+            anchor_y="center",
+        )
 
         if self.active_top_panel_key == "resources":
             self.draw_resources_panel_content(panel_x, panel_y, panel_width, panel_height)
         else:
-            arcade.draw_text(
+            self.draw_ui_text(
                 "Раздел пока пуст",
                 panel_x + 18,
                 panel_y + panel_height - 72,
@@ -2427,7 +2719,7 @@ class Game(arcade.View):
 
                 arcade.draw_lbwh_rectangle_filled(x, y, width, height, fill)
                 arcade.draw_lbwh_rectangle_outline(x, y, width, height, border, 1)
-                arcade.draw_text(label, x + 14, y + height / 2, text_color, 13, anchor_y="center")
+                self.draw_ui_text(label, x + 14, y + height / 2, text_color, 13, anchor_y="center")
 
         if self.map_layer == "resources":
             if self.resource_group_menu_progress > 0.01:
@@ -2449,7 +2741,7 @@ class Game(arcade.View):
                     arcade.draw_lbwh_rectangle_filled(x, y, width, height, fill)
                     arcade.draw_lbwh_rectangle_outline(x, y, width, height, border, 1)
                     arcade.draw_lbwh_rectangle_filled(x + 10, y + 10, 14, 14, (*color, alpha))
-                    arcade.draw_text(label, x + 32, y + height / 2, (220, 230, 240, alpha), 11, anchor_y="center")
+                    self.draw_ui_text(label, x + 32, y + height / 2, (220, 230, 240, alpha), 11, anchor_y="center")
 
             group_key, group_label, _resources, group_color, _scale = RESOURCE_MAP_GROUPS[self.resource_group_index]
             group_x, group_y, group_width, group_height = self.resource_group_button_rect()
@@ -2461,8 +2753,8 @@ class Game(arcade.View):
             arcade.draw_lbwh_rectangle_filled(group_x, group_y, group_width, group_height, group_fill)
             arcade.draw_lbwh_rectangle_outline(group_x, group_y, group_width, group_height, (140, 170, 205), 2)
             arcade.draw_lbwh_rectangle_filled(group_x + 11, group_y + 15, 14, 14, group_color)
-            arcade.draw_text(group_label, group_x + 34, group_y + group_height / 2, arcade.color.WHITE, 11,
-                             anchor_y="center")
+            self.draw_ui_text(group_label, group_x + 34, group_y + group_height / 2, arcade.color.WHITE, 11,
+                              anchor_y="center")
 
         button_x, button_y, button_width, button_height = self.map_layer_button_rect()
         button_fill = (58, 82, 108) if self.hovered_map_layer_button or self.map_layer_menu_open else (30, 40, 52)
@@ -2474,7 +2766,7 @@ class Game(arcade.View):
         )
 
         if self.map_layer_message:
-            arcade.draw_text(
+            self.draw_ui_text(
                 self.map_layer_message,
                 button_x - 246,
                 button_y + button_height / 2,
@@ -2491,7 +2783,7 @@ class Game(arcade.View):
         panel_y = self.window.height / 2 - panel_height / 2
         arcade.draw_lbwh_rectangle_filled(panel_x, panel_y, panel_width, panel_height, (20, 29, 38))
         arcade.draw_lbwh_rectangle_outline(panel_x, panel_y, panel_width, panel_height, (100, 126, 155), 2)
-        arcade.draw_text(
+        self.draw_ui_text(
             "Настройки" if self.pause_screen == "settings" else "Пауза",
             self.window.width / 2,
             panel_y + panel_height - 45,
@@ -2510,7 +2802,7 @@ class Game(arcade.View):
             button.draw(button == self.hovered_pause_button)
 
         if self.pause_message:
-            arcade.draw_text(
+            self.draw_ui_text(
                 self.pause_message,
                 self.window.width / 2,
                 panel_y + 24,
@@ -2535,7 +2827,7 @@ class Game(arcade.View):
                 dropdown.draw(True)
 
         if self.pause_message:
-            arcade.draw_text(
+            self.draw_ui_text(
                 self.pause_message,
                 self.window.width / 2,
                 self.window.height / 2 - 185,
@@ -2564,7 +2856,7 @@ class Game(arcade.View):
         border = (165, 195, 230) if self.hovered_build_button else (100, 126, 155)
         arcade.draw_lbwh_rectangle_filled(button_x, button_y, button_width, button_height, fill)
         arcade.draw_lbwh_rectangle_outline(button_x, button_y, button_width, button_height, border, 2)
-        arcade.draw_text(
+        self.draw_ui_text(
             "+5% построить",
             button_x + button_width / 2,
             button_y + button_height / 2,
@@ -2577,35 +2869,35 @@ class Game(arcade.View):
         coverage = getattr(self.selected_tile, "building_coverage", {})
         y = panel_y + 94
         if coverage:
-            arcade.draw_text("На клетке:", panel_x + 14, y, (220, 230, 240), 13)
+            self.draw_ui_text("На клетке:", panel_x + 14, y, (220, 230, 240), 13)
             y -= 20
             labels = dict(BUILDING_TYPES)
             for key, value in sorted(coverage.items(), key=lambda item: item[1], reverse=True):
-                arcade.draw_text(f"{labels.get(key, key)}: {value:.0%}", panel_x + 24, y, (220, 230, 240), 13)
+                self.draw_ui_text(f"{labels.get(key, key)}: {value:.0%}", panel_x + 24, y, (220, 230, 240), 13)
                 y -= 18
         else:
-            arcade.draw_text("На клетке пока нет строений", panel_x + 14, y, (180, 192, 205), 13)
+            self.draw_ui_text("На клетке пока нет строений", panel_x + 14, y, (180, 192, 205), 13)
 
         owner = self.selected_tile.owner
         if owner:
             totals = owner.resource_totals or self.recalculate_state_resources(owner)
             resource_x = panel_x + 222
             resource_y = panel_y + 130
-            arcade.draw_text(f"Страна: {owner.name}", resource_x, resource_y, (220, 230, 240), 12)
+            self.draw_ui_text(f"Страна: {owner.name}", resource_x, resource_y, (220, 230, 240), 12)
             resource_y -= 18
-            arcade.draw_text("Сырье:", resource_x, resource_y, (180, 192, 205), 11)
+            self.draw_ui_text("Сырье:", resource_x, resource_y, (180, 192, 205), 11)
             resource_y -= 16
             items = self.top_resource_items(totals["raw"], limit=5)
             if items:
                 for key, value in items:
                     line = f"{self.resource_display_name(key)}: {self.format_resource_amount(value)}"
-                    arcade.draw_text(line, resource_x + 8, resource_y, (220, 230, 240), 11)
+                    self.draw_ui_text(line, resource_x + 8, resource_y, (220, 230, 240), 11)
                     resource_y -= 15
             else:
-                arcade.draw_text("нет", resource_x + 8, resource_y, (220, 230, 240), 11)
+                self.draw_ui_text("нет", resource_x + 8, resource_y, (220, 230, 240), 11)
 
         if self.building_message:
-            arcade.draw_text(self.building_message, panel_x + 14, panel_y + 16, (235, 205, 120), 13)
+            self.draw_ui_text(self.building_message, panel_x + 14, panel_y + 16, (235, 205, 120), 13)
 
     def on_resize(self, width, height):
         super().on_resize(width, height)
@@ -3035,6 +3327,16 @@ class Game(arcade.View):
                         return
             return
 
+        if self.active_top_panel_key == "resources" and self.side_panel_progress > 0:
+            rows = self.resource_rows()
+            over_resource_panel = self.point_in_rect(x, y, self.side_panel_rect())
+            over_resource_table = self.point_in_rect(x, y, self.resource_table_rect(rows))
+            if over_resource_table:
+                self.scroll_resource_rows(-scroll_y)
+                return
+            if over_resource_panel:
+                return
+
         if self.show_build_controls and self.selected_tile and self.open_building_dropdown and self.building_dropdown:
             self.building_dropdown.scroll(-scroll_y)
             self.building_dropdown.hovered_index = self.building_dropdown.option_at(x, y)
@@ -3124,9 +3426,7 @@ class Game(arcade.View):
 
 def main():
     settings = load_settings(RESOLUTIONS)
-    width, height = RESOLUTIONS[settings["resolution_index"]]
-    window = arcade.Window(width, height, "HOI 5")
-    window.set_fullscreen(settings["fullscreen"])
+    window = create_window_with_fallback(arcade, "HOI 5", settings, RESOLUTIONS)
     start_view = Game()
     window.show_view(start_view)
     arcade.run()

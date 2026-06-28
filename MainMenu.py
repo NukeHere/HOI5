@@ -4,7 +4,7 @@ from typing import Callable
 import arcade
 
 from MainGame import Game, MAX_BOTS
-from Settings import load_settings, save_settings
+from Settings import create_window_with_fallback, load_settings, save_settings
 
 
 RESOLUTIONS = [(1024, 768), (1200, 800), (1366, 768), (1600, 900), (1920, 1080)]
@@ -22,6 +22,9 @@ class Button:
     height: float
     action: Callable[[], None]
     enabled: bool = True
+
+    def __post_init__(self):
+        self.text = arcade.Text("", 0, 0, arcade.color.WHITE, 18, anchor_x="center", anchor_y="center")
 
     def contains(self, x, y):
         return self.x <= x <= self.x + self.width and self.y <= y <= self.y + self.height
@@ -42,15 +45,11 @@ class Button:
 
         arcade.draw_lbwh_rectangle_filled(self.x, self.y, self.width, self.height, fill)
         arcade.draw_lbwh_rectangle_outline(self.x, self.y, self.width, self.height, border, 2)
-        arcade.draw_text(
-            self.label,
-            self.x + self.width / 2,
-            self.y + self.height / 2,
-            text,
-            18,
-            anchor_x="center",
-            anchor_y="center",
-        )
+        self.text.text = self.label
+        self.text.color = text
+        self.text.x = self.x + self.width / 2
+        self.text.y = self.y + self.height / 2
+        self.text.draw()
 
 
 @dataclass
@@ -64,6 +63,10 @@ class Slider:
 
     height: float = 28
 
+    def __post_init__(self):
+        self.label_text = arcade.Text("", 0, 0, (225, 232, 240), 16)
+        self.value_text = arcade.Text("", 0, 0, (180, 192, 205), 16, anchor_x="right")
+
     def contains(self, x, y):
         return self.x <= x <= self.x + self.width and self.y <= y <= self.y + self.height
 
@@ -72,9 +75,14 @@ class Slider:
         self.on_change(self.value)
 
     def draw(self):
-        arcade.draw_text(self.label, self.x, self.y + 42, (225, 232, 240), 16)
-        arcade.draw_text(f"{int(self.value * 100)}%", self.x + self.width, self.y + 42, (180, 192, 205), 16,
-                         anchor_x="right")
+        self.label_text.text = self.label
+        self.label_text.x = self.x
+        self.label_text.y = self.y + 42
+        self.label_text.draw()
+        self.value_text.text = f"{int(self.value * 100)}%"
+        self.value_text.x = self.x + self.width
+        self.value_text.y = self.y + 42
+        self.value_text.draw()
         arcade.draw_lbwh_rectangle_filled(self.x, self.y + 11, self.width, 6, (55, 66, 78))
         arcade.draw_lbwh_rectangle_filled(self.x, self.y + 11, self.width * self.value, 6, (109, 155, 210))
         knob_x = self.x + self.width * self.value
@@ -95,6 +103,15 @@ class Dropdown:
     hovered_index: int | None = None
     scroll_offset: int = 0
     max_visible_options: int = 6
+
+    def __post_init__(self):
+        self.label_text = arcade.Text("", 0, 0, (225, 232, 240), 16)
+        self.selected_text = arcade.Text("", 0, 0, (225, 232, 240), 17, anchor_y="center")
+        self.arrow_text = arcade.Text("v", 0, 0, (180, 192, 205), 16, anchor_x="center", anchor_y="center")
+        self.option_texts = [
+            arcade.Text("", 0, 0, (225, 232, 240), 16, anchor_y="center")
+            for _index in range(self.max_visible_options)
+        ]
 
     def contains_header(self, x, y):
         return self.x <= x <= self.x + self.width and self.y <= y <= self.y + self.height
@@ -133,19 +150,19 @@ class Dropdown:
 
     def draw(self, is_open=False):
         list_width = self.width
-        arcade.draw_text(self.label, self.x, self.y + self.height + 8, (225, 232, 240), 16)
+        self.label_text.text = self.label
+        self.label_text.x = self.x
+        self.label_text.y = self.y + self.height + 8
+        self.label_text.draw()
         arcade.draw_lbwh_rectangle_filled(self.x, self.y, self.width, self.height, (42, 55, 72))
         arcade.draw_lbwh_rectangle_outline(self.x, self.y, self.width, self.height, (100, 126, 155), 2)
-        arcade.draw_text(
-            self.options[self.selected_index],
-            self.x + 14,
-            self.y + self.height / 2,
-            (225, 232, 240),
-            17,
-            anchor_y="center",
-        )
-        arcade.draw_text("v", self.x + self.width - 18, self.y + self.height / 2, (180, 192, 205), 16,
-                         anchor_x="center", anchor_y="center")
+        self.selected_text.text = self.options[self.selected_index]
+        self.selected_text.x = self.x + 14
+        self.selected_text.y = self.y + self.height / 2
+        self.selected_text.draw()
+        self.arrow_text.x = self.x + self.width - 18
+        self.arrow_text.y = self.y + self.height / 2
+        self.arrow_text.draw()
 
         if is_open:
             self.clamp_scroll()
@@ -171,8 +188,11 @@ class Dropdown:
                 arcade.draw_lbwh_rectangle_filled(self.x + 1, option_y, list_width - 2, self.height, fill)
                 if visible_index > 0:
                     arcade.draw_line(self.x, option_y, self.x + list_width, option_y, (80, 102, 128), 1)
-                arcade.draw_text(option, self.x + 14, option_y + self.height / 2, (225, 232, 240), 16,
-                                 anchor_y="center")
+                option_text = self.option_texts[visible_index]
+                option_text.text = option
+                option_text.x = self.x + 14
+                option_text.y = option_y + self.height / 2
+                option_text.draw()
 
             if self.max_scroll_offset() > 0:
                 track_x = self.x + list_width - 7
@@ -198,6 +218,17 @@ class MainMenuView(arcade.View):
         self.sliders = []
         self.dropdowns = []
         self.message = ""
+        self.title_text = arcade.Text("", 0, 0, arcade.color.WHITE, 36, anchor_x="center", anchor_y="center", bold=True)
+        self.message_text = arcade.Text("", 0, 0, (220, 180, 90), 16, anchor_x="center", anchor_y="center")
+        self.help_text = arcade.Text(
+            "",
+            0,
+            0,
+            (210, 220, 230),
+            17,
+            width=460,
+            multiline=True,
+        )
 
         settings = load_settings(RESOLUTIONS)
         self.sound_volume = settings["sound_volume"]
@@ -379,8 +410,10 @@ class MainMenuView(arcade.View):
                 dropdown.draw(True)
 
         if self.message:
-            arcade.draw_text(self.message, self.window.width / 2, 44, (220, 180, 90), 16,
-                             anchor_x="center", anchor_y="center")
+            self.message_text.text = self.message
+            self.message_text.x = self.window.width / 2
+            self.message_text.y = 44
+            self.message_text.draw()
 
     def draw_background(self):
         arcade.draw_lbwh_rectangle_filled(0, 0, self.window.width, self.window.height, (13, 18, 24))
@@ -388,8 +421,10 @@ class MainMenuView(arcade.View):
         arcade.draw_lbwh_rectangle_filled(0, self.window.height - 96, self.window.width, 96, (20, 29, 38))
 
     def draw_title(self, title):
-        arcade.draw_text(title, self.window.width / 2, self.window.height - 58, arcade.color.WHITE, 36,
-                         anchor_x="center", anchor_y="center", bold=True)
+        self.title_text.text = title
+        self.title_text.x = self.window.width / 2
+        self.title_text.y = self.window.height - 58
+        self.title_text.draw()
 
     def draw_help_text(self):
         text = (
@@ -398,8 +433,10 @@ class MainMenuView(arcade.View):
             "Колесико мыши приближает карту к курсору.\n"
             "Левая кнопка мыши выбирает тайл."
         )
-        arcade.draw_text(text, self.window.width / 2 - 230, self.window.height / 2 + 90,
-                         (210, 220, 230), 17, width=460, multiline=True)
+        self.help_text.text = text
+        self.help_text.x = self.window.width / 2 - 230
+        self.help_text.y = self.window.height / 2 + 90
+        self.help_text.draw()
 
     def on_mouse_motion(self, x, y, dx, dy):
         self.hovered_button = None
@@ -478,9 +515,7 @@ class MainMenuView(arcade.View):
 
 def main():
     settings = load_settings(RESOLUTIONS)
-    width, height = RESOLUTIONS[settings["resolution_index"]]
-    window = arcade.Window(width, height, "HOI 5")
-    window.set_fullscreen(settings["fullscreen"])
+    window = create_window_with_fallback(arcade, "HOI 5", settings, RESOLUTIONS)
     start_view = MainMenuView()
     window.show_view(start_view)
     arcade.run()

@@ -161,6 +161,34 @@ class MapTileData:
         wet = self.terrain_type in ["lake", "swamp", "bog"] or self.moisture > 0.6
         water = self.water_cover > 0.5
 
+        rare_geology = rocky and (
+            self.terrain_type in ["hills", "mountains", "snowy_mountains"]
+            or self.ridge_value > 0.25
+            or self.rock_cover > 0.55
+        )
+        sediment_wet = wet or (
+            self.moisture > 0.38
+            and self.elevation < 0.62
+            and self.water_cover < 0.5
+        )
+        sandy_deposit = (
+            self.sand_cover > 0.18
+            or self.terrain_type in ["desert", "plains", "shallow_water"]
+            or (dry and self.water_cover < 0.5)
+        )
+        peatland = (
+            self.terrain_type in ["swamp", "bog", "tundra", "taiga", "lake"]
+            or (self.moisture > 0.55 and self.temperature < 0.55 and self.elevation < 0.55)
+        )
+        tropical_latex = (
+            self.temperature > 0.55
+            and self.moisture > 0.35
+            and (
+                self.tree_cover > 0.05
+                or self.terrain_type in ["jungle", "tropical_rainforest", "mangrove", "savanna"]
+            )
+        )
+
         if rocky:
             add("coal", 0.22, (100, 800), (5000, 50000))
             add("iron_ore", 0.32, (0, 1000), (10000, 200000))
@@ -176,25 +204,25 @@ class MapTileData:
             add("apatite", 0.09, (50, 300), (5000, 50000))
             add("graphite", 0.08, (50, 500), (1000, 20000))
             add("mica", 0.08, (50, 300), (500, 10000))
-            if self.ridge_value > 0.55:
-                add("gold", 0.05, (100, 1000), (10, 1000))
-                add("silver", 0.08, (100, 800), (50, 5000))
-                add("rare_earth_metals", 0.03, (50, 500), (100, 5000))
-                add("uranium", 0.08, (50, 500), (1000, 10000))
-                add("quartz", 0.14, (10, 200), (1000, 30000))
+            if rare_geology:
+                add("gold", 0.035, (100, 1000), (10, 1000))
+                add("silver", 0.07, (100, 800), (50, 5000))
+                add("rare_earth_metals", 0.045, (50, 500), (100, 5000))
+                add("uranium", 0.05, (50, 500), (1000, 10000))
+                add("quartz", 0.16, (10, 200), (1000, 30000))
 
-        if self.temperature > 0.45 and self.moisture > 0.55:
-            add("bauxite", 0.22, (0, 50), (5000, 100000))
+        if self.temperature > 0.42 and self.moisture > 0.45:
+            add("bauxite", 0.34, (0, 50), (5000, 100000))
 
-        if self.temperature > 0.65 and self.moisture > 0.55 and self.tree_cover > 0.15:
+        if tropical_latex:
             add("rubber", 0.18, (0, 0), (1000, 30000))
 
         if dry:
             add("oil", 0.18, (500, 3000), (100000, 1000000))
             add("potash", 0.15, (100, 1000), (10000, 200000))
             add("salt", 0.18, (0, 50), (50000, 500000))
-            if self.sand_cover > 0.4:
-                add("sand", 0.85, (0, 20), (10000, 100000))
+        if sandy_deposit:
+            add("sand", 0.7, (0, 20), (10000, 100000))
 
         if self.terrain_type in ["mountains", "hills", "desert"] or self.temperature > 0.7:
             add("sulfur", 0.1, (0, 1500), (1000, 50000))
@@ -202,10 +230,10 @@ class MapTileData:
         if any(resource[0] == "oil" for resource in resources):
             add("natural_gas", 0.6, (500, 4000), (50000, 500000))
 
-        if wet:
-            add("clay", 0.28, (0, 20), (5000, 50000))
-            if self.terrain_type in ["swamp", "bog", "tundra"]:
-                add("peat", 0.35, (0, 10), (1000, 20000))
+        if sediment_wet:
+            add("clay", 0.42, (0, 20), (5000, 50000))
+        if peatland:
+            add("peat", 0.22, (0, 10), (1000, 20000))
 
         if water:
             add("phosphorite", 0.1, (0, 100), (10000, 100000))
