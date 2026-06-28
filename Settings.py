@@ -57,3 +57,39 @@ def save_settings(sound_volume, music_volume, fullscreen, resolution_index, reso
     }
     SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
     return settings
+
+
+def create_window_with_fallback(arcade_module, title, settings, resolutions):
+    attempts = [
+        (settings["resolution_index"], settings["fullscreen"]),
+        (DEFAULT_SETTINGS["resolution_index"], False),
+        (0, False),
+    ]
+    seen = set()
+    last_error = None
+
+    for resolution_index, fullscreen in attempts:
+        resolution_index = _clamp_resolution_index(resolution_index, len(resolutions) - 1)
+        attempt_key = (resolution_index, bool(fullscreen))
+        if attempt_key in seen:
+            continue
+        seen.add(attempt_key)
+
+        width, height = resolutions[resolution_index]
+        try:
+            window = arcade_module.Window(int(width), int(height), title)
+            window.set_fullscreen(bool(fullscreen))
+            if attempt_key != (settings["resolution_index"], settings["fullscreen"]):
+                save_settings(
+                    settings["sound_volume"],
+                    settings["music_volume"],
+                    bool(fullscreen),
+                    resolution_index,
+                    resolutions,
+                )
+            return window
+        except Exception as exc:
+            last_error = exc
+            print(f"Window creation failed for {width}x{height}, fullscreen={fullscreen}: {exc}")
+
+    raise last_error
