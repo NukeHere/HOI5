@@ -129,6 +129,7 @@ STARTING_STOCK_MULTIPLIERS = {
 BUILDING_TYPES = [
     ("city", "Город"),
     ("village", "Село"),
+    ("warehouse", "Склад"),
     ("industry", "Промзона"),
     ("farms", "Поля/фермы"),
     ("mine", "Шахта"),
@@ -162,24 +163,44 @@ BUILDING_DISPLAY_NAMES = dict(BUILDING_TYPES)
 STARTING_POPULATION = 21_000_000
 STARTING_BUDGET = 250_000_000.0
 CITY_POPULATION_PER_FULL_COVERAGE = 10_000_000
+STARTING_URBAN_POPULATION_SHARE = 0.72
+RURAL_POPULATION_WEIGHTS = {
+    "village": 3.8,
+    "farms": 0.30,
+    "mine": 0.16,
+    "warehouse": 0.12,
+    "industry": 0.10,
+    "port": 0.08,
+}
 STARTING_INFRASTRUCTURE_BUDGET = {
+    "village": 0.80,
     "farms": 1.45,
     "mine": 1.05,
     "industry": 1.10,
     "port": 0.45,
+    "warehouse": 0.35,
 }
 INFRASTRUCTURE_COVERAGE_COSTS = {
+    "village": 0.85,
     "farms": 1.00,
     "mine": 1.15,
     "industry": 1.35,
     "port": 1.20,
+    "warehouse": 0.90,
 }
 INFRASTRUCTURE_COVERAGE_LIMITS = {
     "city": (0.08, 0.72),
+    "village": (0.06, 0.30),
     "farms": (0.08, 0.42),
     "mine": (0.06, 0.34),
     "industry": (0.06, 0.32),
     "port": (0.08, 0.30),
+    "warehouse": (0.05, 0.26),
+}
+STORAGE_CAPACITY_BY_COVERAGE = {
+    "city": 1_800_000,
+    "village": 520_000,
+    "warehouse": 2_400_000,
 }
 STARTING_MINE_RESOURCE_WEIGHTS = {
     "coal": 1.00,
@@ -350,6 +371,7 @@ TILE_VISUAL_ASSETS = {
     "water": "water.png",
     "city": "city.png",
     "village": "village.png",
+    "warehouse": "warehouse.png",
     "industry": "industry.png",
     "farms": "farms.png",
     "mine": "mine.png",
@@ -361,6 +383,7 @@ VISUAL_FACTOR_WEIGHTS = {
     "industry": 1.3,
     "farms": 1.22,
     "mine": 1.2,
+    "warehouse": 1.16,
     "village": 1.08,
     "water": 1.18,
     "mountains": 1.12,
@@ -1223,6 +1246,50 @@ class Game(arcade.View):
         return stockpiles
 
     @staticmethod
+    def empty_tile_stockpiles():
+        return {
+            "raw": {},
+            "semi_finished": {},
+            "finished": {},
+        }
+
+    def tile_storage_capacity(self, tile):
+        coverage = getattr(tile, "building_coverage", {}) or {}
+        capacity = 0.0
+        for building_key, capacity_per_coverage in STORAGE_CAPACITY_BY_COVERAGE.items():
+            capacity += coverage.get(building_key, 0.0) * capacity_per_coverage
+        return capacity
+
+    def distribute_player_stockpiles_to_tiles(self, player):
+        for tile in player.tiles:
+            tile.resource_stockpiles = self.empty_tile_stockpiles()
+
+        storage_tiles = [
+            (tile, self.tile_storage_capacity(tile))
+            for tile in player.tiles
+            if self.tile_storage_capacity(tile) > 0
+        ]
+        total_capacity = sum(capacity for _tile, capacity in storage_tiles)
+        if total_capacity <= 0:
+            fallback_tile = player.capital_tile or next((tile for tile in player.tiles if not self.is_water_tile(tile)), None)
+            if fallback_tile:
+                self.set_tile_building_coverage(fallback_tile, "warehouse", 0.12, INFRASTRUCTURE_COVERAGE_LIMITS["warehouse"][1])
+                storage_tiles = [(fallback_tile, self.tile_storage_capacity(fallback_tile))]
+                total_capacity = storage_tiles[0][1]
+        if total_capacity <= 0:
+            return
+
+        stockpiles = self.ensure_player_stockpiles(player)
+        for category_key, bucket in stockpiles.items():
+            for resource_key, amount in bucket.items():
+                if amount <= 0:
+                    continue
+                for tile, capacity in storage_tiles:
+                    share = capacity / total_capacity
+                    tile_bucket = tile.resource_stockpiles.setdefault(category_key, {})
+                    tile_bucket[resource_key] = tile_bucket.get(resource_key, 0.0) + amount * share
+
+    @staticmethod
     def add_resource_amount(bucket, key, amount):
         bucket[key] = bucket.get(key, 0.0) + max(0.0, amount)
 
@@ -1374,7 +1441,7 @@ class Game(arcade.View):
     def hex_resource_rows(self, tile):
         stockpiles = {}
         if tile.owner:
-            stockpiles = self.ensure_player_stockpiles(tile.owner).get("raw", {})
+            stockpiles = (getattr(tile, "resource_stockpiles", {}) or {}).get("raw", {})
 
         rows = []
         seen = set()
@@ -1624,8 +1691,8 @@ class Game(arcade.View):
 
         human_edge_slots = human_edge_slots or {}
         main_key, main_coverage = human_factors[0]
-        main_size = self.visual_factor_size(main_coverage, HEX_SIZE * 0.2, HEX_SIZE * 0.34, HEX_SIZE * 0.62)
-        self.append_visual_factor_sprite(main_key, tile.center_x, tile.center_y, main_size, alpha=245)
+        main_size = self.visual_factor_size(main_coverage, HEX_SIZE * 0.25, HEX_SIZE * 0.42, HEX_SIZE * 0.74)
+        self.append_visual_factor_sprite(main_key, tile.center_x, tile.center_y, main_size, alpha=255)
 
         slot_by_key = {key: edge_index for edge_index, key in human_edge_slots.items()}
         fallback_edges = [edge_index for edge_index in range(6) if edge_index not in used_edges]
@@ -1639,8 +1706,8 @@ class Game(arcade.View):
             x, y = self.edge_anchor(tile, edge_index, edge_amount=0.50)
             used_edges.add(edge_index)
 
-            size = self.visual_factor_size(coverage, HEX_SIZE * 0.16, HEX_SIZE * 0.24, HEX_SIZE * 0.42)
-            self.append_visual_factor_sprite(key, x, y, size, alpha=230)
+            size = self.visual_factor_size(coverage, HEX_SIZE * 0.20, HEX_SIZE * 0.30, HEX_SIZE * 0.50)
+            self.append_visual_factor_sprite(key, x, y, size, alpha=248)
 
     def tile_visual_zoom_mode(self):
         zoom = self.world_camera.zoom
@@ -2019,6 +2086,20 @@ class Game(arcade.View):
         centrality = self.owned_neighbor_count(player, tile) / 6
         return self.clamp01(agriculture_scores.get(tile, 0.0) * 0.74 + nearby_city * 0.18 + centrality * 0.08)
 
+    def village_score(self, player, tile, agriculture_scores):
+        if self.is_water_tile(tile):
+            return 0.0
+
+        nearby_city = self.nearby_coverage_score(player, tile, ["city"], 3)
+        centrality = self.owned_neighbor_count(player, tile) / 6
+        no_city_here = 1.0 - (getattr(tile, "building_coverage", {}) or {}).get("city", 0.0)
+        return self.clamp01(
+            agriculture_scores.get(tile, 0.0) * 0.54
+            + nearby_city * 0.22
+            + centrality * 0.14
+            + no_city_here * 0.10
+        )
+
     def mine_score(self, player, tile):
         if self.is_water_tile(tile):
             return 0.0
@@ -2066,11 +2147,32 @@ class Game(arcade.View):
             + passability * 0.06
         )
 
+    def warehouse_score(self, player, tile):
+        if self.is_water_tile(tile):
+            return 0.0
+
+        coverage = getattr(tile, "building_coverage", {}) or {}
+        existing_storage = coverage.get("city", 0.0) + coverage.get("village", 0.0) + coverage.get("warehouse", 0.0)
+        nearby_settlement = self.nearby_coverage_score(player, tile, ["city", "village"], 2)
+        nearby_industry = self.nearby_coverage_score(player, tile, ["industry"], 2)
+        nearby_mine = self.nearby_coverage_score(player, tile, ["mine"], 2)
+        nearby_port = self.nearby_coverage_score(player, tile, ["port"], 3)
+        passability = self.clamp01(getattr(tile, "passability", 0.0))
+        return self.clamp01(
+            nearby_settlement * 0.28
+            + nearby_industry * 0.22
+            + nearby_mine * 0.16
+            + nearby_port * 0.14
+            + passability * 0.16
+            + (1.0 - min(1.0, existing_storage)) * 0.04
+        )
+
     def clear_starting_infrastructure(self, player):
         for tile in player.tiles:
             tile.buildings = []
             tile.building_coverage = {}
             tile.population = 0.0
+            tile.resource_stockpiles = self.empty_tile_stockpiles()
 
     def generate_starting_infrastructure_for_all_states(self):
         for player in self.players:
@@ -2094,6 +2196,12 @@ class Game(arcade.View):
             for tile in land_tiles
         }
         self.place_starting_cities(player, land_tiles, city_scores)
+        village_unspent = self.place_starting_villages(
+            player,
+            land_tiles,
+            agriculture_scores,
+            STARTING_INFRASTRUCTURE_BUDGET["village"],
+        )
 
         farm_unspent = self.place_starting_farms(
             player,
@@ -2124,11 +2232,19 @@ class Game(arcade.View):
             port_scores = {tile: self.port_score(player, tile) for tile in land_tiles}
             port_unspent = self.place_starting_ports(player, land_tiles, port_scores, port_budget)
 
+        warehouse_unspent = self.place_starting_warehouses(
+            player,
+            land_tiles,
+            STARTING_INFRASTRUCTURE_BUDGET["warehouse"] + village_unspent * 0.35,
+        )
+
         self.apply_starting_compensation(
             player,
-            farm_unspent + mine_unspent + industry_unspent + port_unspent,
+            farm_unspent + mine_unspent + industry_unspent + port_unspent + warehouse_unspent,
             agriculture_scores,
         )
+        self.distribute_starting_population(player)
+        self.distribute_player_stockpiles_to_tiles(player)
 
     def place_starting_cities(self, player, land_tiles, city_scores):
         coverage_budget = (player.population or STARTING_POPULATION) / CITY_POPULATION_PER_FULL_COVERAGE
@@ -2154,9 +2270,43 @@ class Game(arcade.View):
         if total_city_coverage <= 0:
             return
 
+        urban_population = (player.population or STARTING_POPULATION) * STARTING_URBAN_POPULATION_SHARE
         for tile in city_tiles:
             share = tile.building_coverage.get("city", 0.0) / total_city_coverage
-            tile.population = (player.population or STARTING_POPULATION) * share
+            tile.population = urban_population * share
+
+    def distribute_starting_population(self, player):
+        total_population = player.population or STARTING_POPULATION
+        assigned_population = sum(max(0.0, getattr(tile, "population", 0.0) or 0.0) for tile in player.tiles)
+        remaining_population = max(0.0, total_population - assigned_population)
+        if remaining_population <= 0:
+            return
+
+        weighted_tiles = []
+        for tile in player.tiles:
+            coverage = getattr(tile, "building_coverage", {}) or {}
+            if coverage.get("city", 0.0) > 0:
+                continue
+            weight = 0.0
+            for building_key, multiplier in RURAL_POPULATION_WEIGHTS.items():
+                weight += coverage.get(building_key, 0.0) * multiplier
+            if weight > 0:
+                weighted_tiles.append((tile, weight))
+
+        total_weight = sum(weight for _tile, weight in weighted_tiles)
+        if total_weight <= 0:
+            city_tiles = [
+                tile for tile in player.tiles
+                if (getattr(tile, "building_coverage", {}) or {}).get("city", 0.0) > 0
+            ]
+            total_weight = sum(tile.building_coverage.get("city", 0.0) for tile in city_tiles)
+            weighted_tiles = [(tile, tile.building_coverage.get("city", 0.0)) for tile in city_tiles]
+
+        if total_weight <= 0:
+            return
+
+        for tile, weight in weighted_tiles:
+            tile.population = (getattr(tile, "population", 0.0) or 0.0) + remaining_population * weight / total_weight
 
     def place_starting_farms(self, player, land_tiles, agriculture_scores, budget):
         scores = {
@@ -2167,6 +2317,16 @@ class Game(arcade.View):
         candidates = self.sorted_scored_candidates(scores, limit, min_score=0.12)
         coverage_budget = budget / INFRASTRUCTURE_COVERAGE_COSTS["farms"]
         return self.allocate_building_coverage("farms", candidates, coverage_budget, decay=0.88)
+
+    def place_starting_villages(self, player, land_tiles, agriculture_scores, budget):
+        scores = {
+            tile: self.village_score(player, tile, agriculture_scores)
+            for tile in land_tiles
+        }
+        limit = self.infrastructure_candidate_limit(len(land_tiles), 0.22, 3, 10)
+        candidates = self.sorted_scored_candidates(scores, limit, min_score=0.12)
+        coverage_budget = budget / INFRASTRUCTURE_COVERAGE_COSTS["village"]
+        return self.allocate_building_coverage("village", candidates, coverage_budget, decay=0.86)
 
     def place_starting_mines(self, player, land_tiles, budget):
         scores = {
@@ -2193,6 +2353,16 @@ class Game(arcade.View):
         candidates = self.sorted_scored_candidates(port_scores, limit, min_score=0.08)
         coverage_budget = budget / INFRASTRUCTURE_COVERAGE_COSTS["port"]
         return self.allocate_building_coverage("port", candidates, coverage_budget, decay=0.82)
+
+    def place_starting_warehouses(self, player, land_tiles, budget):
+        scores = {
+            tile: self.warehouse_score(player, tile)
+            for tile in land_tiles
+        }
+        limit = self.infrastructure_candidate_limit(len(land_tiles), 0.16, 2, 7)
+        candidates = self.sorted_scored_candidates(scores, limit, min_score=0.10)
+        coverage_budget = budget / INFRASTRUCTURE_COVERAGE_COSTS["warehouse"]
+        return self.allocate_building_coverage("warehouse", candidates, coverage_budget, decay=0.82)
 
     def add_stockpile_compensation(self, player, bucket_key, resource_key, amount):
         if amount <= 0:
