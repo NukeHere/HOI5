@@ -163,6 +163,10 @@ BUILDING_DISPLAY_NAMES = dict(BUILDING_TYPES)
 STARTING_POPULATION = 21_000_000
 STARTING_BUDGET = 250_000_000.0
 CITY_POPULATION_PER_FULL_COVERAGE = 10_000_000
+STARTING_REFERENCE_LAND_TILES = 90
+STARTING_REFERENCE_MAP_SIZE = 40
+STARTING_MIN_SCALE = 0.45
+STARTING_MAX_SCALE = 2.40
 STARTING_URBAN_POPULATION_SHARE = 0.72
 RURAL_POPULATION_WEIGHTS = {
     "village": 3.8,
@@ -1213,14 +1217,38 @@ class Game(arcade.View):
             return FINISHED_RESOURCE_NAMES
         return []
 
-    def create_starting_stockpiles(self, player):
+    def player_starting_scale(self, player=None, land_tile_count=None):
+        if land_tile_count is None and player is not None:
+            land_tile_count = sum(1 for tile in player.tiles if not self.is_water_tile(tile))
+        land_tile_count = land_tile_count or STARTING_REFERENCE_LAND_TILES
+        territory_scale = land_tile_count / STARTING_REFERENCE_LAND_TILES
+        map_scale = max(0.65, min(1.8, self.map_size / STARTING_REFERENCE_MAP_SIZE))
+        scale = territory_scale * (map_scale ** 0.45)
+        return max(STARTING_MIN_SCALE, min(STARTING_MAX_SCALE, scale))
+
+    def apply_starting_profile(self, player):
+        scale = self.player_starting_scale(player)
+        player.starting_scale = scale
+        player.population = round(STARTING_POPULATION * scale)
+        player.budget = STARTING_BUDGET * (0.65 + scale * 0.35)
+        self.create_starting_stockpiles(player, scale)
+
+    @staticmethod
+    def scaled_starting_infrastructure_budget(scale):
+        budget_scale = max(0.45, min(2.6, scale ** 0.88))
+        return {
+            key: value * budget_scale
+            for key, value in STARTING_INFRASTRUCTURE_BUDGET.items()
+        }
+
+    def create_starting_stockpiles(self, player, scale=1.0):
         rng = random.Random((self.world_seed + 1) * 1009)
         stockpiles = self.empty_resource_stockpiles()
 
         for category_key, (min_amount, max_amount) in STARTING_STOCK_RANGES.items():
             for resource_key in self.resource_names_for_category(category_key):
                 multiplier = STARTING_STOCK_MULTIPLIERS.get(resource_key, 1.0)
-                amount = rng.uniform(min_amount, max_amount) * multiplier
+                amount = rng.uniform(min_amount, max_amount) * multiplier * scale
                 stockpiles[category_key][resource_key] = amount
 
         player.resource_stockpiles = stockpiles
@@ -1229,6 +1257,7 @@ class Game(arcade.View):
     def ensure_player_stockpiles(self, player):
         stockpiles = player.resource_stockpiles or self.empty_resource_stockpiles()
         changed = False
+        scale = getattr(player, "starting_scale", self.player_starting_scale(player))
 
         for category_key, (min_amount, max_amount) in STARTING_STOCK_RANGES.items():
             bucket = stockpiles.setdefault(category_key, {})
@@ -1238,7 +1267,7 @@ class Game(arcade.View):
                 resource_seed = sum((index + 1) * ord(char) for index, char in enumerate(resource_key))
                 rng = random.Random((self.world_seed + 1) * 1009 + player.id * 7919 + resource_seed)
                 multiplier = STARTING_STOCK_MULTIPLIERS.get(resource_key, 1.0)
-                bucket[resource_key] = rng.uniform(min_amount, max_amount) * multiplier
+                bucket[resource_key] = rng.uniform(min_amount, max_amount) * multiplier * scale
                 changed = True
 
         if changed or player.resource_stockpiles is None:
@@ -1549,9 +1578,11 @@ class Game(arcade.View):
             "snowfield": tile.snow_cover,
         }
 
-    @staticmethod
-    def human_coverages(tile):
-        return dict(getattr(tile, "building_coverage", {}) or {})
+    def human_coverages(self, tile):
+        coverages = dict(getattr(tile, "building_coverage", {}) or {})
+        if coverages.get("port", 0.0) > 0 and not self.is_coastal_land_tile(tile):
+            coverages.pop("port", None)
+        return coverages
 
     def ranked_visual_factors(self, tile, include_natural=True, include_human=True):
         factors = {}
@@ -1594,6 +1625,9 @@ class Game(arcade.View):
         )
 
     def best_neighbor_edge_for_factor(self, tile, factor_key):
+        if factor_key == "port":
+            return self.water_edge_for_port(tile)
+
         best_edge = None
         best_value = 0.0
         for edge_index in range(6):
@@ -1608,9 +1642,16 @@ class Game(arcade.View):
                 best_value = value
         return best_edge, best_value
 
+    def water_edge_for_port(self, tile):
+        for edge_index in range(6):
+            neighbor = self.hex_lookup.get(self.get_neighbor_coords_for_edge(tile, edge_index))
+            if neighbor and self.is_water_tile(neighbor):
+                return edge_index, 1.0
+        return None, 0.0
+
     def fallback_edge_factor(self, tile, excluded_key=None):
         for key, coverage in self.ranked_visual_factors(tile, include_natural=True, include_human=False):
-            if key != excluded_key:
+            if key != excluded_key and key != "water":
                 return key, coverage
         return None, 0.0
 
@@ -1618,8 +1659,9 @@ class Game(arcade.View):
         neighbor = self.hex_lookup.get(self.get_neighbor_coords_for_edge(tile, edge_index))
         if neighbor:
             ranked = self.ranked_visual_factors(neighbor, include_natural=True, include_human=True)
-            if ranked:
-                return ranked[0]
+            for key, coverage in ranked:
+                if key != "water":
+                    return key, coverage
 
         return self.fallback_edge_factor(tile, excluded_key=center_natural_key)
 
@@ -1921,6 +1963,8 @@ class Game(arcade.View):
 
     def set_tile_building_coverage(self, tile, building_key, amount, max_coverage):
         if amount <= 0:
+            return 0.0
+        if building_key == "port" and not self.is_coastal_land_tile(tile):
             return 0.0
 
         coverage = getattr(tile, "building_coverage", None)
@@ -2423,10 +2467,7 @@ class Game(arcade.View):
                 color=STATE_COLORS[index % len(STATE_COLORS)],
                 border_color=STATE_BORDER_COLORS[index % len(STATE_BORDER_COLORS)],
                 is_human=index == 0,
-                population=STARTING_POPULATION,
-                budget=STARTING_BUDGET,
             )
-            self.create_starting_stockpiles(player)
             self.players.append(player)
 
         self.human_player = self.players[0]
@@ -2434,6 +2475,9 @@ class Game(arcade.View):
         for player, start_tile in zip(self.players, start_tiles):
             player.capital_tile = start_tile
             self.claim_start_territory(player, start_tile, self.start_territory_radius)
+
+        for player in self.players:
+            self.apply_starting_profile(player)
 
         self.generate_starting_infrastructure_for_all_states()
 
