@@ -120,7 +120,8 @@ STARTING_STOCK_MULTIPLIERS = {
     "sand": 1.45,
     "gravel": 1.35,
     "crushed_stone": 1.35,
-    "food": 1.6,
+    "food": 5.0,
+    "fertilizer": 2.2,
     "consumer_goods": 1.35,
     "weapons": 0.55,
     "ships": 0.25,
@@ -275,7 +276,7 @@ STARTING_RESOURCE_COMPENSATION_GROUPS = [
     },
 ]
 STARTING_AGRICULTURE_COMPENSATION = {
-    "stock": [("semi_finished", "food", 28_000, 260), ("semi_finished", "fertilizer", 10_000, 320)],
+    "stock": [("semi_finished", "food", 90_000, 260), ("semi_finished", "fertilizer", 22_000, 320)],
     "budget": 10_000_000,
 }
 INFRASTRUCTURE_MISSING_BUDGET_VALUE = 30_000_000
@@ -304,8 +305,11 @@ FINISHED_RESOURCE_NAMES = [
     "weapons",
     "ships",
 ]
-PRODUCTION_STAGES = ["raw", "semi_finished", "finished"]
+PRODUCTION_STAGES = ["raw", "semi_finished", "finished", "upkeep"]
 PRODUCTION_MONTH_HOURS = 24 * 30
+FARM_FOOD_BASE_RATE = 30_000
+FERTILIZER_FOOD_BONUS = 0.30
+FERTILIZER_CONSUMPTION_PER_FARM_COVERAGE = 950
 INDUSTRY_SECTOR_RESOURCE_WEIGHTS = {
     "metallurgy": {
         "iron_ore": 1.0,
@@ -883,9 +887,8 @@ class StatePlayer:
             }
         if self.production_cache is None:
             self.production_cache = {
-                "raw": {"inputs": {}, "outputs": {}},
-                "semi_finished": {"inputs": {}, "outputs": {}},
-                "finished": {"inputs": {}, "outputs": {}},
+                stage: {"inputs": {}, "outputs": {}}
+                for stage in PRODUCTION_STAGES
             }
 
 
@@ -1275,6 +1278,8 @@ class Game(arcade.View):
         self.hovered_hex_specialization_button = False
         self.hex_panel_scroll = 0.0
         self.hex_panel_content_height = 0.0
+        self.hex_resources_expanded = False
+        self.hex_resources_toggle_rect = None
         self.hex_panel_specialization_mode = False
         self.hex_specialization_row_rects = []
         self.hex_panel_message = ""
@@ -1733,8 +1738,21 @@ class Game(arcade.View):
         farms_coverage = coverage.get("farms", 0.0)
         if farms_coverage > 0:
             agriculture_efficiency = modifiers.get("agriculture_efficiency", 1.0)
-            output = farms_coverage * self.agriculture_score(tile) * agriculture_efficiency * 18000
+            output = (
+                farms_coverage
+                * self.agriculture_score(tile)
+                * agriculture_efficiency
+                * FARM_FOOD_BASE_RATE
+                * (1.0 + FERTILIZER_FOOD_BONUS)
+            )
             self.add_production_amount(cache, "raw", "outputs", "food", output)
+            self.add_production_amount(
+                cache,
+                "upkeep",
+                "inputs",
+                "fertilizer",
+                farms_coverage * FERTILIZER_CONSUMPTION_PER_FARM_COVERAGE,
+            )
 
         allocation = getattr(tile, "industry_allocation", None)
         if allocation is None or (coverage.get("industry", 0.0) > 0 and not allocation):
@@ -1784,7 +1802,7 @@ class Game(arcade.View):
         for key, amount in LIFE_SUPPORT_CONSUMPTION_PER_MILLION.items():
             self.add_production_amount(
                 player.production_cache,
-                "finished",
+                "upkeep",
                 "inputs",
                 key,
                 amount * population_millions,
@@ -1799,7 +1817,7 @@ class Game(arcade.View):
                 for key, amount in upkeep.items():
                     self.add_production_amount(
                         player.production_cache,
-                        "finished",
+                        "upkeep",
                         "inputs",
                         key,
                         amount * building_coverage,
@@ -1822,7 +1840,8 @@ class Game(arcade.View):
         if not player:
             tile.production_cache = self.empty_production_cache()
             return tile.production_cache
-        return self.recalculate_state_production_cache(player)
+        self.recalculate_state_production_cache(player)
+        return getattr(tile, "production_cache", None) or self.empty_production_cache()
 
     def production_amount_for_key(self, player, key, direction):
         cache = player.production_cache or self.empty_production_cache()
@@ -2043,7 +2062,9 @@ class Game(arcade.View):
     def hex_resource_rows(self, tile):
         stockpiles = {}
         if tile.owner:
-            stockpiles = (getattr(tile, "resource_stockpiles", {}) or {}).get("raw", {})
+            for category_stockpiles in (getattr(tile, "resource_stockpiles", {}) or {}).values():
+                for key, amount in category_stockpiles.items():
+                    stockpiles[key] = stockpiles.get(key, 0.0) + amount
 
         rows = []
         seen = set()
@@ -4183,6 +4204,8 @@ class Game(arcade.View):
         self.hovered_hex_specialization_button = False
         self.hex_panel_scroll = 0.0
         self.hex_panel_content_height = 0.0
+        self.hex_resources_expanded = False
+        self.hex_resources_toggle_rect = None
         self.hex_panel_specialization_mode = False
         self.hex_specialization_row_rects = []
         self.hex_panel_message = ""
@@ -4208,12 +4231,33 @@ class Game(arcade.View):
         self.hex_panel_message_timer = 2.0
         self.hex_panel_scroll = 0.0
 
+    def toggle_hex_resources_expanded(self):
+        self.hex_resources_expanded = not self.hex_resources_expanded
+        self.clamp_hex_panel_scroll()
+
     def draw_hex_info_panel(self):
         tile = self.selected_tile
         if not tile:
             return
 
         panel_x, panel_y, panel_width, panel_height = self.hex_panel_rect()
+        content_bottom, content_top = self.hex_panel_content_bounds()
+        content_width = panel_width - 32
+        visible_content_height = max(1, content_top - content_bottom)
+        self.hex_specialization_row_rects = []
+        self.hex_resources_toggle_rect = None
+
+        def visible_y(draw_y, margin=24):
+            return content_bottom - margin <= draw_y <= content_top + margin
+
+        def panel_text(text, x, draw_y, color=arcade.color.WHITE, font_size=12, **kwargs):
+            if visible_y(draw_y):
+                self.draw_ui_text(text, x, draw_y, color, font_size, **kwargs)
+
+        def panel_section(title, draw_y):
+            panel_text(title, panel_x + 16, draw_y, arcade.color.WHITE, 14)
+            return draw_y - 20
+
         arcade.draw_lbwh_rectangle_filled(panel_x, panel_y, panel_width, panel_height, (18, 24, 31, 244))
         arcade.draw_lbwh_rectangle_outline(panel_x, panel_y, panel_width, panel_height, (110, 130, 154), 2)
 
@@ -4224,9 +4268,9 @@ class Game(arcade.View):
         self.draw_ui_text("X", close_x + close_width / 2, close_y + close_height / 2, arcade.color.WHITE, 13,
                           anchor_x="center", anchor_y="center")
 
-        y = panel_y + panel_height - 28
-        self.draw_ui_text(f"Гекс {tile.q}:{tile.r}", panel_x + 16, y, arcade.color.WHITE, 18, anchor_y="center")
-        y -= 34
+        title_y = panel_y + panel_height - 28
+        self.draw_ui_text(f"Гекс {tile.q}:{tile.r}", panel_x + 16, title_y, arcade.color.WHITE, 18, anchor_y="center")
+        y = content_top + self.hex_panel_scroll
 
         owner_name = tile.owner.name if tile.owner else "Нейтральная территория"
         info_rows = [
@@ -4236,57 +4280,99 @@ class Game(arcade.View):
             ("Проходимость", self.format_percent(getattr(tile, "passability", 0.0))),
         ]
         for label, value in info_rows:
-            self.draw_ui_text(label, panel_x + 16, y, (150, 166, 184), 11)
-            self.draw_ui_text(value, panel_x + 122, y, (224, 234, 244), 12)
+            panel_text(label, panel_x + 16, y, (150, 166, 184), 11)
+            panel_text(value, panel_x + 122, y, (224, 234, 244), 12)
             y -= 18
 
         y -= 8
-        self.draw_ui_text("Ресурсы", panel_x + 16, y, arcade.color.WHITE, 14)
-        y -= 22
-        self.draw_ui_text("Название", panel_x + 16, y, (150, 166, 184), 10)
-        self.draw_ui_text("В земле", panel_x + 174, y, (150, 166, 184), 10)
-        self.draw_ui_text("Склад", panel_x + 270, y, (150, 166, 184), 10)
+        y = panel_section("Ресурсы", y)
+        panel_text("Название", panel_x + 16, y, (150, 166, 184), 10)
+        panel_text("В земле", panel_x + 174, y, (150, 166, 184), 10)
+        panel_text("Склад", panel_x + 270, y, (150, 166, 184), 10)
         y -= 16
 
         resource_rows = self.hex_resource_rows(tile)
-        max_resource_rows = 8 if panel_height >= 520 else 5
         if resource_rows:
-            for row in resource_rows[:max_resource_rows]:
-                self.draw_ui_text(row["name"], panel_x + 16, y, (224, 234, 244), 11)
+            max_collapsed_resources = 5
+            displayed_resource_rows = resource_rows if self.hex_resources_expanded else resource_rows[:max_collapsed_resources]
+            list_top_y = y + 12
+            for row in displayed_resource_rows:
+                row_name = row["name"]
+                if len(row_name) > 21:
+                    row_name = row_name[:20] + "..."
+                panel_text(row_name, panel_x + 16, y, (224, 234, 244), 11)
                 ground = self.format_resource_amount(row["ground"]) if row["ground"] > 0 else "-"
                 stock = self.format_resource_amount(row["stock"]) if row["stock"] > 0 else "-"
-                self.draw_ui_text(ground, panel_x + 174, y, (206, 218, 230), 11)
-                self.draw_ui_text(stock, panel_x + 270, y, (206, 218, 230), 11)
+                panel_text(ground, panel_x + 174, y, (206, 218, 230), 11)
+                panel_text(stock, panel_x + 270, y, (206, 218, 230), 11)
                 y -= 16
-            if len(resource_rows) > max_resource_rows:
-                self.draw_ui_text(f"Еще {len(resource_rows) - max_resource_rows}", panel_x + 16, y, (180, 192, 205), 10)
+            if len(resource_rows) > max_collapsed_resources:
+                toggle_text = "Скрыть" if self.hex_resources_expanded else f"Еще {len(resource_rows) - max_collapsed_resources}"
+                panel_text(toggle_text, panel_x + 16, y, (180, 192, 205), 10)
                 y -= 16
+                rect_top = min(content_top, list_top_y + 8)
+                rect_bottom = max(content_bottom, y + 4)
+                if rect_top > rect_bottom:
+                    self.hex_resources_toggle_rect = (panel_x + 12, rect_bottom, panel_width - 24, rect_top - rect_bottom)
         else:
-            self.draw_ui_text("Нет доступных залежей и запасов", panel_x + 16, y, (180, 192, 205), 11)
+            panel_text("Нет доступных залежей и запасов", panel_x + 16, y, (180, 192, 205), 11)
             y -= 18
 
         y -= 8
-        self.draw_ui_text("Строения", panel_x + 16, y, arcade.color.WHITE, 14)
-        y -= 20
+        y = panel_section("Строения", y)
         coverage = getattr(tile, "building_coverage", {}) or {}
         buildings = [key for key in getattr(tile, "buildings", []) if key in BUILDING_DISPLAY_NAMES]
-        max_building_rows = 5 if panel_height >= 520 else 3
         if coverage:
-            for key, value in sorted(coverage.items(), key=lambda item: item[0])[:max_building_rows]:
+            for key, value in sorted(coverage.items(), key=lambda item: item[0]):
                 label = BUILDING_DISPLAY_NAMES.get(key, key)
-                self.draw_ui_text(f"{label}: {value:.0%}", panel_x + 16, y, (224, 234, 244), 11)
+                panel_text(f"{label}: {value:.0%}", panel_x + 16, y, (224, 234, 244), 11)
                 y -= 16
         elif buildings:
-            for key in buildings[:max_building_rows]:
-                self.draw_ui_text(BUILDING_DISPLAY_NAMES.get(key, key), panel_x + 16, y, (224, 234, 244), 11)
+            for key in buildings:
+                panel_text(BUILDING_DISPLAY_NAMES.get(key, key), panel_x + 16, y, (224, 234, 244), 11)
                 y -= 16
         else:
-            self.draw_ui_text("Пока нет", panel_x + 16, y, (180, 192, 205), 11)
+            panel_text("Пока нет", panel_x + 16, y, (180, 192, 205), 11)
             y -= 16
 
+        if self.selected_tile_has_industry():
+            y -= 8
+            y = panel_section("Производство", y)
+            allocation = getattr(tile, "industry_allocation", {}) or {}
+            if not allocation:
+                allocation = self.assign_industry_allocation(tile.owner, tile) if tile.owner else {}
+            modifiers = tile.owner.production_modifiers if tile.owner else {}
+            efficiency = self.specialization_efficiency(
+                allocation,
+                modifiers.get("industry_diversification_penalty", 0.9),
+                modifiers.get("industry_free_specializations", 1),
+            )
+            panel_text(f"Эффективность: {efficiency:.0%}", panel_x + 16, y, (224, 234, 244), 11)
+            y -= 18
+            for sector, share in sorted(allocation.items(), key=lambda item: item[1], reverse=True):
+                label = INDUSTRY_SECTOR_LABELS.get(sector, sector)
+                panel_text(f"{label}: {share:.0%}", panel_x + 16, y, (206, 218, 230), 11)
+                y -= 16
+
+            if self.hex_panel_specialization_mode:
+                y -= 6
+                panel_text("Выбор категории", panel_x + 16, y, (150, 166, 184), 10)
+                y -= 18
+                for sector, label in INDUSTRY_SECTOR_LABELS.items():
+                    row_x = panel_x + 16
+                    row_y = y - 6
+                    row_height = 24
+                    active = allocation.get(sector, 0.0) > 0
+                    if content_bottom <= row_y + row_height and row_y <= content_top:
+                        fill = (54, 76, 96, 190) if active else (32, 42, 54, 160)
+                        arcade.draw_lbwh_rectangle_filled(row_x, row_y, content_width, row_height, fill)
+                        arcade.draw_lbwh_rectangle_outline(row_x, row_y, content_width, row_height, (84, 108, 132), 1)
+                        panel_text(label, row_x + 8, y + 6, (226, 234, 242), 11, anchor_y="center")
+                        self.hex_specialization_row_rects.append(((row_x, row_y, content_width, row_height), sector))
+                    y -= row_height + 5
+
         y -= 8
-        self.draw_ui_text("Климат", panel_x + 16, y, arcade.color.WHITE, 14)
-        y -= 20
+        y = panel_section("Климат", y)
         climate_rows = [
             ("Тип", self.climate_display_name(tile)),
             ("Температура", self.format_percent(getattr(tile, "temperature", 0.0))),
@@ -4294,9 +4380,32 @@ class Game(arcade.View):
             ("Высота", self.format_percent(getattr(tile, "elevation", 0.0))),
         ]
         for label, value in climate_rows:
-            self.draw_ui_text(label, panel_x + 16, y, (150, 166, 184), 11)
-            self.draw_ui_text(value, panel_x + 122, y, (224, 234, 244), 11)
+            panel_text(label, panel_x + 16, y, (150, 166, 184), 11)
+            panel_text(value, panel_x + 122, y, (224, 234, 244), 11)
             y -= 16
+
+        self.hex_panel_content_height = max(0.0, content_top + self.hex_panel_scroll - y + 12)
+        self.clamp_hex_panel_scroll()
+
+        if self.hex_panel_content_height > visible_content_height + 2:
+            track_x = panel_x + panel_width - 10
+            track_y = content_bottom
+            track_height = visible_content_height
+            max_scroll = max(1.0, self.hex_panel_content_height - visible_content_height)
+            thumb_height = max(28, track_height * visible_content_height / self.hex_panel_content_height)
+            thumb_y = track_y + (track_height - thumb_height) * (1 + self.hex_panel_scroll / max_scroll)
+            arcade.draw_lbwh_rectangle_filled(track_x, track_y, 4, track_height, (48, 62, 78, 180))
+            arcade.draw_lbwh_rectangle_filled(track_x, thumb_y, 4, thumb_height, (132, 156, 184, 220))
+
+        if self.selected_tile_has_industry():
+            spec_x, spec_y, spec_width, spec_height = self.hex_panel_specialization_button_rect()
+            spec_fill = (64, 92, 118) if self.hovered_hex_specialization_button else (38, 50, 66)
+            spec_border = (165, 195, 230) if self.hovered_hex_specialization_button else (95, 118, 145)
+            arcade.draw_lbwh_rectangle_filled(spec_x, spec_y, spec_width, spec_height, spec_fill)
+            arcade.draw_lbwh_rectangle_outline(spec_x, spec_y, spec_width, spec_height, spec_border, 2)
+            spec_label = "Закрыть специализацию" if self.hex_panel_specialization_mode else "Изменить специализацию"
+            self.draw_ui_text(spec_label, spec_x + spec_width / 2, spec_y + spec_height / 2,
+                              arcade.color.WHITE, 12, anchor_x="center", anchor_y="center")
 
         button_x, button_y, button_width, button_height = self.hex_panel_build_button_rect()
         button_fill = (64, 92, 118) if self.hovered_hex_build_button else (42, 55, 72)
@@ -4307,7 +4416,11 @@ class Game(arcade.View):
                           arcade.color.WHITE, 14, anchor_x="center", anchor_y="center")
 
         if self.hex_panel_message:
-            self.draw_ui_text(self.hex_panel_message, panel_x + 16, button_y + button_height + 12, (235, 205, 120), 11)
+            message_y = button_y + button_height + 12
+            if self.selected_tile_has_industry():
+                _spec_x, spec_y, _spec_width, spec_height = self.hex_panel_specialization_button_rect()
+                message_y = spec_y + spec_height + 10
+            self.draw_ui_text(self.hex_panel_message, panel_x + 16, message_y, (235, 205, 120), 11)
 
     def draw_time_hud(self):
         panel_x, panel_y, panel_width, panel_height = self.time_panel_rect
@@ -4872,6 +4985,17 @@ class Game(arcade.View):
                 if self.point_in_rect(x, y, self.hex_panel_close_rect()):
                     self.close_hex_panel()
                     return
+                if self.hex_resources_toggle_rect and self.point_in_rect(x, y, self.hex_resources_toggle_rect):
+                    self.toggle_hex_resources_expanded()
+                    return
+                if self.selected_tile_has_industry() and self.point_in_rect(x, y, self.hex_panel_specialization_button_rect()):
+                    self.toggle_hex_specialization_mode()
+                    return
+                if self.hex_panel_specialization_mode:
+                    for rect, sector in self.hex_specialization_row_rects:
+                        if self.point_in_rect(x, y, rect):
+                            self.set_selected_tile_industry_sector(sector)
+                            return
                 if self.point_in_rect(x, y, self.hex_panel_build_button_rect()):
                     self.trigger_hex_build_placeholder()
                     return
@@ -4954,8 +5078,15 @@ class Game(arcade.View):
             self.drag_start_y = y
             self.drag_start_camera_x, self.drag_start_camera_y = self.target_camera_x, self.target_camera_y
         elif button == arcade.MOUSE_BUTTON_LEFT:
+            previous_tile = self.selected_tile
             self.selected_tile = self.get_tile_at(world_x, world_y)
             if self.selected_tile:
+                if self.selected_tile != previous_tile:
+                    self.hex_panel_scroll = 0.0
+                    self.hex_panel_content_height = 0.0
+                    self.hex_resources_expanded = False
+                    self.hex_resources_toggle_rect = None
+                    self.hex_panel_specialization_mode = False
                 self.selection_border.position = (self.selected_tile.center_x, self.selected_tile.center_y)
                 self.selection_border.visible = True
                 self.last_visible_update = 0
@@ -4985,6 +5116,7 @@ class Game(arcade.View):
             self.hovered_build_button = False
             self.hovered_hex_panel_close = False
             self.hovered_hex_build_button = False
+            self.hovered_hex_specialization_button = False
             self.hovered_resource_summary = False
             if self.pause_screen == "settings" and self.open_pause_dropdown:
                 for dropdown in self.pause_dropdowns:
@@ -5015,6 +5147,11 @@ class Game(arcade.View):
         )
         self.hovered_hex_build_button = (
             bool(over_hex_panel) and self.point_in_rect(x, y, self.hex_panel_build_button_rect())
+        )
+        self.hovered_hex_specialization_button = (
+            bool(over_hex_panel)
+            and self.selected_tile_has_industry()
+            and self.point_in_rect(x, y, self.hex_panel_specialization_button_rect())
         )
         if (
             self.hovered_top_nav_key
@@ -5098,6 +5235,10 @@ class Game(arcade.View):
                         dropdown.scroll(-scroll_y)
                         dropdown.hovered_index = dropdown.option_at(x, y)
                         return
+            return
+
+        if self.selected_tile and self.point_in_rect(x, y, self.hex_panel_rect()):
+            self.scroll_hex_panel(scroll_y)
             return
 
         if self.active_top_panel_key == "resources" and self.side_panel_progress > 0:
