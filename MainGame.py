@@ -113,19 +113,21 @@ STARTING_STOCK_MULTIPLIERS = {
     "silver": 0.18,
     "rare_earth_metals": 0.12,
     "uranium": 0.16,
-    "oil": 1.35,
-    "natural_gas": 1.35,
+    "oil": 1.7,
+    "natural_gas": 1.7,
     "coal": 1.35,
     "salt": 1.5,
     "sand": 1.45,
     "gravel": 1.35,
     "crushed_stone": 1.35,
-    "food": 5.0,
+    "food": 15.0,
     "fertilizer": 2.2,
-    "consumer_goods": 1.35,
+    "consumer_goods": 12.0,
     "weapons": 0.55,
     "ships": 0.25,
     "electronics": 0.65,
+    "construction_goods": 12.0,
+    "refined_fuel": 6,
 }
 BUILDING_TYPES = [
     ("city", "Город"),
@@ -183,13 +185,13 @@ RURAL_POPULATION_WEIGHTS = {
 }
 STARTING_INFRASTRUCTURE_BUDGET = {
     "village": 1.20,
-    "farms": 5.075,
-    "mine": 1.05,
-    "industry": 2.75,
+    "farms": 5.20,
+    "mine": 1.20,
+    "industry": 3.50,
     "port": 0.45,
     "warehouse": 0.35,
     "fuel_storage": 1.10,
-    "refinery": 0.70,
+    "refinery": 1.00,
 }
 INFRASTRUCTURE_COVERAGE_COSTS = {
     "village": 0.85,
@@ -363,11 +365,13 @@ INDUSTRY_SECTOR_LABELS = {
     "weapons": "Оружие",
 }
 LIFE_SUPPORT_CONSUMPTION_PER_MILLION = {
-    "food": 8200,
-    "consumer_goods": 1295,
+    "food": 8100,
+    "consumer_goods": 1000,
     "construction_goods": 420,
     "refined_fuel": 260,
     "chemicals": 95,
+    "vehicles": 10,
+    "electronics": 2,
 }
 SETTLEMENT_UPKEEP_PER_COVERAGE = {
     "city": {
