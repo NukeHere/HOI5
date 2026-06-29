@@ -76,9 +76,12 @@ def create_window_with_fallback(arcade_module, title, settings, resolutions):
         seen.add(attempt_key)
 
         width, height = resolutions[resolution_index]
+        window = None
         try:
             window = arcade_module.Window(int(width), int(height), title)
-            window.set_fullscreen(bool(fullscreen))
+            if fullscreen:
+                window.set_fullscreen(True)
+            window.switch_to()
             if attempt_key != (settings["resolution_index"], settings["fullscreen"]):
                 save_settings(
                     settings["sound_volume"],
@@ -91,5 +94,10 @@ def create_window_with_fallback(arcade_module, title, settings, resolutions):
         except Exception as exc:
             last_error = exc
             print(f"Window creation failed for {width}x{height}, fullscreen={fullscreen}: {exc}")
+            if window is not None:
+                try:
+                    window.close()
+                except Exception:
+                    pass
 
     raise last_error
