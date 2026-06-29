@@ -182,14 +182,14 @@ RURAL_POPULATION_WEIGHTS = {
     "port": 0.08,
 }
 STARTING_INFRASTRUCTURE_BUDGET = {
-    "village": 0.80,
-    "farms": 1.45,
+    "village": 1.20,
+    "farms": 5.075,
     "mine": 1.05,
-    "industry": 1.10,
+    "industry": 2.75,
     "port": 0.45,
     "warehouse": 0.35,
-    "fuel_storage": 0.55,
-    "refinery": 0.35,
+    "fuel_storage": 1.10,
+    "refinery": 0.70,
 }
 INFRASTRUCTURE_COVERAGE_COSTS = {
     "village": 0.85,
@@ -331,11 +331,6 @@ INDUSTRY_SECTOR_RESOURCE_WEIGHTS = {
         "apatite": 0.35,
         "potash": 0.35,
     },
-    "refining": {
-        "oil": 1.0,
-        "natural_gas": 0.65,
-        "coal": 0.25,
-    },
     "machinery": {
         "iron_ore": 0.6,
         "copper_ore": 0.35,
@@ -361,7 +356,6 @@ INDUSTRY_SECTOR_LABELS = {
     "metallurgy": "Металлургия",
     "construction_materials": "Стройматериалы",
     "chemicals": "Химия",
-    "refining": "Переработка топлива",
     "machinery": "Машиностроение",
     "consumer_goods": "Товары",
     "electronics": "Электроника",
@@ -370,7 +364,7 @@ INDUSTRY_SECTOR_LABELS = {
 }
 LIFE_SUPPORT_CONSUMPTION_PER_MILLION = {
     "food": 8200,
-    "consumer_goods": 1850,
+    "consumer_goods": 1295,
     "construction_goods": 420,
     "refined_fuel": 260,
     "chemicals": 95,
@@ -1652,6 +1646,21 @@ class Game(arcade.View):
         penalty_steps = max(0, sector_count - free_specializations)
         return penalty ** penalty_steps
 
+    @staticmethod
+    def normalize_industry_allocation(allocation):
+        clean_allocation = {
+            sector: max(0.0, value)
+            for sector, value in (allocation or {}).items()
+            if sector in INDUSTRY_SECTOR_LABELS and value > 0
+        }
+        if not clean_allocation:
+            clean_allocation = {"consumer_goods": 1.0}
+        total = sum(clean_allocation.values()) or 1.0
+        return {
+            sector: value / total
+            for sector, value in clean_allocation.items()
+        }
+
     def resource_score_near_tile(self, player, tile, weights, radius=3):
         score = self.weighted_resource_score(tile, weights)
         return self.clamp01(score + self.nearby_resource_score(player, tile, weights, radius) * 0.75)
@@ -1673,7 +1682,6 @@ class Game(arcade.View):
         scores["metallurgy"] += nearby_mine * 0.18
         scores["construction_materials"] += nearby_city * 0.16 + nearby_mine * 0.10
         scores["chemicals"] += nearby_refinery * 0.24 + nearby_city * 0.10
-        scores["refining"] += nearby_refinery * 0.25 + nearby_port * 0.16
         scores["electronics"] += nearby_city * 0.30 + passability * 0.08
         scores["shipbuilding"] += nearby_port * 0.65
         scores["weapons"] += nearby_city * 0.12 + scores["metallurgy"] * 0.14
@@ -1706,10 +1714,10 @@ class Game(arcade.View):
             allocation[ranked[2][0]] = 0.10
 
         total = sum(allocation.values()) or 1.0
-        tile.industry_allocation = {
+        tile.industry_allocation = self.normalize_industry_allocation({
             sector: value / total
             for sector, value in allocation.items()
-        }
+        })
         return tile.industry_allocation
 
     def assign_starting_industry_allocations(self, player):
@@ -1757,6 +1765,9 @@ class Game(arcade.View):
         allocation = getattr(tile, "industry_allocation", None)
         if allocation is None or (coverage.get("industry", 0.0) > 0 and not allocation):
             allocation = self.assign_industry_allocation(player, tile)
+        elif coverage.get("industry", 0.0) > 0:
+            allocation = self.normalize_industry_allocation(allocation)
+            tile.industry_allocation = allocation
         specialization_efficiency = self.specialization_efficiency(
             allocation,
             modifiers.get("industry_diversification_penalty", 0.9),
@@ -4218,18 +4229,32 @@ class Game(arcade.View):
 
     def toggle_hex_specialization_mode(self):
         self.hex_panel_specialization_mode = not self.hex_panel_specialization_mode
-        self.hex_panel_scroll = 0.0
         self.hex_panel_message = ""
 
     def set_selected_tile_industry_sector(self, sector):
         tile = self.selected_tile
         if not tile or not self.selected_tile_has_industry():
             return
-        tile.industry_allocation = {sector: 1.0}
+        allocation = {
+            key: value
+            for key, value in (getattr(tile, "industry_allocation", {}) or {}).items()
+            if value > 0
+        }
+        if not allocation:
+            allocation = {sector: 1.0}
+        elif sector in allocation and len(allocation) > 1:
+            allocation.pop(sector)
+        else:
+            allocation[sector] = allocation.get(sector, 0.0) or 1.0
+
+        share = 1.0 / max(1, len(allocation))
+        tile.industry_allocation = self.normalize_industry_allocation({
+            key: share
+            for key in allocation
+        })
         self.update_tile_production_cache(tile)
-        self.hex_panel_message = f"Специализация: {INDUSTRY_SECTOR_LABELS.get(sector, sector)}"
-        self.hex_panel_message_timer = 2.0
-        self.hex_panel_scroll = 0.0
+        self.hex_panel_message = ""
+        self.hex_panel_message_timer = 0.0
 
     def toggle_hex_resources_expanded(self):
         self.hex_resources_expanded = not self.hex_resources_expanded
@@ -4268,9 +4293,9 @@ class Game(arcade.View):
         self.draw_ui_text("X", close_x + close_width / 2, close_y + close_height / 2, arcade.color.WHITE, 13,
                           anchor_x="center", anchor_y="center")
 
-        title_y = panel_y + panel_height - 28
-        self.draw_ui_text(f"Гекс {tile.q}:{tile.r}", panel_x + 16, title_y, arcade.color.WHITE, 18, anchor_y="center")
-        y = content_top + self.hex_panel_scroll
+        y = panel_y + panel_height - 28 + self.hex_panel_scroll
+        panel_text(f"Гекс {tile.q}:{tile.r}", panel_x + 16, y, arcade.color.WHITE, 18, anchor_y="center")
+        y -= 34
 
         owner_name = tile.owner.name if tile.owner else "Нейтральная территория"
         info_rows = [

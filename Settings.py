@@ -59,7 +59,32 @@ def save_settings(sound_volume, music_volume, fullscreen, resolution_index, reso
     return settings
 
 
+def _close_window_safely(window):
+    if window is None:
+        return
+    try:
+        window.close()
+    except Exception:
+        pass
+
+
+def _window_has_attached_canvas(window):
+    context = getattr(window, "context", None)
+    if context is None or getattr(context, "canvas", None) is None:
+        return False
+    try:
+        window.switch_to()
+    except Exception:
+        return False
+    return getattr(context, "canvas", None) is not None
+
+
 def create_window_with_fallback(arcade_module, title, settings, resolutions):
+    try:
+        import pyglet
+    except Exception:
+        pyglet = None
+
     attempts = [
         (settings["resolution_index"], settings["fullscreen"]),
         (DEFAULT_SETTINGS["resolution_index"], False),
@@ -77,11 +102,13 @@ def create_window_with_fallback(arcade_module, title, settings, resolutions):
 
         width, height = resolutions[resolution_index]
         window = None
+        existing_windows = set(getattr(pyglet.app, "windows", [])) if pyglet else set()
         try:
             window = arcade_module.Window(int(width), int(height), title)
             if fullscreen:
                 window.set_fullscreen(True)
-            window.switch_to()
+            if not _window_has_attached_canvas(window):
+                raise RuntimeError("Window canvas has not been attached")
             if attempt_key != (settings["resolution_index"], settings["fullscreen"]):
                 save_settings(
                     settings["sound_volume"],
@@ -94,10 +121,10 @@ def create_window_with_fallback(arcade_module, title, settings, resolutions):
         except Exception as exc:
             last_error = exc
             print(f"Window creation failed for {width}x{height}, fullscreen={fullscreen}: {exc}")
-            if window is not None:
-                try:
-                    window.close()
-                except Exception:
-                    pass
+            _close_window_safely(window)
+            if pyglet:
+                for orphan_window in list(getattr(pyglet.app, "windows", [])):
+                    if orphan_window not in existing_windows:
+                        _close_window_safely(orphan_window)
 
     raise last_error
