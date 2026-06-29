@@ -4183,11 +4183,11 @@ class Game(arcade.View):
         content_bottom, content_top = self.hex_panel_content_bounds()
         visible_height = max(1, content_top - content_bottom)
         max_scroll = max(0.0, self.hex_panel_content_height - visible_height)
-        self.hex_panel_scroll = max(-max_scroll, min(0.0, self.hex_panel_scroll))
+        self.hex_panel_scroll = max(0.0, min(max_scroll, self.hex_panel_scroll))
 
-    def scroll_hex_panel(self, scroll_y):
+    def scroll_hex_panel(self, amount):
         old_scroll = self.hex_panel_scroll
-        self.hex_panel_scroll += scroll_y * 30
+        self.hex_panel_scroll += amount * 30
         self.clamp_hex_panel_scroll()
         return self.hex_panel_scroll != old_scroll
 
@@ -4393,7 +4393,7 @@ class Game(arcade.View):
             track_height = visible_content_height
             max_scroll = max(1.0, self.hex_panel_content_height - visible_content_height)
             thumb_height = max(28, track_height * visible_content_height / self.hex_panel_content_height)
-            thumb_y = track_y + (track_height - thumb_height) * (1 + self.hex_panel_scroll / max_scroll)
+            thumb_y = track_y + (track_height - thumb_height) * (1 - self.hex_panel_scroll / max_scroll)
             arcade.draw_lbwh_rectangle_filled(track_x, track_y, 4, track_height, (48, 62, 78, 180))
             arcade.draw_lbwh_rectangle_filled(track_x, thumb_y, 4, thumb_height, (132, 156, 184, 220))
 
@@ -5238,7 +5238,7 @@ class Game(arcade.View):
             return
 
         if self.selected_tile and self.point_in_rect(x, y, self.hex_panel_rect()):
-            self.scroll_hex_panel(scroll_y)
+            self.scroll_hex_panel(-scroll_y)
             return
 
         if self.active_top_panel_key == "resources" and self.side_panel_progress > 0:
