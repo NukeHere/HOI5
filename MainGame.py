@@ -140,7 +140,6 @@ BUILDING_TYPES = [
     ("mine", "Шахта"),
     ("port", "Порт"),
 ]
-BUILDING_STEP = 0.05
 TERRAIN_DISPLAY_NAMES = {
     "deep_ocean": "Глубокий океан",
     "ocean": "Океан",
@@ -213,6 +212,109 @@ INFRASTRUCTURE_COVERAGE_LIMITS = {
     "warehouse": (0.05, 0.26),
     "fuel_storage": (0.06, 0.34),
     "refinery": (0.05, 0.22),
+}
+CONSTRUCTION_LEVEL_MULTIPLIER = 1.10
+CONSTRUCTION_STEP = 0.05
+BASE_BUILD_POWER_PER_MONTH = 100.0
+BUILDING_CONSTRUCTION_BASE = {
+    "city": {
+        "work": 260.0,
+        "money": 17_500_000,
+        "resources": {
+            "construction_goods": 36_000,
+            "cement": 18_000,
+            "steel": 9_000,
+            "machinery": 1_200,
+            "refined_fuel": 650,
+        },
+    },
+    "village": {
+        "work": 80.0,
+        "money": 3_000_000,
+        "resources": {
+            "construction_goods": 7_000,
+            "cement": 2_800,
+            "steel": 1_000,
+            "machinery": 180,
+            "refined_fuel": 120,
+        },
+    },
+    "farms": {
+        "work": 55.0,
+        "money": 1_500_000,
+        "resources": {
+            "construction_goods": 4_500,
+            "cement": 1_300,
+            "machinery": 160,
+            "refined_fuel": 140,
+        },
+    },
+    "mine": {
+        "work": 120.0,
+        "money": 5_000_000,
+        "resources": {
+            "construction_goods": 11_000,
+            "cement": 4_200,
+            "steel": 3_500,
+            "machinery": 750,
+            "refined_fuel": 420,
+        },
+    },
+    "industry": {
+        "work": 170.0,
+        "money": 8_000_000,
+        "resources": {
+            "construction_goods": 22_000,
+            "cement": 9_000,
+            "steel": 8_000,
+            "machinery": 1_800,
+            "refined_fuel": 520,
+        },
+    },
+    "port": {
+        "work": 210.0,
+        "money": 10_000_000,
+        "resources": {
+            "construction_goods": 20_000,
+            "cement": 11_000,
+            "steel": 8_500,
+            "machinery": 1_250,
+            "refined_fuel": 850,
+        },
+    },
+    "warehouse": {
+        "work": 70.0,
+        "money": 2_500_000,
+        "resources": {
+            "construction_goods": 8_000,
+            "cement": 3_500,
+            "steel": 1_800,
+            "machinery": 220,
+            "refined_fuel": 120,
+        },
+    },
+    "fuel_storage": {
+        "work": 95.0,
+        "money": 4_000_000,
+        "resources": {
+            "construction_goods": 12_000,
+            "cement": 6_000,
+            "steel": 4_800,
+            "machinery": 650,
+            "refined_fuel": 260,
+        },
+    },
+    "refinery": {
+        "work": 230.0,
+        "money": 12_000_000,
+        "resources": {
+            "construction_goods": 28_000,
+            "cement": 13_000,
+            "steel": 11_000,
+            "machinery": 2_600,
+            "refined_fuel": 900,
+        },
+    },
 }
 STORAGE_CAPACITY_BY_COVERAGE = {
     "city": 1_800_000,
@@ -312,6 +414,40 @@ PRODUCTION_MONTH_HOURS = 24 * 30
 FARM_FOOD_BASE_RATE = 30_000
 FERTILIZER_FOOD_BONUS = 0.30
 FERTILIZER_CONSUMPTION_PER_FARM_COVERAGE = 950
+STARTING_CONSUMER_GOODS_INDUSTRY_SHARE = 0.30
+STARTING_CONSUMER_GOODS_TILE_SHARE = 0.45
+POPULATION_INCOME_PER_MILLION = {
+    "rural": 180_000,
+    "city": 950_000,
+    "village": 420_000,
+    "farms": 320_000,
+    "mine": 620_000,
+    "industry": 850_000,
+    "port": 700_000,
+    "warehouse": 450_000,
+    "fuel_storage": 420_000,
+    "refinery": 900_000,
+}
+POPULATION_INCOME_TYPE_WEIGHTS = {
+    "city": 5.0,
+    "village": 3.0,
+    "farms": 1.6,
+    "mine": 1.8,
+    "industry": 2.3,
+    "port": 1.9,
+    "warehouse": 1.2,
+    "fuel_storage": 1.1,
+    "refinery": 2.2,
+}
+COMPANY_INCOME_PER_COVERAGE = {
+    "farms": 900_000,
+    "mine": 1_350_000,
+    "industry": 2_400_000,
+    "port": 1_600_000,
+    "warehouse": 450_000,
+    "fuel_storage": 650_000,
+    "refinery": 2_200_000,
+}
 INDUSTRY_SECTOR_RESOURCE_WEIGHTS = {
     "metallurgy": {
         "iron_ore": 1.0,
@@ -338,7 +474,6 @@ INDUSTRY_SECTOR_RESOURCE_WEIGHTS = {
         "copper_ore": 0.35,
         "coal": 0.25,
     },
-    "consumer_goods": {},
     "electronics": {
         "copper_ore": 0.85,
         "rare_earth_metals": 0.75,
@@ -366,8 +501,8 @@ INDUSTRY_SECTOR_LABELS = {
 }
 LIFE_SUPPORT_CONSUMPTION_PER_MILLION = {
     "food": 8100,
-    "consumer_goods": 1000,
-    "construction_goods": 420,
+    "consumer_goods": 150,
+    "construction_goods": 100,
     "refined_fuel": 260,
     "chemicals": 95,
     "vehicles": 10,
@@ -853,6 +988,9 @@ class StatePlayer:
     resource_stockpiles: dict = None
     production_modifiers: dict = None
     production_cache: dict = None
+    construction_modifiers: dict = None
+    construction_queue: list = None
+    monthly_income_breakdown: dict = None
     population: float | None = None
     budget: float = 250_000_000.0
     monthly_balance: float = 0.0
@@ -887,6 +1025,21 @@ class StatePlayer:
             self.production_cache = {
                 stage: {"inputs": {}, "outputs": {}}
                 for stage in PRODUCTION_STAGES
+            }
+        if self.construction_modifiers is None:
+            self.construction_modifiers = {
+                "build_efficiency": 1.0,
+                "city_build_multiplier": 1.0,
+                "tech_bonus": 0.0,
+            }
+        if self.construction_queue is None:
+            self.construction_queue = []
+        if self.monthly_income_breakdown is None:
+            self.monthly_income_breakdown = {
+                "population": 0.0,
+                "companies": 0.0,
+                "multiplier": 1.0,
+                "total": 0.0,
             }
 
 
@@ -1252,13 +1405,6 @@ class Game(arcade.View):
         self.hovered_resource_group_option = None
         self.map_layer_message = ""
         self.map_layer_message_timer = 0.0
-        self.building_dropdown = None
-        self.selected_building_index = 0
-        self.open_building_dropdown = False
-        self.hovered_build_button = False
-        self.building_message = ""
-        self.building_message_timer = 0.0
-        self.show_build_controls = False
         self.top_nav_buttons = []
         self.top_nav_icon_textures = self.load_top_nav_icon_textures()
         self.hovered_top_nav_key = None
@@ -1271,6 +1417,12 @@ class Game(arcade.View):
         self.resource_scroll_index = 0
         self.resource_summary_rect = None
         self.hovered_resource_summary = False
+        self.construction_queue_expanded = False
+        self.selected_construction_index = 0
+        self.construction_placement_mode = False
+        self.construction_queue_toggle_rect = None
+        self.construction_building_rects = []
+        self.construction_start_button_rect = None
         self.hovered_hex_panel_close = False
         self.hovered_hex_build_button = False
         self.hovered_hex_specialization_button = False
@@ -1332,7 +1484,6 @@ class Game(arcade.View):
         self.target_camera_x, self.target_camera_y = self.world_camera.position
         self.rebuild_pause_menu()
         self.rebuild_time_hud()
-        self.rebuild_build_controls()
         self.rebuild_top_ui()
 
     def rebuild_time_hud(self):
@@ -1350,31 +1501,6 @@ class Game(arcade.View):
             HudButton("+", panel_x + 92, panel_y + 10, 28, 24, self.increase_time_speed),
         ]
 
-    def rebuild_build_controls(self):
-        if not self.window:
-            return
-
-        panel_x, panel_y, panel_width, panel_height = self.build_panel_rect()
-        control_y = panel_y + panel_height - 62
-        self.building_dropdown = PauseDropdown(
-            "building",
-            "Строение",
-            [label for _key, label in BUILDING_TYPES],
-            self.selected_building_index,
-            panel_x + 222,
-            control_y,
-            190,
-            34,
-            self.set_selected_building,
-        )
-
-    def build_panel_rect(self):
-        return 12, 74, 430, 250
-
-    def build_button_rect(self):
-        panel_x, panel_y, panel_width, panel_height = self.build_panel_rect()
-        return panel_x + 14, panel_y + panel_height - 62, 150, 34
-
     def rebuild_top_ui(self):
         if not self.window:
             return
@@ -1391,38 +1517,6 @@ class Game(arcade.View):
                 "rect": (x, y, button_size, button_size),
             })
             x += button_size + gap
-
-    def set_selected_building(self, index):
-        self.selected_building_index = max(0, min(len(BUILDING_TYPES) - 1, index))
-        if self.building_dropdown:
-            self.building_dropdown.selected_index = self.selected_building_index
-
-    def selected_building_type(self):
-        return BUILDING_TYPES[self.selected_building_index]
-
-    def build_selected_structure(self):
-        if not self.selected_tile:
-            self.building_message = "Выберите клетку"
-            self.building_message_timer = 2.0
-            return
-
-        key, label = self.selected_building_type()
-        coverage = getattr(self.selected_tile, "building_coverage", None)
-        if coverage is None:
-            coverage = {}
-            self.selected_tile.building_coverage = coverage
-
-        coverage[key] = min(1.0, coverage.get(key, 0.0) + BUILDING_STEP)
-        if key not in self.selected_tile.buildings:
-            self.selected_tile.buildings.append(key)
-
-        self.building_message = f"{label}: {coverage[key]:.0%}"
-        self.building_message_timer = 2.0
-        if self.selected_tile.owner:
-            self.recalculate_state_resources(self.selected_tile.owner)
-            self.update_tile_production_cache(self.selected_tile)
-        self.tile_visual_revision += 1
-        self.invalidate_tile_visual_cache()
 
     def invalidate_tile_visual_cache(self):
         self.tile_visual_cache_key = None
@@ -1681,7 +1775,12 @@ class Game(arcade.View):
         nearby_refinery = self.nearby_coverage_score(player, tile, ["refinery"], 2)
         passability = self.clamp01(getattr(tile, "passability", 0.0))
 
-        scores["consumer_goods"] += nearby_city * 0.55 + nearby_village * 0.18 + passability * 0.12
+        scores["consumer_goods"] = self.clamp01(
+            0.16
+            + nearby_city * 0.82
+            + nearby_village * 0.34
+            + passability * 0.20
+        )
         scores["machinery"] += nearby_city * 0.28 + nearby_mine * 0.24 + passability * 0.14
         scores["metallurgy"] += nearby_mine * 0.18
         scores["construction_materials"] += nearby_city * 0.16 + nearby_mine * 0.10
@@ -1724,9 +1823,65 @@ class Game(arcade.View):
         })
         return tile.industry_allocation
 
+    def add_consumer_goods_share_to_tile(self, tile, target_share):
+        allocation = self.normalize_industry_allocation(getattr(tile, "industry_allocation", {}) or {})
+        current_share = allocation.get("consumer_goods", 0.0)
+        if current_share >= target_share:
+            return False
+
+        remaining_share = max(0.0, 1.0 - target_share)
+        other_total = sum(value for key, value in allocation.items() if key != "consumer_goods")
+        new_allocation = {"consumer_goods": target_share}
+        if other_total > 0:
+            for key, value in allocation.items():
+                if key != "consumer_goods":
+                    new_allocation[key] = remaining_share * value / other_total
+
+        tile.industry_allocation = self.normalize_industry_allocation(new_allocation)
+        return True
+
+    def ensure_starting_consumer_goods_industry(self, player):
+        industry_tiles = [
+            tile
+            for tile in player.tiles
+            if (getattr(tile, "building_coverage", {}) or {}).get("industry", 0.0) > 0
+        ]
+        if not industry_tiles:
+            return
+
+        total_coverage = sum((getattr(tile, "building_coverage", {}) or {}).get("industry", 0.0) for tile in industry_tiles)
+        if total_coverage <= 0:
+            return
+
+        def consumer_goods_coverage():
+            return sum(
+                (getattr(tile, "building_coverage", {}) or {}).get("industry", 0.0)
+                * (getattr(tile, "industry_allocation", {}) or {}).get("consumer_goods", 0.0)
+                for tile in industry_tiles
+            )
+
+        target_coverage = total_coverage * STARTING_CONSUMER_GOODS_INDUSTRY_SHARE
+        if consumer_goods_coverage() >= target_coverage:
+            return
+
+        ranked_tiles = sorted(
+            industry_tiles,
+            key=lambda tile: (
+                -self.industry_sector_scores(player, tile).get("consumer_goods", 0.0),
+                -((getattr(tile, "building_coverage", {}) or {}).get("industry", 0.0)),
+                tile.q,
+                tile.r,
+            ),
+        )
+        for tile in ranked_tiles:
+            if consumer_goods_coverage() >= target_coverage:
+                break
+            self.add_consumer_goods_share_to_tile(tile, STARTING_CONSUMER_GOODS_TILE_SHARE)
+
     def assign_starting_industry_allocations(self, player):
         for tile in player.tiles:
             self.assign_industry_allocation(player, tile)
+        self.ensure_starting_consumer_goods_industry(player)
 
     def calculate_tile_production_cache(self, player, tile):
         cache = self.empty_production_cache()
@@ -1887,6 +2042,347 @@ class Game(arcade.View):
         consumed = min(available, amount)
         bucket[key] = max(0.0, available - consumed)
         return consumed
+
+    @staticmethod
+    def construction_level_for_coverage(coverage):
+        return max(1, math.floor(max(0.0, coverage) / CONSTRUCTION_STEP) + 1)
+
+    @staticmethod
+    def next_construction_coverage(coverage):
+        coverage = max(0.0, min(1.0, coverage))
+        if coverage >= 1.0:
+            return None
+        next_step = math.floor(coverage / CONSTRUCTION_STEP + 1e-9) + 1
+        return min(1.0, next_step * CONSTRUCTION_STEP)
+
+    def build_power(self, player):
+        coverage_totals = {}
+        for tile in player.tiles:
+            for key, value in (getattr(tile, "building_coverage", {}) or {}).items():
+                coverage_totals[key] = coverage_totals.get(key, 0.0) + max(0.0, value)
+
+        modifiers = player.construction_modifiers or {}
+        industry_efficiency = (player.production_modifiers or {}).get("industry_efficiency", 1.0)
+        city_multiplier = modifiers.get("city_build_multiplier", 1.0)
+        tech_bonus = modifiers.get("tech_bonus", 0.0)
+        industry_power = coverage_totals.get("industry", 0.0) * industry_efficiency
+        settlement_power = (
+            coverage_totals.get("city", 0.0)
+            + coverage_totals.get("village", 0.0) * 0.5
+        ) * city_multiplier
+        return max(0.0, (industry_power + settlement_power) * BASE_BUILD_POWER_PER_MONTH + tech_bonus)
+
+    def construction_cost(self, player, tile, building_key, current_coverage=None):
+        base = BUILDING_CONSTRUCTION_BASE.get(building_key)
+        if not base:
+            return None
+
+        if current_coverage is None:
+            current_coverage = (getattr(tile, "building_coverage", {}) or {}).get(building_key, 0.0)
+        current_coverage = max(0.0, min(1.0, current_coverage))
+        target_coverage = self.next_construction_coverage(current_coverage)
+        if target_coverage is None:
+            return None
+
+        step_size = target_coverage - current_coverage
+        level = self.construction_level_for_coverage(current_coverage)
+        level_multiplier = CONSTRUCTION_LEVEL_MULTIPLIER ** (level - 1)
+        modifiers = player.construction_modifiers or {}
+        build_efficiency = modifiers.get("build_efficiency", 1.0)
+        cost_multiplier = level_multiplier * max(0.05, build_efficiency)
+        resource_costs = {
+            key: amount * step_size * cost_multiplier
+            for key, amount in base.get("resources", {}).items()
+        }
+        work_required = base.get("work", 0.0) * step_size * level_multiplier
+        return {
+            "building": building_key,
+            "from_coverage": current_coverage,
+            "target_coverage": target_coverage,
+            "level": level,
+            "money_cost": base.get("money", 0.0) * step_size * cost_multiplier,
+            "resource_costs": resource_costs,
+            "work_required": work_required,
+        }
+
+    def queued_target_coverage(self, player, tile, building_key):
+        coverage = (getattr(tile, "building_coverage", {}) or {}).get(building_key, 0.0)
+        for project in player.construction_queue:
+            cost = project.get("cost", {})
+            if project.get("tile") == tile and cost.get("building") == building_key:
+                coverage = max(coverage, cost.get("target_coverage", coverage))
+        return min(1.0, coverage)
+
+    def best_building_for_tile(self, player, tile):
+        coverage = getattr(tile, "building_coverage", {}) or {}
+        upgradeable = [
+            (key, value)
+            for key, value in coverage.items()
+            if key in BUILDING_CONSTRUCTION_BASE and value < 1.0
+        ]
+        if upgradeable:
+            return max(upgradeable, key=lambda item: item[1])[0]
+
+        if self.is_coastal_land_tile(tile):
+            return "port"
+        if self.mine_score(player, tile) > 0.12:
+            return "mine"
+        agriculture = self.agriculture_score(tile)
+        if agriculture > 0.48:
+            return "farms"
+        if self.industry_score(player, tile) > 0.32:
+            return "industry"
+        if self.is_water_tile(tile):
+            return None
+        return "village"
+
+    def selected_construction_building_key(self):
+        if not BUILDING_TYPES:
+            return None
+        self.selected_construction_index = max(0, min(len(BUILDING_TYPES) - 1, self.selected_construction_index))
+        return BUILDING_TYPES[self.selected_construction_index][0]
+
+    def construction_tile_block_reason(self, player, tile, building_key):
+        if not player:
+            return "Нет страны"
+        if not tile or tile.owner != player:
+            return "Чужая клетка"
+        if building_key not in BUILDING_CONSTRUCTION_BASE:
+            return "Неизвестное строение"
+        coverage = self.queued_target_coverage(player, tile, building_key)
+        if coverage >= 1.0:
+            return "Уже максимум"
+        if building_key == "port":
+            if not self.is_coastal_land_tile(tile):
+                return "Порт только рядом с водой"
+        elif self.is_water_tile(tile):
+            return "Нужна суша"
+        if not self.construction_cost(player, tile, building_key, coverage):
+            return "Нельзя улучшить"
+        return None
+
+    def can_place_construction(self, player, tile, building_key):
+        return self.construction_tile_block_reason(player, tile, building_key) is None
+
+    def set_construction_placement_mode(self, enabled):
+        enabled = bool(enabled and self.active_top_panel_key == "construction" and self.human_player)
+        if self.construction_placement_mode == enabled:
+            return
+        self.construction_placement_mode = enabled
+        self.create_map_overview()
+        self.refresh_visible_tiles()
+
+    def enqueue_construction(self, player, tile, building_key=None):
+        if not player or tile.owner != player:
+            self.hex_panel_message = "Клетка не принадлежит стране"
+            self.hex_panel_message_timer = 2.0
+            return False
+
+        building_key = building_key or self.best_building_for_tile(player, tile)
+        if not building_key:
+            self.hex_panel_message = "Здесь нельзя строить"
+            self.hex_panel_message_timer = 2.0
+            return False
+        if building_key == "port" and not self.is_coastal_land_tile(tile):
+            self.hex_panel_message = "Порт только у воды"
+            self.hex_panel_message_timer = 2.0
+            return False
+
+        current_coverage = self.queued_target_coverage(player, tile, building_key)
+        cost = self.construction_cost(player, tile, building_key, current_coverage)
+        if not cost:
+            self.hex_panel_message = "Уже максимум"
+            self.hex_panel_message_timer = 2.0
+            return False
+
+        speed = self.build_power(player)
+        cost = dict(cost)
+        cost["resources_spent"] = {}
+        player.construction_queue.append({
+            "tile": tile,
+            "cost": cost,
+            "speed": speed,
+            "progress": 0.0,
+            "money_paid": False,
+        })
+        self.hex_panel_message = f"В очереди: {BUILDING_DISPLAY_NAMES.get(building_key, building_key)}"
+        self.hex_panel_message_timer = 2.0
+        return True
+
+    def complete_construction_project(self, player, project):
+        tile = project.get("tile")
+        cost = project.get("cost", {})
+        building_key = project.get("building") or cost.get("building")
+        if not tile or not building_key:
+            return
+        coverage = getattr(tile, "building_coverage", None)
+        if coverage is None:
+            coverage = {}
+            tile.building_coverage = coverage
+        coverage[building_key] = min(1.0, max(coverage.get(building_key, 0.0), cost.get("target_coverage", 0.0)))
+        if not hasattr(tile, "buildings") or tile.buildings is None:
+            tile.buildings = []
+        if building_key not in tile.buildings:
+            tile.buildings.append(building_key)
+        self.recalculate_state_resources(player)
+        self.update_tile_production_cache(tile)
+        self.distribute_player_stockpiles_to_tiles(player)
+        self.recalculate_monthly_balance(player)
+        self.tile_visual_revision += 1
+        self.invalidate_tile_visual_cache()
+
+    def run_construction_tick(self, player, elapsed_hours=None):
+        if not player.construction_queue:
+            return
+        project = player.construction_queue[0]
+        month_fraction = max(0.0, (elapsed_hours or 0.0) / PRODUCTION_MONTH_HOURS)
+        if month_fraction <= 0:
+            return
+
+        cost = project.get("cost", {})
+        money_cost = cost.get("money_cost", 0.0)
+        if not project.get("money_paid", False):
+            if player.budget < money_cost:
+                project["speed"] = self.build_power(player)
+                return
+            player.budget -= money_cost
+            project["money_paid"] = True
+
+        resource_costs = cost.get("resource_costs", {})
+        resources_spent = cost.setdefault("resources_spent", {})
+        project["speed"] = self.build_power(player)
+        progress_delta = project["speed"] * month_fraction / max(1.0, cost.get("work_required", 1.0))
+        old_progress = max(0.0, min(1.0, project.get("progress", 0.0)))
+        planned_progress = min(1.0, old_progress + progress_delta)
+        new_progress = planned_progress
+        for key, total_amount in resource_costs.items():
+            if total_amount <= 0:
+                continue
+            already_spent = resources_spent.get(key, 0.0)
+            available_for_project = already_spent + self.stockpile_amount(player, key)
+            new_progress = min(new_progress, available_for_project / total_amount)
+        actual_delta = max(0.0, new_progress - old_progress)
+        if actual_delta <= 0:
+            return
+
+        for key, total_amount in resource_costs.items():
+            already_spent = resources_spent.get(key, 0.0)
+            target_spent = total_amount * new_progress
+            consumed = self.consume_from_stockpile(player, key, max(0.0, target_spent - already_spent))
+            resources_spent[key] = already_spent + consumed
+
+        project["progress"] = new_progress
+        if project["progress"] >= 0.999:
+            self.complete_construction_project(player, project)
+            player.construction_queue.pop(0)
+
+    def active_construction_consumption(self, player):
+        if not player.construction_queue:
+            return {}
+        project = player.construction_queue[0]
+        if not project.get("money_paid", False):
+            return {}
+
+        cost = project.get("cost", {})
+        resource_costs = cost.get("resource_costs", {})
+        if not resource_costs:
+            return {}
+
+        speed = self.build_power(player)
+        if speed <= 0:
+            return {}
+
+        old_progress = max(0.0, min(1.0, project.get("progress", 0.0)))
+        planned_delta = speed / max(1.0, cost.get("work_required", 1.0))
+        planned_progress = min(1.0, old_progress + planned_delta)
+        new_progress = planned_progress
+        resources_spent = cost.setdefault("resources_spent", {})
+        for key, total_amount in resource_costs.items():
+            if total_amount <= 0:
+                continue
+            already_spent = resources_spent.get(key, 0.0)
+            available_for_project = already_spent + self.stockpile_amount(player, key)
+            new_progress = min(new_progress, available_for_project / total_amount)
+
+        progress_delta = max(0.0, new_progress - old_progress)
+        if progress_delta <= 0:
+            return {}
+
+        return {
+            key: total_amount * progress_delta
+            for key, total_amount in resource_costs.items()
+            if total_amount > 0
+        }
+
+    def population_income_rate_for_tile(self, tile):
+        coverage = getattr(tile, "building_coverage", {}) or {}
+        weighted_income = POPULATION_INCOME_PER_MILLION["rural"]
+        total_weight = 1.0
+        for building_key, weight_multiplier in POPULATION_INCOME_TYPE_WEIGHTS.items():
+            weight = max(0.0, coverage.get(building_key, 0.0)) * weight_multiplier
+            if weight <= 0:
+                continue
+            weighted_income += POPULATION_INCOME_PER_MILLION.get(building_key, 0.0) * weight
+            total_weight += weight
+        return weighted_income / max(1.0, total_weight)
+
+    def monthly_population_income(self, player):
+        income = 0.0
+        for tile in player.tiles:
+            population = self.estimated_tile_population(tile)
+            if not population or population <= 0:
+                continue
+            income += (population / 1_000_000) * self.population_income_rate_for_tile(tile)
+        return income
+
+    @staticmethod
+    def monthly_company_income(player):
+        income = 0.0
+        for tile in player.tiles:
+            coverage = getattr(tile, "building_coverage", {}) or {}
+            for building_key, amount_per_coverage in COMPANY_INCOME_PER_COVERAGE.items():
+                income += max(0.0, coverage.get(building_key, 0.0)) * amount_per_coverage
+        return income
+
+    def monthly_tile_company_income(self, tile):
+        income = 0.0
+        coverage = getattr(tile, "building_coverage", {}) or {}
+        for building_key, amount_per_coverage in COMPANY_INCOME_PER_COVERAGE.items():
+            income += max(0.0, coverage.get(building_key, 0.0)) * amount_per_coverage
+        return income
+
+    def monthly_tile_population_income(self, tile):
+        population = self.estimated_tile_population(tile)
+        if not population or population <= 0:
+            return 0.0
+        return (population / 1_000_000) * self.population_income_rate_for_tile(tile)
+
+    def monthly_tile_income(self, tile):
+        return self.monthly_tile_population_income(tile) + self.monthly_tile_company_income(tile)
+
+    def recalculate_monthly_balance(self, player):
+        population_income = self.monthly_population_income(player)
+        company_income = self.monthly_company_income(player)
+        total_income = population_income + company_income
+        player.monthly_income_breakdown = {
+            "population": population_income,
+            "companies": company_income,
+            "multiplier": 1.0,
+            "total": total_income,
+        }
+        player.monthly_balance = total_income
+        return total_income
+
+    def recalculate_all_monthly_balances(self):
+        for player in self.players:
+            self.recalculate_monthly_balance(player)
+
+    def run_economy_tick(self, player, elapsed_hours=None):
+        month_fraction = max(0.0, (elapsed_hours or 0.0) / PRODUCTION_MONTH_HOURS)
+        if month_fraction <= 0:
+            return
+        monthly_balance = self.recalculate_monthly_balance(player)
+        player.budget += monthly_balance * month_fraction
 
     def run_production_stage(self, player, stage, month_fraction):
         cache = player.production_cache or self.recalculate_state_production_cache(player)
@@ -3184,6 +3680,7 @@ class Game(arcade.View):
             tile.color = self.get_tile_map_color(tile)
         self.recalculate_all_state_resources()
         self.rebuild_state_borders()
+        self.recalculate_all_monthly_balances()
 
         print(
             f"Created {len(self.players)} states, "
@@ -3409,6 +3906,47 @@ class Game(arcade.View):
         glow = self.blend_colors((214, 176, 82), (255, 245, 140), intensity)
         return self.blend_colors(base_color, glow, 0.42 + intensity * 0.36)
 
+    def construction_overlay_color(self, tile, base_color):
+        if not self.construction_placement_mode or self.active_top_panel_key != "construction":
+            return base_color
+        building_key = self.selected_construction_building_key()
+        if not building_key or not self.human_player or tile.owner != self.human_player:
+            return self.blend_colors(base_color, (18, 22, 26), 0.62)
+        if self.can_place_construction(self.human_player, tile, building_key):
+            overlay = (60, 176, 92)
+            amount = 0.68
+        else:
+            overlay = (176, 58, 58)
+            amount = 0.66
+        if tile == self.hovered_tile:
+            amount = min(0.82, amount + 0.10)
+        return self.blend_colors(base_color, overlay, amount)
+
+    def draw_construction_placement_labels(self):
+        if not self.construction_placement_mode or self.use_overview_lod():
+            return
+        building_key = self.selected_construction_building_key()
+        if not building_key or not self.human_player:
+            return
+        for tile in self.visible_tiles:
+            if not self.can_place_construction(self.human_player, tile, building_key):
+                continue
+            coverage = (getattr(tile, "building_coverage", {}) or {}).get(building_key, 0.0)
+            queued_target = self.queued_target_coverage(self.human_player, tile, building_key)
+            queued_delta = max(0.0, queued_target - coverage)
+            label = f"{coverage:.0%}"
+            if queued_delta > 0:
+                label += f"+{queued_delta:.0%}"
+            self.draw_ui_text(
+                label,
+                tile.center_x,
+                tile.center_y - 2,
+                (245, 255, 246),
+                12,
+                anchor_x="center",
+                anchor_y="center",
+            )
+
     def resource_color(self, tile):
         group_key, _label, resources, highlight_color, scale = RESOURCE_MAP_GROUPS[self.resource_group_index]
         amount = self.resource_amount_for_group(tile, resources)
@@ -3422,6 +3960,8 @@ class Game(arcade.View):
         return base
 
     def get_tile_map_color(self, tile):
+        if self.construction_placement_mode and self.active_top_panel_key == "construction":
+            return self.construction_overlay_color(tile, self.terrain_color(tile))
         if self.map_layer == "political":
             return self.selected_resource_overlay_color(tile, self.political_color(tile))
         if self.map_layer == "height":
@@ -3459,7 +3999,8 @@ class Game(arcade.View):
         texture = arcade.Texture(
             name=(
                 f"map_overview_{self.world_seed}_{self.grid_width}x{self.grid_height}_"
-                f"{self.map_layer}_{self.resource_group_index}_{self.selected_resource_key or 'none'}"
+                f"{self.map_layer}_{self.resource_group_index}_{self.selected_resource_key or 'none'}_"
+                f"build_{self.construction_placement_mode}_{self.selected_construction_building_key() or 'none'}"
             ),
             image=image,
         )
@@ -3588,6 +4129,7 @@ class Game(arcade.View):
     def on_draw(self):
         self.sync_cameras_to_window()
         self.clear()
+        self.begin_ui_text_frame()
         if not self.premium_shader_enabled and not self.premium_shader_attempted:
             self.setup_premium_shader()
         start_time = time.time()
@@ -3596,7 +4138,9 @@ class Game(arcade.View):
             self.map_overview_sprite_list.draw()
         else:
             self.visible_tiles.draw()
-            self.draw_tile_visual_system()
+            if not self.construction_placement_mode:
+                self.draw_tile_visual_system()
+            self.draw_construction_placement_labels()
         self.state_border_list.draw()
         if self.map_layer == "political":
             self.draw_capital_markers()
@@ -3604,14 +4148,11 @@ class Game(arcade.View):
             self.selection_border_sprite_list.draw()
         self.draw_premium_shader_overlay()
         self.gui_camera.use()
-        self.begin_ui_text_frame()
         self.draw_top_status_bar()
         self.draw_top_navigation_bar()
         self.draw_side_panel()
         self.draw_hex_info_panel()
         self.draw_gui()
-        if self.show_build_controls:
-            self.draw_build_controls()
         self.draw_time_hud()
         self.draw_map_layer_control()
         if self.paused:
@@ -3810,10 +4351,14 @@ class Game(arcade.View):
         if self.selected_resource_key and previous_key != key:
             self.create_map_overview()
             self.refresh_visible_tiles()
+        if previous_key == "construction" and key != "construction":
+            self.set_construction_placement_mode(False)
 
     def close_top_panel(self):
         self.side_panel_target = 0.0
         self.hovered_side_panel_close = False
+        if self.active_top_panel_key == "construction":
+            self.set_construction_placement_mode(False)
         if self.selected_resource_key:
             self.selected_resource_key = None
             self.create_map_overview()
@@ -3830,7 +4375,12 @@ class Game(arcade.View):
     def side_panel_rect(self):
         top = self.window.height - TOP_UI_HEIGHT - SIDE_PANEL_MARGIN
         height = top - SIDE_PANEL_MARGIN
-        width = 760 if self.active_top_panel_key == "resources" else SIDE_PANEL_WIDTH
+        if self.active_top_panel_key == "resources":
+            width = 760
+        elif self.active_top_panel_key == "construction":
+            width = 500
+        else:
+            width = SIDE_PANEL_WIDTH
         x = -width + width * self.side_panel_progress
         return x, SIDE_PANEL_MARGIN, width, height
 
@@ -3858,6 +4408,7 @@ class Game(arcade.View):
         if not self.human_player.production_cache:
             self.recalculate_state_production_cache(self.human_player)
         stockpiles = self.ensure_player_stockpiles(self.human_player)
+        construction_consumption = self.active_construction_consumption(self.human_player)
         if self.resource_panel_category == "raw":
             raw = self.human_player.resource_totals.get("raw", {})
             raw_stock = stockpiles.get("raw", {})
@@ -3868,7 +4419,10 @@ class Game(arcade.View):
             rows = []
             for key in keys:
                 production = self.production_amount_for_key(self.human_player, key, "outputs")
-                consumption = self.production_amount_for_key(self.human_player, key, "inputs")
+                consumption = (
+                    self.production_amount_for_key(self.human_player, key, "inputs")
+                    + construction_consumption.get(key, 0.0)
+                )
                 stock = raw_stock.get(key, 0.0)
                 rows.append({
                     "key": key,
@@ -3885,7 +4439,10 @@ class Game(arcade.View):
         rows = []
         for key in names:
             production = self.production_amount_for_key(self.human_player, key, "outputs")
-            consumption = self.production_amount_for_key(self.human_player, key, "inputs")
+            consumption = (
+                self.production_amount_for_key(self.human_player, key, "inputs")
+                + construction_consumption.get(key, 0.0)
+            )
             stock_amount = stock.get(key, 0.0)
             rows.append({
                 "key": key,
@@ -4125,6 +4682,179 @@ class Game(arcade.View):
 
         return False
 
+    def construction_queue_rows(self):
+        if not self.human_player:
+            return []
+        return list(self.human_player.construction_queue)
+
+    def construction_project_label(self, project):
+        cost = project.get("cost", {})
+        building_key = cost.get("building") or project.get("building")
+        tile = project.get("tile")
+        label = BUILDING_DISPLAY_NAMES.get(building_key, building_key or "--")
+        if tile:
+            return f"{label} {tile.q}:{tile.r}"
+        return label
+
+    def construction_queue_item_rects(self, rows):
+        panel_x, panel_y, panel_width, panel_height = self.side_panel_rect()
+        start_y = panel_y + panel_height - 112
+        row_height = 26
+        reserved_bottom = panel_y + 310
+        max_expanded_count = max(4, int((start_y - reserved_bottom) / row_height) + 1)
+        visible_count = min(len(rows), max_expanded_count) if self.construction_queue_expanded else min(4, len(rows))
+        return [
+            (panel_x + 18, start_y - index * row_height, panel_width - 36, row_height - 3)
+            for index in range(visible_count)
+        ]
+
+    def construction_content_layout(self, rows=None):
+        rows = self.construction_queue_rows() if rows is None else rows
+        panel_x, panel_y, panel_width, panel_height = self.side_panel_rect()
+        queue_rects = self.construction_queue_item_rects(rows)
+        if queue_rects:
+            queue_bottom = queue_rects[-1][1]
+            if len(rows) > 4:
+                queue_bottom -= 24
+        else:
+            queue_bottom = panel_y + panel_height - 112
+        speed_y = queue_bottom - 42
+        options_top = min(speed_y - 78, panel_y + panel_height - 310)
+        options_bottom_limit = panel_y + 76
+        return {
+            "queue_rects": queue_rects,
+            "speed_y": speed_y,
+            "options_top": max(options_bottom_limit + 30, options_top),
+        }
+
+    def construction_building_option_rects(self):
+        panel_x, panel_y, panel_width, _panel_height = self.side_panel_rect()
+        start_y = self.construction_content_layout()["options_top"]
+        row_height = 30
+        left_width = (panel_width - 46) / 2
+        rects = []
+        for index, _item in enumerate(BUILDING_TYPES):
+            col = index % 2
+            row = index // 2
+            x = panel_x + 18 + col * (left_width + 10)
+            y = start_y - row * (row_height + 7)
+            rects.append((x, y, left_width, row_height))
+        return rects
+
+    def construction_start_rect(self):
+        panel_x, panel_y, panel_width, _panel_height = self.side_panel_rect()
+        return panel_x + 18, panel_y + 24, panel_width - 36, 36
+
+    def draw_construction_panel_content(self, panel_x, panel_y, panel_width, panel_height):
+        if not self.human_player:
+            return
+
+        self.construction_queue_toggle_rect = None
+        self.construction_building_rects = self.construction_building_option_rects()
+        self.construction_start_button_rect = self.construction_start_rect()
+        rows = self.construction_queue_rows()
+        queue_y = panel_y + panel_height - 70
+        self.draw_ui_text("Очередь строительства", panel_x + 18, queue_y, arcade.color.WHITE, 14)
+        layout = self.construction_content_layout(rows)
+        queue_rects = layout["queue_rects"]
+        visible_count = len(queue_rects)
+        if rows:
+            for index, project in enumerate(rows[:visible_count]):
+                x, y, width, height = queue_rects[index]
+                active = index == 0
+                fill = (46, 70, 58, 190) if active else (30, 40, 52, 160)
+                arcade.draw_lbwh_rectangle_filled(x, y, width, height, fill)
+                arcade.draw_lbwh_rectangle_outline(x, y, width, height, (82, 108, 132), 1)
+                progress = max(0.0, min(1.0, project.get("progress", 0.0)))
+                if active and not project.get("money_paid", False):
+                    prefix = "Ждет денег"
+                else:
+                    prefix = "Строится" if active else "Ждет"
+                self.draw_ui_text(
+                    f"{prefix}: {self.construction_project_label(project)}",
+                    x + 8,
+                    y + height / 2,
+                    (226, 236, 244),
+                    10,
+                    anchor_y="center",
+                )
+                self.draw_ui_text(
+                    f"{progress:.0%}",
+                    x + width - 8,
+                    y + height / 2,
+                    (226, 236, 244),
+                    10,
+                    anchor_x="right",
+                    anchor_y="center",
+                )
+            if len(rows) > 4:
+                toggle_y = queue_rects[-1][1] - 24
+                hidden_count = max(0, len(rows) - visible_count)
+                toggle_text = "Свернуть очередь" if self.construction_queue_expanded else f"Показать еще {hidden_count}"
+                self.construction_queue_toggle_rect = (panel_x + 18, toggle_y, panel_width - 36, 20)
+                self.draw_ui_text(toggle_text, panel_x + 24, toggle_y + 10, (180, 194, 210), 10, anchor_y="center")
+        else:
+            self.draw_ui_text("Пока пусто", panel_x + 28, queue_y - 28, (180, 192, 205), 11)
+
+        speed_y = layout["speed_y"]
+        speed = self.build_power(self.human_player)
+        self.draw_ui_text("Скорость строительства", panel_x + 18, speed_y, arcade.color.WHITE, 14)
+        self.draw_ui_text(
+            f"{speed:.0f} строй-очков в месяц",
+            panel_x + 28,
+            speed_y - 24,
+            (220, 230, 240),
+            12,
+        )
+        self.draw_ui_text(
+            "Чем больше промзон, городов и сел, тем быстрее идет первый проект в очереди.",
+            panel_x + 28,
+            speed_y - 44,
+            (160, 174, 190),
+            10,
+        )
+
+        for index, (building_key, label) in enumerate(BUILDING_TYPES):
+            x, y, width, height = self.construction_building_rects[index]
+            active = index == self.selected_construction_index
+            fill = (58, 88, 112, 220) if active else (30, 40, 52, 175)
+            border = (170, 202, 232) if active else (86, 108, 132)
+            arcade.draw_lbwh_rectangle_filled(x, y, width, height, fill)
+            arcade.draw_lbwh_rectangle_outline(x, y, width, height, border, 1)
+            self.draw_ui_text(label, x + 8, y + height / 2, (230, 238, 246), 10, anchor_y="center")
+
+        button_x, button_y, button_width, button_height = self.construction_start_button_rect
+        button_active = self.construction_placement_mode
+        fill = (72, 112, 82, 230) if button_active else (42, 62, 82, 220)
+        border = (170, 220, 180) if button_active else (110, 138, 166)
+        arcade.draw_lbwh_rectangle_filled(button_x, button_y, button_width, button_height, fill)
+        arcade.draw_lbwh_rectangle_outline(button_x, button_y, button_width, button_height, border, 2)
+        label = "Отменить размещение" if button_active else "Построить"
+        self.draw_ui_text(label, button_x + button_width / 2, button_y + button_height / 2,
+                          arcade.color.WHITE, 13, anchor_x="center", anchor_y="center")
+
+    def handle_construction_panel_click(self, x, y):
+        if self.active_top_panel_key != "construction":
+            return False
+
+        if self.construction_queue_toggle_rect and self.point_in_rect(x, y, self.construction_queue_toggle_rect):
+            self.construction_queue_expanded = not self.construction_queue_expanded
+            return True
+
+        for index, rect in enumerate(self.construction_building_option_rects()):
+            if self.point_in_rect(x, y, rect):
+                self.selected_construction_index = index
+                if self.construction_placement_mode:
+                    self.create_map_overview()
+                    self.refresh_visible_tiles()
+                return True
+
+        if self.point_in_rect(x, y, self.construction_start_rect()):
+            self.set_construction_placement_mode(not self.construction_placement_mode)
+            return True
+
+        return True
+
     def draw_side_panel(self):
         if not self.active_top_panel_key and self.side_panel_progress <= 0:
             return
@@ -4152,6 +4882,8 @@ class Game(arcade.View):
 
         if self.active_top_panel_key == "resources":
             self.draw_resources_panel_content(panel_x, panel_y, panel_width, panel_height)
+        elif self.active_top_panel_key == "construction":
+            self.draw_construction_panel_content(panel_x, panel_y, panel_width, panel_height)
         else:
             self.draw_ui_text(
                 "Раздел пока пуст",
@@ -4226,10 +4958,6 @@ class Game(arcade.View):
         self.hex_panel_message = ""
         if self.selection_border:
             self.selection_border.visible = False
-
-    def trigger_hex_build_placeholder(self):
-        self.hex_panel_message = "Строительство будет добавлено позже"
-        self.hex_panel_message_timer = 2.0
 
     def toggle_hex_specialization_mode(self):
         self.hex_panel_specialization_mode = not self.hex_panel_specialization_mode
@@ -4722,65 +5450,6 @@ class Game(arcade.View):
     def draw_gui(self):
         pass
 
-    def draw_build_controls(self):
-        if not self.show_build_controls or not self.selected_tile or not self.building_dropdown:
-            return
-
-        panel_x, panel_y, panel_width, panel_height = self.build_panel_rect()
-        arcade.draw_lbwh_rectangle_filled(panel_x, panel_y, panel_width, panel_height, (18, 25, 33, 230))
-        arcade.draw_lbwh_rectangle_outline(panel_x, panel_y, panel_width, panel_height, (100, 126, 155), 2)
-
-        self.building_dropdown.selected_index = self.selected_building_index
-        self.building_dropdown.draw(self.open_building_dropdown)
-
-        button_x, button_y, button_width, button_height = self.build_button_rect()
-        fill = (64, 92, 118) if self.hovered_build_button else (42, 55, 72)
-        border = (165, 195, 230) if self.hovered_build_button else (100, 126, 155)
-        arcade.draw_lbwh_rectangle_filled(button_x, button_y, button_width, button_height, fill)
-        arcade.draw_lbwh_rectangle_outline(button_x, button_y, button_width, button_height, border, 2)
-        self.draw_ui_text(
-            "+5% построить",
-            button_x + button_width / 2,
-            button_y + button_height / 2,
-            arcade.color.WHITE,
-            14,
-            anchor_x="center",
-            anchor_y="center",
-        )
-
-        coverage = getattr(self.selected_tile, "building_coverage", {})
-        y = panel_y + 94
-        if coverage:
-            self.draw_ui_text("На клетке:", panel_x + 14, y, (220, 230, 240), 13)
-            y -= 20
-            labels = dict(BUILDING_TYPES)
-            for key, value in sorted(coverage.items(), key=lambda item: item[1], reverse=True):
-                self.draw_ui_text(f"{labels.get(key, key)}: {value:.0%}", panel_x + 24, y, (220, 230, 240), 13)
-                y -= 18
-        else:
-            self.draw_ui_text("На клетке пока нет строений", panel_x + 14, y, (180, 192, 205), 13)
-
-        owner = self.selected_tile.owner
-        if owner:
-            totals = owner.resource_totals or self.recalculate_state_resources(owner)
-            resource_x = panel_x + 222
-            resource_y = panel_y + 130
-            self.draw_ui_text(f"Страна: {owner.name}", resource_x, resource_y, (220, 230, 240), 12)
-            resource_y -= 18
-            self.draw_ui_text("Сырье:", resource_x, resource_y, (180, 192, 205), 11)
-            resource_y -= 16
-            items = self.top_resource_items(totals["raw"], limit=5)
-            if items:
-                for key, value in items:
-                    line = f"{self.resource_display_name(key)}: {self.format_resource_amount(value)}"
-                    self.draw_ui_text(line, resource_x + 8, resource_y, (220, 230, 240), 11)
-                    resource_y -= 15
-            else:
-                self.draw_ui_text("нет", resource_x + 8, resource_y, (220, 230, 240), 11)
-
-        if self.building_message:
-            self.draw_ui_text(self.building_message, panel_x + 14, panel_y + 16, (235, 205, 120), 13)
-
     def on_resize(self, width, height):
         super().on_resize(width, height)
         self.sync_cameras_to_window()
@@ -4788,7 +5457,6 @@ class Game(arcade.View):
         self.target_camera_x, self.target_camera_y = self.world_camera.position
         self.rebuild_pause_menu()
         self.rebuild_time_hud()
-        self.rebuild_build_controls()
         self.rebuild_top_ui()
         self.refresh_visible_tiles()
 
@@ -4904,10 +5572,6 @@ class Game(arcade.View):
         self.shader_time += delta_time
         self.update_map_layer_menu_animation(delta_time)
         self.update_side_panel_animation(delta_time)
-        if self.building_message_timer > 0:
-            self.building_message_timer = max(0.0, self.building_message_timer - delta_time)
-            if self.building_message_timer == 0:
-                self.building_message = ""
         if self.hex_panel_message_timer > 0:
             self.hex_panel_message_timer = max(0.0, self.hex_panel_message_timer - delta_time)
             if self.hex_panel_message_timer == 0:
@@ -4932,6 +5596,8 @@ class Game(arcade.View):
             elapsed_hours = snapshot.hours_per_tick * tick_delta
             for player in self.players:
                 self.run_production_tick(player, elapsed_hours)
+                self.run_construction_tick(player, elapsed_hours)
+                self.run_economy_tick(player, elapsed_hours)
             self.last_production_tick_count = snapshot.tick_count
 
         self.handle_camera_keys(delta_time)
@@ -5001,13 +5667,17 @@ class Game(arcade.View):
                         return
             return
 
+        world_x, world_y = self.screen_to_world(x, y)
         if button == arcade.MOUSE_BUTTON_LEFT:
             if self.side_panel_progress > 0:
                 if self.point_in_rect(x, y, self.side_panel_close_rect()):
                     self.close_top_panel()
                     return
                 if self.point_in_rect(x, y, self.side_panel_rect()):
-                    self.handle_resources_panel_click(x, y)
+                    if self.active_top_panel_key == "resources":
+                        self.handle_resources_panel_click(x, y)
+                    elif self.active_top_panel_key == "construction":
+                        self.handle_construction_panel_click(x, y)
                     return
 
             if self.selected_tile and self.point_in_rect(x, y, self.hex_panel_rect()):
@@ -5026,7 +5696,7 @@ class Game(arcade.View):
                             self.set_selected_tile_industry_sector(sector)
                             return
                 if self.point_in_rect(x, y, self.hex_panel_build_button_rect()):
-                    self.trigger_hex_build_placeholder()
+                    self.open_top_panel("construction")
                     return
                 return
 
@@ -5040,29 +5710,6 @@ class Game(arcade.View):
 
             if y >= self.window.height - TOP_UI_HEIGHT:
                 return
-
-            if self.show_build_controls and self.selected_tile and self.building_dropdown:
-                if self.open_building_dropdown:
-                    option_index = self.building_dropdown.option_at(x, y)
-                    if option_index is not None:
-                        self.open_building_dropdown = False
-                        self.building_dropdown.hovered_index = None
-                        self.set_selected_building(option_index)
-                        return
-
-                if self.building_dropdown.contains_header(x, y):
-                    self.open_building_dropdown = not self.open_building_dropdown
-                    self.building_dropdown.hovered_index = None
-                    return
-
-                if self.point_in_rect(x, y, self.build_button_rect()):
-                    self.open_building_dropdown = False
-                    self.build_selected_structure()
-                    return
-
-                if self.point_in_rect(x, y, self.build_panel_rect()):
-                    self.open_building_dropdown = False
-                    return
 
             if self.map_layer == "resources":
                 resource_option_index = self.resource_group_option_at(x, y)
@@ -5100,7 +5747,21 @@ class Game(arcade.View):
                     time_button.action()
                     return
 
-        world_x, world_y = self.screen_to_world(x, y)
+            if self.construction_placement_mode and self.active_top_panel_key == "construction":
+                tile = self.get_tile_at(world_x, world_y)
+                building_key = self.selected_construction_building_key()
+                if tile and self.can_place_construction(self.human_player, tile, building_key):
+                    self.enqueue_construction(self.human_player, tile, building_key)
+                    self.map_layer_message = "Проект добавлен в очередь"
+                    self.map_layer_message_timer = 2.0
+                    self.create_map_overview()
+                    self.refresh_visible_tiles()
+                    return
+                if tile:
+                    self.map_layer_message = self.construction_tile_block_reason(self.human_player, tile, building_key) or "Нельзя построить"
+                    self.map_layer_message_timer = 2.0
+                return
+
         if button == arcade.MOUSE_BUTTON_RIGHT:
             self.is_dragging = True
             self.drag_start_x = x
@@ -5142,7 +5803,6 @@ class Game(arcade.View):
     def on_mouse_motion(self, x, y, dx, dy):
         if self.paused:
             self.hovered_tile = None
-            self.hovered_build_button = False
             self.hovered_hex_panel_close = False
             self.hovered_hex_build_button = False
             self.hovered_hex_specialization_button = False
@@ -5189,7 +5849,6 @@ class Game(arcade.View):
             or y >= self.window.height - TOP_UI_HEIGHT
             or (self.side_panel_progress > 0 and self.point_in_rect(x, y, self.side_panel_rect()))
         ):
-            self.hovered_build_button = False
             self.hovered_map_layer_button = False
             self.hovered_map_layer_option = None
             self.hovered_resource_group_button = False
@@ -5197,28 +5856,6 @@ class Game(arcade.View):
             self.hovered_time_button = None
             self.hovered_tile = None
             return
-
-        self.hovered_build_button = False
-        if self.show_build_controls and self.selected_tile and self.building_dropdown:
-            if self.open_building_dropdown:
-                self.building_dropdown.hovered_index = self.building_dropdown.option_at(x, y)
-            else:
-                self.building_dropdown.hovered_index = None
-
-            self.hovered_build_button = self.point_in_rect(x, y, self.build_button_rect())
-            if (
-                self.hovered_build_button
-                or self.building_dropdown.contains_header(x, y)
-                or self.point_in_rect(x, y, self.build_panel_rect())
-                or self.building_dropdown.hovered_index is not None
-            ):
-                self.hovered_map_layer_button = False
-                self.hovered_map_layer_option = None
-                self.hovered_resource_group_button = False
-                self.hovered_resource_group_option = None
-                self.hovered_time_button = None
-                self.hovered_tile = None
-                return
 
         self.hovered_resource_group_button = False
         self.hovered_resource_group_option = None
@@ -5280,11 +5917,6 @@ class Game(arcade.View):
             if over_resource_panel:
                 return
 
-        if self.show_build_controls and self.selected_tile and self.open_building_dropdown and self.building_dropdown:
-            self.building_dropdown.scroll(-scroll_y)
-            self.building_dropdown.hovered_index = self.building_dropdown.option_at(x, y)
-            return
-
         old_zoom = self.world_camera.zoom
         new_zoom = max(MIN_ZOOM, min(MAX_ZOOM, old_zoom + scroll_y * ZOOM_SPEED))
         if new_zoom == old_zoom:
@@ -5321,14 +5953,12 @@ class Game(arcade.View):
 
     def on_key_press(self, key, modifiers):
         if key == arcade.key.ESCAPE:
-            if not self.paused and self.side_panel_target > 0:
-                self.close_top_panel()
+            if not self.paused and self.construction_placement_mode:
+                self.set_construction_placement_mode(False)
                 return
 
-            if not self.paused and self.show_build_controls and self.open_building_dropdown:
-                self.open_building_dropdown = False
-                if self.building_dropdown:
-                    self.building_dropdown.hovered_index = None
+            if not self.paused and self.side_panel_target > 0:
+                self.close_top_panel()
                 return
 
             if self.paused and self.pause_screen == "settings":
