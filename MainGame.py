@@ -4359,13 +4359,9 @@ class Game(arcade.View):
             for stage_cache in cache.values()
         )
 
-    def selected_resource_overlay_color(self, tile, base_color):
-        if (
-            self.active_top_panel_key != "resources"
-            or not self.selected_resource_key
-        ):
-            return base_color
-
+    def selected_resource_signal(self, tile):
+        if not self.selected_resource_key:
+            return 0.0, None
         if self.resource_panel_category == "raw":
             amount = self.resource_amount_for_key(tile, self.selected_resource_key)
             scale = 500_000
@@ -4379,10 +4375,21 @@ class Game(arcade.View):
             low_color = (82, 172, 214)
             high_color = (154, 238, 255)
         if amount <= 0:
-            return base_color
+            return 0.0, None
 
         intensity = min(1.0, math.log10(amount + 1) / math.log10(scale + 1))
-        glow = self.blend_colors(low_color, high_color, intensity)
+        return intensity, self.blend_colors(low_color, high_color, intensity)
+
+    def selected_resource_overlay_color(self, tile, base_color):
+        if (
+            self.active_top_panel_key not in ("resources", "construction")
+            or not self.selected_resource_key
+        ):
+            return base_color
+
+        intensity, glow = self.selected_resource_signal(tile)
+        if not glow:
+            return base_color
         return self.blend_colors(base_color, glow, 0.42 + intensity * 0.36)
 
     def construction_overlay_color(self, tile, base_color):
@@ -4409,7 +4416,11 @@ class Game(arcade.View):
         if tile == self.hovered_tile:
             overlay = self.blend_colors(overlay, (245, 255, 150), 0.22 if can_place else 0.08)
             amount = min(0.86, amount + 0.10)
-        return self.blend_colors(base_color, overlay, amount)
+        result = self.blend_colors(base_color, overlay, amount)
+        intensity, glow = self.selected_resource_signal(tile)
+        if glow:
+            result = self.blend_colors(result, glow, 0.18 + intensity * 0.22)
+        return result
 
     def draw_construction_placement_labels(self):
         if not self.construction_placement_mode or self.use_overview_lod():
@@ -4572,7 +4583,7 @@ class Game(arcade.View):
 
     def get_tile_map_color(self, tile):
         if self.construction_placement_mode and self.active_top_panel_key == "construction":
-            return self.construction_overlay_color(tile, self.terrain_color(tile))
+            return self.construction_overlay_color(tile, self.selected_resource_overlay_color(tile, self.terrain_color(tile)))
         if self.map_layer == "political":
             return self.selected_resource_overlay_color(tile, self.political_color(tile))
         if self.map_layer == "height":
