@@ -16,6 +16,7 @@ from HexTile import HexTile
 from MapData import MapTileData
 from Settings import create_window_with_fallback, load_settings, save_settings
 
+
 OVERVIEW_LOD_ZOOM = 0.2
 OVERVIEW_TEXTURE_MAX_SIZE = 1024
 RESOLUTIONS = [(1024, 768), (1200, 800), (1366, 768), (1600, 900), (1920, 1080)]
