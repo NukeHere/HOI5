@@ -2054,14 +2054,14 @@ class Game(arcade.View):
     def resource_consumption_breakdown(self, player, resource_key):
         if not player:
             return []
-        cache = player.production_cache or self.recalculate_state_production_cache(player)
-        construction = self.active_construction_consumption(player).get(resource_key, 0.0)
+        flows = self.estimate_monthly_resource_flows(player)
+        stage_inputs = flows["stage_inputs"]
+        construction = flows["construction_inputs"].get(resource_key, 0.0)
         industry = sum(
-            cache[stage]["inputs"].get(resource_key, 0.0)
+            stage_inputs.get(stage, {}).get(resource_key, 0.0)
             for stage in ("semi_finished", "agriculture", "finished")
-            if stage in cache
         )
-        upkeep = cache.get("upkeep", {}).get("inputs", {}).get(resource_key, 0.0)
+        upkeep = stage_inputs.get("upkeep", {}).get(resource_key, 0.0)
         repair = 0.0
         items = [
             ("Стройки", construction),
@@ -2073,6 +2073,142 @@ class Game(arcade.View):
         if total <= 0:
             return [(label, amount, 0.0) for label, amount in items]
         return [(label, amount, amount / total * 100.0) for label, amount in items]
+
+    def estimate_monthly_resource_flows(self, player):
+        stockpiles = self.ensure_player_stockpiles(player)
+        cache = player.production_cache or self.recalculate_state_production_cache(player)
+        simulated_stockpiles = {
+            category: dict(resources)
+            for category, resources in stockpiles.items()
+        }
+        flows = {
+            "inputs": {},
+            "outputs": {},
+            "stage_inputs": {stage: {} for stage in PRODUCTION_STAGES},
+            "stage_outputs": {stage: {} for stage in PRODUCTION_STAGES},
+            "construction_inputs": {},
+        }
+
+        def add_amount(bucket, key, amount):
+            if amount <= 0:
+                return
+            bucket[key] = bucket.get(key, 0.0) + amount
+
+        def stock_amount(key):
+            category = self.resource_category_for_key(key)
+            return simulated_stockpiles.setdefault(category, {}).get(key, 0.0)
+
+        def add_stock(key, amount):
+            if amount <= 0:
+                return
+            category = self.resource_category_for_key(key)
+            bucket = simulated_stockpiles.setdefault(category, {})
+            bucket[key] = bucket.get(key, 0.0) + amount
+
+        def consume_stock(key, amount):
+            if amount <= 0:
+                return 0.0
+            category = self.resource_category_for_key(key)
+            bucket = simulated_stockpiles.setdefault(category, {})
+            available = bucket.get(key, 0.0)
+            consumed = min(available, amount)
+            bucket[key] = max(0.0, available - consumed)
+            return consumed
+
+        def record_input(stage, key, amount):
+            add_amount(flows["inputs"], key, amount)
+            add_amount(flows["stage_inputs"].setdefault(stage, {}), key, amount)
+
+        def record_output(stage, key, amount):
+            add_amount(flows["outputs"], key, amount)
+            add_amount(flows["stage_outputs"].setdefault(stage, {}), key, amount)
+
+        for stage in PRODUCTION_STAGES:
+            if stage == "agriculture":
+                planned_fertilizer = cache["agriculture"]["inputs"].get("fertilizer", 0.0)
+                planned_bonus_food = cache["agriculture"]["outputs"].get("food", 0.0)
+                if planned_fertilizer > 0 and planned_bonus_food > 0:
+                    consumed = consume_stock("fertilizer", planned_fertilizer)
+                    fertilizer_ratio = self.clamp01(consumed / planned_fertilizer)
+                    bonus_food = planned_bonus_food * fertilizer_ratio
+                    record_input(stage, "fertilizer", consumed)
+                    if bonus_food > 0:
+                        add_stock("food", bonus_food)
+                        record_output(stage, "food", bonus_food)
+                continue
+
+            planned_inputs = {
+                key: amount
+                for key, amount in cache[stage]["inputs"].items()
+                if amount > 0
+            }
+            planned_outputs = {
+                key: amount
+                for key, amount in cache[stage]["outputs"].items()
+                if amount > 0
+            }
+
+            if stage == "upkeep":
+                for key, required in planned_inputs.items():
+                    consumed = consume_stock(key, required)
+                    record_input(stage, key, consumed)
+                continue
+
+            actual_ratio = 1.0
+            for key, required in planned_inputs.items():
+                actual_ratio = min(actual_ratio, stock_amount(key) / required)
+            actual_ratio = self.clamp01(actual_ratio)
+
+            for key, required in planned_inputs.items():
+                consumed = consume_stock(key, required * actual_ratio)
+                record_input(stage, key, consumed)
+            for key, output in planned_outputs.items():
+                actual_output = output * actual_ratio
+                add_stock(key, actual_output)
+                record_output(stage, key, actual_output)
+
+        for key, amount in self.estimate_active_construction_consumption(player, stock_amount).items():
+            consumed = consume_stock(key, amount)
+            add_amount(flows["inputs"], key, consumed)
+            add_amount(flows["construction_inputs"], key, consumed)
+
+        return flows
+
+    def estimate_active_construction_consumption(self, player, stock_amount_func):
+        if not player.construction_queue:
+            return {}
+        project = player.construction_queue[0]
+        cost = project.get("cost", {})
+        if not project.get("money_paid", False) and player.budget < cost.get("money_cost", 0.0):
+            return {}
+
+        resource_costs = cost.get("resource_costs", {})
+        if not resource_costs:
+            return {}
+
+        speed = self.build_power(player)
+        if speed <= 0:
+            return {}
+
+        old_progress = max(0.0, min(1.0, project.get("progress", 0.0)))
+        planned_delta = speed / max(1.0, cost.get("work_required", 1.0))
+        new_progress = min(1.0, old_progress + planned_delta)
+        resources_spent = cost.setdefault("resources_spent", {})
+        for key, total_amount in resource_costs.items():
+            if total_amount <= 0:
+                continue
+            already_spent = resources_spent.get(key, 0.0)
+            available_for_project = already_spent + stock_amount_func(key)
+            new_progress = min(new_progress, available_for_project / total_amount)
+
+        progress_delta = max(0.0, new_progress - old_progress)
+        if progress_delta <= 0:
+            return {}
+        return {
+            key: total_amount * progress_delta
+            for key, total_amount in resource_costs.items()
+            if total_amount > 0
+        }
 
     def stockpile_amount(self, player, key):
         category = self.resource_category_for_key(key)
@@ -2577,6 +2713,8 @@ class Game(arcade.View):
     def run_production_stage(self, player, stage, month_fraction):
         if stage == "agriculture":
             return self.run_agriculture_stage(player, month_fraction)
+        if stage == "upkeep":
+            return self.run_upkeep_stage(player, month_fraction)
 
         cache = player.production_cache or self.recalculate_state_production_cache(player)
         planned_inputs = {
@@ -2602,6 +2740,21 @@ class Game(arcade.View):
         for key, output in planned_outputs.items():
             self.add_to_stockpile(player, key, output * actual_ratio)
         return actual_ratio
+
+    def run_upkeep_stage(self, player, month_fraction):
+        cache = player.production_cache or self.recalculate_state_production_cache(player)
+        planned_inputs = {
+            key: amount * month_fraction
+            for key, amount in cache["upkeep"]["inputs"].items()
+            if amount > 0
+        }
+        ratios = []
+        for key, required in planned_inputs.items():
+            consumed = self.consume_from_stockpile(player, key, required)
+            ratios.append(consumed / required if required > 0 else 1.0)
+        if not ratios:
+            return 1.0
+        return min(ratios)
 
     def run_agriculture_stage(self, player, month_fraction):
         cache = player.production_cache or self.recalculate_state_production_cache(player)
@@ -4970,7 +5123,7 @@ class Game(arcade.View):
         if not self.human_player.production_cache:
             self.recalculate_state_production_cache(self.human_player)
         stockpiles = self.ensure_player_stockpiles(self.human_player)
-        construction_consumption = self.active_construction_consumption(self.human_player)
+        flows = self.estimate_monthly_resource_flows(self.human_player)
         if self.resource_panel_category == "raw":
             raw = self.human_player.resource_totals.get("raw", {})
             raw_stock = stockpiles.get("raw", {})
@@ -4980,11 +5133,8 @@ class Game(arcade.View):
                     keys.append(key)
             rows = []
             for key in keys:
-                production = self.production_amount_for_key(self.human_player, key, "outputs")
-                consumption = (
-                    self.production_amount_for_key(self.human_player, key, "inputs")
-                    + construction_consumption.get(key, 0.0)
-                )
+                production = flows["outputs"].get(key, 0.0)
+                consumption = flows["inputs"].get(key, 0.0)
                 stock = raw_stock.get(key, 0.0)
                 rows.append({
                     "key": key,
@@ -5000,11 +5150,8 @@ class Game(arcade.View):
         stock = stockpiles.get(self.resource_panel_category, {})
         rows = []
         for key in names:
-            production = self.production_amount_for_key(self.human_player, key, "outputs")
-            consumption = (
-                self.production_amount_for_key(self.human_player, key, "inputs")
-                + construction_consumption.get(key, 0.0)
-            )
+            production = flows["outputs"].get(key, 0.0)
+            consumption = flows["inputs"].get(key, 0.0)
             stock_amount = stock.get(key, 0.0)
             rows.append({
                 "key": key,
@@ -5219,9 +5366,9 @@ class Game(arcade.View):
         self.draw_ui_text(f"Источники: {sources_count} клетки", card_x + 14, y, (220, 230, 240), 12)
         y -= 30
 
-        consumption = (
-            self.production_amount_for_key(self.human_player, self.selected_resource_key, "inputs")
-            + self.active_construction_consumption(self.human_player).get(self.selected_resource_key, 0.0)
+        consumption = self.estimate_monthly_resource_flows(self.human_player)["inputs"].get(
+            self.selected_resource_key,
+            0.0,
         )
 
         self.draw_ui_text("Потребление", card_x + 14, y, arcade.color.WHITE, 12)
