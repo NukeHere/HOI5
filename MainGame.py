@@ -1421,6 +1421,8 @@ class Game(arcade.View):
         self.resource_summary_rect = None
         self.hovered_resource_summary = False
         self.resource_warning_rects = []
+        self.selected_resource_signal_cache_key = None
+        self.selected_resource_signal_cache = {}
         self.construction_queue_expanded = False
         self.selected_construction_index = 0
         self.construction_placement_mode = False
@@ -1533,6 +1535,10 @@ class Game(arcade.View):
         self.construction_placement_tile_cache = {}
         self.construction_placement_label_items = []
 
+    def invalidate_selected_resource_signal_cache(self):
+        self.selected_resource_signal_cache_key = None
+        self.selected_resource_signal_cache = {}
+
     def refresh_visible_tiles_signature(self):
         signature = tuple((tile.q, tile.r) for tile in self.visible_tiles)
         if signature == self.visible_tiles_signature:
@@ -1542,6 +1548,7 @@ class Game(arcade.View):
         self.visible_tiles_revision += 1
         self.invalidate_tile_visual_cache()
         self.invalidate_construction_placement_cache()
+        self.invalidate_selected_resource_signal_cache()
 
     @staticmethod
     def empty_resource_totals():
@@ -4360,7 +4367,65 @@ class Game(arcade.View):
             for stage_cache in cache.values()
         )
 
+    def rebuild_selected_resource_signal_cache(self):
+        if (
+            self.active_top_panel_key not in ("resources", "construction")
+            or not self.selected_resource_key
+        ):
+            self.invalidate_selected_resource_signal_cache()
+            return
+
+        cache_key = (
+            self.visible_tiles_signature,
+            self.active_top_panel_key,
+            self.resource_panel_category,
+            self.selected_resource_key,
+            self.last_production_tick_count,
+            self.tile_visual_revision,
+        )
+        if cache_key == self.selected_resource_signal_cache_key:
+            return
+
+        signal_cache = {}
+        if self.resource_panel_category == "raw":
+            scale = 500_000
+            low_color = (214, 176, 82)
+            high_color = (255, 245, 140)
+            for tile in self.visible_tiles:
+                amount = self.resource_amount_for_key(tile, self.selected_resource_key)
+                if amount <= 0:
+                    continue
+                intensity = min(1.0, math.log10(amount + 1) / math.log10(scale + 1))
+                signal_cache[(tile.q, tile.r)] = (
+                    intensity,
+                    self.blend_colors(low_color, high_color, intensity),
+                )
+        elif self.human_player:
+            scale = max(
+                1.0,
+                self.production_amount_for_key(self.human_player, self.selected_resource_key, "outputs") * 0.18,
+            )
+            low_color = (82, 172, 214)
+            high_color = (154, 238, 255)
+            for tile in self.visible_tiles:
+                if tile.owner != self.human_player:
+                    continue
+                amount = self.tile_output_amount_for_key(tile, self.selected_resource_key)
+                if amount <= 0:
+                    continue
+                intensity = min(1.0, math.log10(amount + 1) / math.log10(scale + 1))
+                signal_cache[(tile.q, tile.r)] = (
+                    intensity,
+                    self.blend_colors(low_color, high_color, intensity),
+                )
+
+        self.selected_resource_signal_cache_key = cache_key
+        self.selected_resource_signal_cache = signal_cache
+
     def selected_resource_signal(self, tile):
+        cached = self.selected_resource_signal_cache.get((tile.q, tile.r))
+        if cached:
+            return cached
         if not self.selected_resource_key:
             return 0.0, None
         if self.resource_panel_category == "raw":
@@ -4370,7 +4435,7 @@ class Game(arcade.View):
             high_color = (255, 245, 140)
         else:
             if tile.owner != self.human_player:
-                return base_color
+                return 0.0, None
             amount = self.tile_output_amount_for_key(tile, self.selected_resource_key)
             scale = max(1.0, self.production_amount_for_key(self.human_player, self.selected_resource_key, "outputs") * 0.18)
             low_color = (82, 172, 214)
@@ -4584,7 +4649,7 @@ class Game(arcade.View):
 
     def get_tile_map_color(self, tile):
         if self.construction_placement_mode and self.active_top_panel_key == "construction":
-            return self.construction_overlay_color(tile, self.selected_resource_overlay_color(tile, self.terrain_color(tile)))
+            return self.construction_overlay_color(tile, self.terrain_color(tile))
         if self.map_layer == "political":
             return self.selected_resource_overlay_color(tile, self.political_color(tile))
         if self.map_layer == "height":
@@ -6325,6 +6390,7 @@ class Game(arcade.View):
 
     def update_draw_list(self):
         """Обновление списка отрисовки"""
+        self.rebuild_selected_resource_signal_cache()
         self.rebuild_construction_placement_cache()
         for tile in self.visible_tiles:
             base_color = self.get_tile_map_color(tile)
