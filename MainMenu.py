@@ -3,11 +3,11 @@ from typing import Callable
 
 import arcade
 
-from MainGame import Game, MAX_BOTS
+from Constants import MAX_BOTS, RESOLUTIONS
+from MainGame import Game
 from Settings import create_window_with_fallback, load_settings, save_settings
 
 
-RESOLUTIONS = [(1024, 768), (1200, 800), (1366, 768), (1600, 900), (1920, 1080)]
 DIFFICULTIES = ["Легкая", "Обычная", "Сложная"]
 BOT_COUNTS = list(range(0, MAX_BOTS + 1))
 MAP_SIZES = [50, 75, 100, 125, 150]

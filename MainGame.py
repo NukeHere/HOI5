@@ -16,47 +16,6 @@ from HexTile import HexTile
 from MapData import MapTileData
 from Settings import create_window_with_fallback, load_settings, save_settings
 
-
-OVERVIEW_LOD_ZOOM = 0.2
-OVERVIEW_TEXTURE_MAX_SIZE = 1024
-RESOLUTIONS = [(1024, 768), (1200, 800), (1366, 768), (1600, 900), (1920, 1080)]
-MAX_BOTS = 11
-STATE_COLORS = [
-    (235, 65, 56),
-    (255, 184, 0),
-    (0, 183, 255),
-    (255, 72, 191),
-    (118, 235, 74),
-    (255, 126, 0),
-    (170, 98, 255),
-    (0, 220, 190),
-    (255, 238, 72),
-    (52, 112, 255),
-    (255, 112, 145),
-    (215, 255, 112),
-]
-STATE_BORDER_COLORS = [
-    (255, 30, 20),
-    (255, 230, 0),
-    (0, 220, 255),
-    (255, 0, 210),
-    (80, 255, 40),
-    (255, 135, 0),
-    (190, 65, 255),
-    (0, 255, 215),
-    (255, 255, 80),
-    (40, 105, 255),
-    (255, 75, 135),
-    (215, 255, 55),
-]
-MAP_LAYERS = [
-    ("terrain", "Местность", True),
-    ("political", "Политическая", True),
-    ("height", "Высотная", True),
-    ("climate", "Климат", True),
-    ("resources", "Ресурсы", True),
-    ("weather", "Погодная", False),
-]
 RESOURCE_MAP_GROUPS = [
     (
         "fuel",
@@ -1429,6 +1388,10 @@ class Game(arcade.View):
         self.construction_placement_cache_key = None
         self.construction_placement_tile_cache = {}
         self.construction_placement_label_items = []
+        self.construction_placement_label_texts = []
+        self.construction_placement_text_cache = {}
+        self.construction_placement_label_rects = []
+        self.construction_placement_label_shapes = arcade.shape_list.ShapeElementList()
         self.construction_queue_toggle_rect = None
         self.construction_building_rects = []
         self.construction_start_button_rect = None
@@ -1534,6 +1497,9 @@ class Game(arcade.View):
         self.construction_placement_cache_key = None
         self.construction_placement_tile_cache = {}
         self.construction_placement_label_items = []
+        self.construction_placement_label_texts = []
+        self.construction_placement_label_rects = []
+        self.construction_placement_label_shapes = arcade.shape_list.ShapeElementList()
 
     def invalidate_selected_resource_signal_cache(self):
         self.selected_resource_signal_cache_key = None
@@ -2311,6 +2277,21 @@ class Game(arcade.View):
                 coverage = max(coverage, cost.get("target_coverage", coverage))
         return min(1.0, coverage)
 
+    def construction_queue_target_lookup(self, player, building_key):
+        targets = {}
+        if not player or not building_key:
+            return targets
+        for project in player.construction_queue:
+            cost = project.get("cost", {})
+            if cost.get("building") != building_key:
+                continue
+            tile = project.get("tile")
+            if not tile:
+                continue
+            tile_key = (tile.q, tile.r)
+            targets[tile_key] = max(targets.get(tile_key, 0.0), cost.get("target_coverage", 0.0))
+        return targets
+
     def best_building_for_tile(self, player, tile):
         coverage = getattr(tile, "building_coverage", {}) or {}
         upgradeable = [
@@ -2354,6 +2335,81 @@ class Game(arcade.View):
             ))
         return tuple(signature)
 
+    def construction_placement_current_cache_key(self, building_key=None, player=None):
+        return (
+            tuple((tile.q, tile.r) for tile in self.visible_tiles),
+            building_key or self.selected_construction_building_key(),
+            self.construction_queue_signature(player or self.human_player),
+            self.tile_visual_revision,
+        )
+
+    @staticmethod
+    def construction_label_rect(tile, label):
+        label_width = 104
+        label_height = 22
+        return (
+            tile.center_x - label_width / 2,
+            tile.center_y - label_height / 2 - 2,
+            label_width,
+            label_height,
+        )
+
+    def create_construction_label_text(self, tile, label):
+        return arcade.Text(
+            label,
+            tile.center_x,
+            tile.center_y - 1,
+            (232, 252, 144),
+            15,
+            anchor_x="center",
+            anchor_y="center",
+            bold=True,
+        )
+
+    def get_construction_label_text(self, tile, label):
+        tile_key = (tile.q, tile.r)
+        text = self.construction_placement_text_cache.get(tile_key)
+        if text is None:
+            text = self.create_construction_label_text(tile, label)
+            self.construction_placement_text_cache[tile_key] = text
+        else:
+            if text.text != label:
+                text.text = label
+            text.x = tile.center_x
+            text.y = tile.center_y - 1
+        return text
+
+    @staticmethod
+    def append_construction_label_shapes(shapes, rect):
+        x, y, width, height = rect
+        center_x = x + width / 2
+        center_y = y + height / 2
+        shapes.append(
+            arcade.shape_list.create_rectangle_filled(
+                center_x,
+                center_y,
+                width,
+                height,
+                (18, 27, 22, 210),
+            )
+        )
+        shapes.append(
+            arcade.shape_list.create_rectangle_outline(
+                center_x,
+                center_y,
+                width,
+                height,
+                (206, 238, 140, 190),
+                1,
+            )
+        )
+
+    def create_construction_label_shapes(self, rects):
+        shapes = arcade.shape_list.ShapeElementList()
+        for rect in rects:
+            self.append_construction_label_shapes(shapes, rect)
+        return shapes
+
     def rebuild_construction_placement_cache(self):
         if not self.construction_placement_mode or self.active_top_panel_key != "construction":
             self.invalidate_construction_placement_cache()
@@ -2361,27 +2417,29 @@ class Game(arcade.View):
 
         building_key = self.selected_construction_building_key()
         player = self.human_player
-        visible_signature = tuple((tile.q, tile.r) for tile in self.visible_tiles)
-        cache_key = (
-            visible_signature,
-            building_key,
-            self.construction_queue_signature(player),
-            self.tile_visual_revision,
-        )
+        cache_key = self.construction_placement_current_cache_key(building_key, player)
         if cache_key == self.construction_placement_cache_key:
             return
 
         tile_cache = {}
         label_items = []
+        label_texts = []
+        label_rects = []
         if building_key and player:
+            queued_targets = self.construction_queue_target_lookup(player, building_key)
             for tile in self.visible_tiles:
                 if tile.owner != player:
                     continue
-                reason = self.construction_tile_block_reason(player, tile, building_key)
-                can_place = reason is None
                 coverage = (getattr(tile, "building_coverage", {}) or {}).get(building_key, 0.0)
-                queued_target = self.queued_target_coverage(player, tile, building_key)
+                queued_target = max(coverage, queued_targets.get((tile.q, tile.r), coverage))
                 queued_delta = max(0.0, queued_target - coverage)
+                reason = self.construction_tile_block_reason(
+                    player,
+                    tile,
+                    building_key,
+                    queued_coverage=queued_target,
+                )
+                can_place = reason is None
                 label = f"{coverage:.0%}"
                 if queued_delta > 0:
                     label += f"+{queued_delta:.0%}"
@@ -2393,19 +2451,100 @@ class Game(arcade.View):
                 }
                 if can_place:
                     label_items.append((tile, label))
+                    label_rects.append(self.construction_label_rect(tile, label))
+                    label_texts.append(self.get_construction_label_text(tile, label))
 
         self.construction_placement_cache_key = cache_key
         self.construction_placement_tile_cache = tile_cache
         self.construction_placement_label_items = label_items
+        self.construction_placement_label_texts = label_texts
+        self.construction_placement_label_rects = label_rects
+        self.construction_placement_label_shapes = self.create_construction_label_shapes(label_rects)
 
-    def construction_tile_block_reason(self, player, tile, building_key):
+    def construction_label_index_for_tile(self, tile):
+        tile_key = (tile.q, tile.r)
+        for index, (label_tile, _label) in enumerate(self.construction_placement_label_items):
+            if (label_tile.q, label_tile.r) == tile_key:
+                return index
+        return None
+
+    def set_construction_label_for_tile(self, tile, label, visible):
+        index = self.construction_label_index_for_tile(tile)
+        if not visible:
+            if index is not None:
+                self.construction_placement_label_items.pop(index)
+                self.construction_placement_label_rects.pop(index)
+                self.construction_placement_label_texts.pop(index)
+                self.construction_placement_label_shapes = self.create_construction_label_shapes(
+                    self.construction_placement_label_rects
+                )
+            return
+
+        rect = self.construction_label_rect(tile, label)
+        if index is None:
+            self.construction_placement_label_items.append((tile, label))
+            self.construction_placement_label_rects.append(rect)
+            self.construction_placement_label_texts.append(self.get_construction_label_text(tile, label))
+            self.append_construction_label_shapes(self.construction_placement_label_shapes, rect)
+        else:
+            self.construction_placement_label_items[index] = (tile, label)
+            old_rect = self.construction_placement_label_rects[index]
+            self.construction_placement_label_rects[index] = rect
+            text = self.construction_placement_label_texts[index]
+            if text.text != label:
+                text.text = label
+            text.x = tile.center_x
+            text.y = tile.center_y - 1
+            if rect != old_rect:
+                self.construction_placement_label_shapes = self.create_construction_label_shapes(
+                    self.construction_placement_label_rects
+                )
+
+    def refresh_construction_placement_tile(self, tile, building_key=None):
+        if not tile or not self.construction_placement_mode or self.active_top_panel_key != "construction":
+            return
+        building_key = building_key or self.selected_construction_building_key()
+        player = self.human_player
+        if not building_key or not player:
+            return
+        if self.construction_placement_cache_key is None:
+            self.rebuild_construction_placement_cache()
+            return
+        if not any(visible_tile is tile for visible_tile in self.visible_tiles):
+            self.construction_placement_cache_key = self.construction_placement_current_cache_key(building_key, player)
+            return
+
+        reason = self.construction_tile_block_reason(player, tile, building_key)
+        can_place = reason is None
+        coverage = (getattr(tile, "building_coverage", {}) or {}).get(building_key, 0.0)
+        queued_target = self.queued_target_coverage(player, tile, building_key)
+        queued_delta = max(0.0, queued_target - coverage)
+        label = f"{coverage:.0%}"
+        if queued_delta > 0:
+            label += f"+{queued_delta:.0%}"
+
+        self.construction_placement_tile_cache[(tile.q, tile.r)] = {
+            "can_place": can_place,
+            "coverage": coverage,
+            "queued_delta": queued_delta,
+            "label": label,
+        }
+        self.set_construction_label_for_tile(tile, label, can_place)
+        self.construction_placement_cache_key = self.construction_placement_current_cache_key(building_key, player)
+        self.apply_tile_draw_color(tile)
+
+    def construction_tile_block_reason(self, player, tile, building_key, queued_coverage=None):
         if not player:
             return "Нет страны"
         if not tile or tile.owner != player:
             return "Чужая клетка"
         if building_key not in BUILDING_CONSTRUCTION_BASE:
             return "Неизвестное строение"
-        coverage = self.queued_target_coverage(player, tile, building_key)
+        coverage = (
+            queued_coverage
+            if queued_coverage is not None
+            else self.queued_target_coverage(player, tile, building_key)
+        )
         if coverage >= 1.0:
             return "Уже максимум"
         if building_key == "port":
@@ -2462,7 +2601,7 @@ class Game(arcade.View):
             "progress": 0.0,
             "money_paid": False,
         })
-        self.invalidate_construction_placement_cache()
+        self.refresh_construction_placement_tile(tile, building_key)
         return True
 
     def cancel_queued_construction(self, player, tile, building_key=None):
@@ -2481,7 +2620,7 @@ class Game(arcade.View):
                 return False
 
             player.construction_queue.pop(index)
-            self.invalidate_construction_placement_cache()
+            self.refresh_construction_placement_tile(tile, building_key)
             return True
 
         return False
@@ -4491,24 +4630,11 @@ class Game(arcade.View):
     def draw_construction_placement_labels(self):
         if not self.construction_placement_mode or self.use_overview_lod():
             return
-        self.rebuild_construction_placement_cache()
-        for tile, label in self.construction_placement_label_items:
-            label_width = max(42, len(label) * 9 + 16)
-            label_height = 22
-            label_x = tile.center_x - label_width / 2
-            label_y = tile.center_y - label_height / 2 - 2
-            arcade.draw_lbwh_rectangle_filled(label_x, label_y, label_width, label_height, (18, 27, 22, 210))
-            arcade.draw_lbwh_rectangle_outline(label_x, label_y, label_width, label_height, (206, 238, 140, 190), 1)
-            self.draw_ui_text(
-                label,
-                tile.center_x,
-                tile.center_y - 1,
-                (232, 252, 144),
-                15,
-                anchor_x="center",
-                anchor_y="center",
-                bold=True,
-            )
+        if self.construction_placement_cache_key is None:
+            self.rebuild_construction_placement_cache()
+        self.construction_placement_label_shapes.draw()
+        for text in self.construction_placement_label_texts:
+            text.draw()
 
     def construction_hover_tooltip_data(self):
         if (
@@ -6388,6 +6514,19 @@ class Game(arcade.View):
     def exit_to_desktop(self):
         arcade.exit()
 
+    def apply_tile_draw_color(self, tile):
+        base_color = self.get_tile_map_color(tile)
+        if tile == self.selected_tile:
+            tile.color = self.blend_colors(base_color, (255, 255, 80), 0.22)
+        elif tile == self.hovered_tile:
+            tile.color = (
+                min(255, base_color[0] + 50),
+                min(255, base_color[1] + 50),
+                min(255, base_color[2] + 50),
+            )
+        else:
+            tile.color = base_color
+
     def update_draw_list(self):
         """Обновление списка отрисовки"""
         self.rebuild_selected_resource_signal_cache()
@@ -6599,8 +6738,6 @@ class Game(arcade.View):
                 building_key = self.selected_construction_building_key()
                 if tile and self.can_place_construction(self.human_player, tile, building_key):
                     self.enqueue_construction(self.human_player, tile, building_key)
-                    self.create_map_overview()
-                    self.refresh_visible_tiles()
                     return
                 return
 
@@ -6624,8 +6761,6 @@ class Game(arcade.View):
                     building_key,
                 ):
                     self.cancel_queued_construction(self.human_player, tile, building_key)
-                    self.create_map_overview()
-                    self.refresh_visible_tiles()
                     return
 
             self.is_dragging = True
