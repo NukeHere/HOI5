@@ -1312,6 +1312,7 @@ class Game(arcade.View):
         self.hex_draw_list = arcade.shape_list.ShapeElementList()
         self.state_border_list = arcade.shape_list.ShapeElementList()
         self.selected_tile = None
+        self.selected_tiles = []
         self.hovered_tile = None
         self.world_camera = arcade.camera.Camera2D()
         self.gui_camera = arcade.camera.Camera2D()
@@ -2568,7 +2569,7 @@ class Game(arcade.View):
         self.create_map_overview()
         self.refresh_visible_tiles()
 
-    def enqueue_construction(self, player, tile, building_key=None):
+    def enqueue_construction(self, player, tile, building_key=None, refresh=True):
         if not player or tile.owner != player:
             self.hex_panel_message = "Клетка не принадлежит стране"
             self.hex_panel_message_timer = 2.0
@@ -2601,8 +2602,20 @@ class Game(arcade.View):
             "progress": 0.0,
             "money_paid": False,
         })
-        self.refresh_construction_placement_tile(tile, building_key)
+        if refresh:
+            self.refresh_construction_placement_tile(tile, building_key)
         return True
+
+    def enqueue_construction_steps(self, player, tile, building_key=None, steps=1):
+        added = 0
+        for _index in range(max(1, steps)):
+            if not self.enqueue_construction(player, tile, building_key, refresh=False):
+                break
+            added += 1
+
+        if added:
+            self.refresh_construction_placement_tile(tile, building_key)
+        return added
 
     def cancel_queued_construction(self, player, tile, building_key=None):
         if not player or not tile:
@@ -3072,6 +3085,40 @@ class Game(arcade.View):
     def format_percent(value):
         return f"{max(0.0, min(1.0, value)):.0%}"
 
+    @staticmethod
+    def format_temperature(value):
+        celsius = round(-20 + max(0.0, min(1.0, value)) * 70)
+        return f"{celsius}°C"
+
+    @staticmethod
+    def format_elevation(value):
+        value = max(0.0, min(1.0, value))
+        if value >= WATER_LEVEL:
+            meters = round((value - WATER_LEVEL) / max(0.001, 1.0 - WATER_LEVEL) * 3000)
+        else:
+            meters = -round((WATER_LEVEL - value) / max(0.001, WATER_LEVEL) * 350)
+        return f"{meters} м"
+
+    @staticmethod
+    def format_tile_coverage_total(value):
+        if value >= 1.0:
+            return f"{value:.1f} клет."
+        return f"{value:.0%}"
+
+    @staticmethod
+    def average_tile_value(tiles, attr_name, default=0.0):
+        if not tiles:
+            return default
+        return sum(getattr(tile, attr_name, default) for tile in tiles) / len(tiles)
+
+    @staticmethod
+    def mixed_or_single(values, mixed_label="Разные"):
+        clean_values = [value for value in values if value]
+        if not clean_values:
+            return "--"
+        first = clean_values[0]
+        return first if all(value == first for value in clean_values) else mixed_label
+
     def estimated_tile_population(self, tile):
         if hasattr(tile, "population") and tile.population is not None:
             return tile.population
@@ -3148,6 +3195,81 @@ class Game(arcade.View):
             )
 
         return rows
+
+    def hex_resource_rows_for_tiles(self, tiles):
+        tiles = [tile for tile in tiles if tile]
+        if len(tiles) == 1:
+            return self.hex_resource_rows(tiles[0])
+
+        totals = {}
+        for tile in tiles:
+            for row in self.hex_resource_rows(tile):
+                key = row["key"]
+                total = totals.setdefault(
+                    key,
+                    {
+                        "key": key,
+                        "name": self.resource_display_name(key),
+                        "ground": 0.0,
+                        "stock": 0.0,
+                        "depth": row.get("depth"),
+                    },
+                )
+                total["ground"] += row.get("ground", 0.0)
+                total["stock"] += row.get("stock", 0.0)
+                depth = row.get("depth")
+                if depth is not None:
+                    total["depth"] = depth if total["depth"] is None else min(total["depth"], depth)
+
+        return sorted(
+            totals.values(),
+            key=lambda row: row["ground"] + row["stock"],
+            reverse=True,
+        )
+
+    def building_coverage_rows_for_tiles(self, tiles):
+        totals = {}
+        listed_buildings = set()
+        for tile in tiles:
+            for key, value in (getattr(tile, "building_coverage", {}) or {}).items():
+                if value > 0:
+                    totals[key] = totals.get(key, 0.0) + value
+            for key in getattr(tile, "buildings", []) or []:
+                if key in BUILDING_DISPLAY_NAMES:
+                    listed_buildings.add(key)
+        return totals, listed_buildings
+
+    def selected_industry_allocation_summary(self, industry_tiles):
+        totals = {}
+        if not industry_tiles:
+            return {}
+        for tile in industry_tiles:
+            allocation = getattr(tile, "industry_allocation", {}) or {}
+            if not allocation:
+                allocation = self.assign_industry_allocation(tile.owner, tile) if tile.owner else {}
+            for sector, share in allocation.items():
+                totals[sector] = totals.get(sector, 0.0) + share
+        return {
+            sector: share / len(industry_tiles)
+            for sector, share in totals.items()
+            if share > 0
+        }
+
+    def selected_industry_efficiency(self, industry_tiles):
+        if not industry_tiles:
+            return 0.0
+        total = 0.0
+        for tile in industry_tiles:
+            allocation = getattr(tile, "industry_allocation", {}) or {}
+            if not allocation:
+                allocation = self.assign_industry_allocation(tile.owner, tile) if tile.owner else {}
+            modifiers = tile.owner.production_modifiers if tile.owner else {}
+            total += self.specialization_efficiency(
+                allocation,
+                modifiers.get("industry_diversification_penalty", 0.9),
+                modifiers.get("industry_free_specializations", 1),
+            )
+        return total / len(industry_tiles)
 
     def load_top_nav_icon_textures(self):
         textures = {}
@@ -5886,7 +6008,7 @@ class Game(arcade.View):
 
     def hex_panel_content_bounds(self):
         panel_x, panel_y, panel_width, panel_height = self.hex_panel_rect()
-        bottom_padding = 96 if self.selected_tile and (getattr(self.selected_tile, "building_coverage", {}) or {}).get("industry", 0.0) > 0 else 58
+        bottom_padding = 96 if self.selected_tile_has_industry() else 58
         return panel_y + bottom_padding, panel_y + panel_height - 52
 
     def clamp_hex_panel_scroll(self):
@@ -5902,13 +6024,92 @@ class Game(arcade.View):
         return self.hex_panel_scroll != old_scroll
 
     def selected_tile_has_industry(self):
-        if not self.selected_tile:
-            return False
-        coverage = getattr(self.selected_tile, "building_coverage", {}) or {}
-        return coverage.get("industry", 0.0) > 0
+        return bool(self.selected_industry_tiles())
+
+    @staticmethod
+    def shift_modifier_active(modifiers):
+        return bool(modifiers & arcade.key.MOD_SHIFT)
+
+    @staticmethod
+    def tile_key(tile):
+        return tile.q, tile.r
+
+    def selected_hex_tiles(self):
+        if self.selected_tiles:
+            return [tile for tile in self.selected_tiles if tile]
+        return [self.selected_tile] if self.selected_tile else []
+
+    def selected_industry_tiles(self):
+        return [
+            tile
+            for tile in self.selected_hex_tiles()
+            if (getattr(tile, "building_coverage", {}) or {}).get("industry", 0.0) > 0
+        ]
+
+    def reset_hex_panel_view_state(self):
+        self.hex_panel_scroll = 0.0
+        self.hex_panel_content_height = 0.0
+        self.hex_resources_expanded = False
+        self.hex_resources_toggle_rect = None
+        self.hex_panel_specialization_mode = False
+
+    def rebuild_selection_borders(self):
+        self.selection_border_sprite_list.clear()
+        if not self.selection_border:
+            return
+
+        tiles = self.selected_hex_tiles()
+        if not tiles:
+            self.selection_border.visible = False
+            return
+
+        border_texture = self.selection_border.texture
+        for index, tile in enumerate(tiles):
+            sprite = self.selection_border if index == 0 else arcade.Sprite(border_texture)
+            sprite.position = (tile.center_x, tile.center_y)
+            sprite.visible = True
+            self.selection_border_sprite_list.append(sprite)
+
+    def set_single_selected_tile(self, tile):
+        previous_tile = self.selected_tile
+        self.selected_tiles = []
+        self.selected_tile = tile
+        if tile:
+            if tile != previous_tile:
+                self.reset_hex_panel_view_state()
+            self.rebuild_selection_borders()
+            self.last_visible_update = 0
+        else:
+            self.close_hex_panel()
+
+    def toggle_tile_multi_selection(self, tile):
+        if not tile:
+            return
+
+        if not self.selected_tiles:
+            self.selected_tiles = [self.selected_tile] if self.selected_tile else []
+
+        key = self.tile_key(tile)
+        for index, selected in enumerate(self.selected_tiles):
+            if self.tile_key(selected) == key:
+                self.selected_tiles.pop(index)
+                break
+        else:
+            self.selected_tiles.append(tile)
+
+        if self.selected_tiles:
+            previous_tile = self.selected_tile
+            self.selected_tile = self.selected_tiles[-1]
+            if self.selected_tile != previous_tile:
+                self.reset_hex_panel_view_state()
+            self.rebuild_selection_borders()
+            self.last_visible_update = 0
+        else:
+            self.close_hex_panel()
 
     def close_hex_panel(self):
         self.selected_tile = None
+        self.selected_tiles = []
         self.hovered_hex_panel_close = False
         self.hovered_hex_build_button = False
         self.hovered_hex_specialization_button = False
@@ -5919,35 +6120,48 @@ class Game(arcade.View):
         self.hex_panel_specialization_mode = False
         self.hex_specialization_row_rects = []
         self.hex_panel_message = ""
-        if self.selection_border:
-            self.selection_border.visible = False
+        self.rebuild_selection_borders()
 
     def toggle_hex_specialization_mode(self):
         self.hex_panel_specialization_mode = not self.hex_panel_specialization_mode
         self.hex_panel_message = ""
 
     def set_selected_tile_industry_sector(self, sector):
-        tile = self.selected_tile
-        if not tile or not self.selected_tile_has_industry():
+        industry_tiles = self.selected_industry_tiles()
+        if not industry_tiles:
             return
-        allocation = {
-            key: value
-            for key, value in (getattr(tile, "industry_allocation", {}) or {}).items()
-            if value > 0
-        }
-        if not allocation:
-            allocation = {sector: 1.0}
-        elif sector in allocation and len(allocation) > 1:
-            allocation.pop(sector)
-        else:
-            allocation[sector] = allocation.get(sector, 0.0) or 1.0
 
-        share = 1.0 / max(1, len(allocation))
-        tile.industry_allocation = self.normalize_industry_allocation({
-            key: share
-            for key in allocation
-        })
-        self.update_tile_production_cache(tile)
+        allocations = []
+        for tile in industry_tiles:
+            allocation = {
+                key: value
+                for key, value in (getattr(tile, "industry_allocation", {}) or {}).items()
+                if value > 0
+            }
+            if not allocation:
+                allocation = {sector: 1.0}
+            allocations.append(allocation)
+
+        remove_sector = all(sector in allocation and len(allocation) > 1 for allocation in allocations)
+        affected_players = {}
+        for tile, allocation in zip(industry_tiles, allocations):
+            if remove_sector:
+                allocation.pop(sector, None)
+            else:
+                allocation[sector] = allocation.get(sector, 0.0) or 1.0
+
+            share = 1.0 / max(1, len(allocation))
+            tile.industry_allocation = self.normalize_industry_allocation({
+                key: share
+                for key in allocation
+            })
+            self.update_tile_production_cache(tile)
+            if tile.owner:
+                affected_players[id(tile.owner)] = tile.owner
+
+        for player in affected_players.values():
+            self.recalculate_monthly_balance(player)
+
         self.hex_panel_message = ""
         self.hex_panel_message_timer = 0.0
 
@@ -5956,9 +6170,11 @@ class Game(arcade.View):
         self.clamp_hex_panel_scroll()
 
     def draw_hex_info_panel(self):
-        tile = self.selected_tile
-        if not tile:
+        tiles = self.selected_hex_tiles()
+        if not tiles:
             return
+        tile = self.selected_tile if self.selected_tile in tiles else tiles[-1]
+        multi_selected = len(tiles) > 1
 
         panel_x, panel_y, panel_width, panel_height = self.hex_panel_rect()
         content_bottom, content_top = self.hex_panel_content_bounds()
@@ -5989,15 +6205,25 @@ class Game(arcade.View):
                           anchor_x="center", anchor_y="center")
 
         y = panel_y + panel_height - 28 + self.hex_panel_scroll
-        panel_text(f"Гекс {tile.q}:{tile.r}", panel_x + 16, y, arcade.color.WHITE, 18, anchor_y="center")
+        title = f"Гексов {len(tiles)}" if multi_selected else f"Гекс {tile.q}:{tile.r}"
+        panel_text(title, panel_x + 16, y, arcade.color.WHITE, 18, anchor_y="center")
         y -= 34
 
-        owner_name = tile.owner.name if tile.owner else "Нейтральная территория"
+        owner_name = self.mixed_or_single(
+            [selected.owner.name if selected.owner else "Нейтральная территория" for selected in tiles],
+            mixed_label="Разные владельцы",
+        )
+        population = sum(self.estimated_tile_population(selected) or 0.0 for selected in tiles)
+        terrain_name = self.mixed_or_single(
+            [self.terrain_display_name(selected.terrain_type) for selected in tiles],
+            mixed_label="Разная",
+        )
+        passability = self.average_tile_value(tiles, "passability", 0.0)
         info_rows = [
             ("Владелец", owner_name),
-            ("Население", self.format_population(self.estimated_tile_population(tile))),
-            ("Местность", self.terrain_display_name(tile.terrain_type)),
-            ("Проходимость", self.format_percent(getattr(tile, "passability", 0.0))),
+            ("Население", self.format_population(population)),
+            ("Местность", terrain_name),
+            ("Проходимость", self.format_percent(passability)),
         ]
         for label, value in info_rows:
             panel_text(label, panel_x + 16, y, (150, 166, 184), 11)
@@ -6011,7 +6237,7 @@ class Game(arcade.View):
         panel_text("Склад", panel_x + 270, y, (150, 166, 184), 10)
         y -= 16
 
-        resource_rows = self.hex_resource_rows(tile)
+        resource_rows = self.hex_resource_rows_for_tiles(tiles)
         if resource_rows:
             max_collapsed_resources = 5
             displayed_resource_rows = resource_rows if self.hex_resources_expanded else resource_rows[:max_collapsed_resources]
@@ -6040,15 +6266,15 @@ class Game(arcade.View):
 
         y -= 8
         y = panel_section("Строения", y)
-        coverage = getattr(tile, "building_coverage", {}) or {}
-        buildings = [key for key in getattr(tile, "buildings", []) if key in BUILDING_DISPLAY_NAMES]
+        coverage, buildings = self.building_coverage_rows_for_tiles(tiles)
         if coverage:
             for key, value in sorted(coverage.items(), key=lambda item: item[0]):
                 label = BUILDING_DISPLAY_NAMES.get(key, key)
-                panel_text(f"{label}: {value:.0%}", panel_x + 16, y, (224, 234, 244), 11)
+                value_text = self.format_tile_coverage_total(value) if multi_selected else f"{value:.0%}"
+                panel_text(f"{label}: {value_text}", panel_x + 16, y, (224, 234, 244), 11)
                 y -= 16
         elif buildings:
-            for key in buildings:
+            for key in sorted(buildings):
                 panel_text(BUILDING_DISPLAY_NAMES.get(key, key), panel_x + 16, y, (224, 234, 244), 11)
                 y -= 16
         else:
@@ -6058,15 +6284,9 @@ class Game(arcade.View):
         if self.selected_tile_has_industry():
             y -= 8
             y = panel_section("Производство", y)
-            allocation = getattr(tile, "industry_allocation", {}) or {}
-            if not allocation:
-                allocation = self.assign_industry_allocation(tile.owner, tile) if tile.owner else {}
-            modifiers = tile.owner.production_modifiers if tile.owner else {}
-            efficiency = self.specialization_efficiency(
-                allocation,
-                modifiers.get("industry_diversification_penalty", 0.9),
-                modifiers.get("industry_free_specializations", 1),
-            )
+            industry_tiles = self.selected_industry_tiles()
+            allocation = self.selected_industry_allocation_summary(industry_tiles)
+            efficiency = self.selected_industry_efficiency(industry_tiles)
             panel_text(f"Эффективность: {efficiency:.0%}", panel_x + 16, y, (224, 234, 244), 11)
             y -= 18
             for sector, share in sorted(allocation.items(), key=lambda item: item[1], reverse=True):
@@ -6094,10 +6314,10 @@ class Game(arcade.View):
         y -= 8
         y = panel_section("Климат", y)
         climate_rows = [
-            ("Тип", self.climate_display_name(tile)),
-            ("Температура", self.format_percent(getattr(tile, "temperature", 0.0))),
-            ("Влажность", self.format_percent(getattr(tile, "moisture", 0.0))),
-            ("Высота", self.format_percent(getattr(tile, "elevation", 0.0))),
+            ("Тип", self.climate_display_name(tile) if not multi_selected else "Среднее по выбору"),
+            ("Температура", self.format_temperature(self.average_tile_value(tiles, "temperature", 0.0))),
+            ("Влажность", self.format_percent(self.average_tile_value(tiles, "moisture", 0.0))),
+            ("Высота", self.format_elevation(self.average_tile_value(tiles, "elevation", 0.0))),
         ]
         for label, value in climate_rows:
             panel_text(label, panel_x + 16, y, (150, 166, 184), 11)
@@ -6737,7 +6957,10 @@ class Game(arcade.View):
                 tile = self.get_tile_at(world_x, world_y)
                 building_key = self.selected_construction_building_key()
                 if tile and self.can_place_construction(self.human_player, tile, building_key):
-                    self.enqueue_construction(self.human_player, tile, building_key)
+                    steps = 1
+                    if self.shift_modifier_active(modifiers):
+                        steps = max(1, round(0.25 / CONSTRUCTION_STEP))
+                    self.enqueue_construction_steps(self.human_player, tile, building_key, steps)
                     return
                 return
 
@@ -6768,18 +6991,11 @@ class Game(arcade.View):
             self.drag_start_y = y
             self.drag_start_camera_x, self.drag_start_camera_y = self.target_camera_x, self.target_camera_y
         elif button == arcade.MOUSE_BUTTON_LEFT:
-            previous_tile = self.selected_tile
-            self.selected_tile = self.get_tile_at(world_x, world_y)
-            if self.selected_tile:
-                if self.selected_tile != previous_tile:
-                    self.hex_panel_scroll = 0.0
-                    self.hex_panel_content_height = 0.0
-                    self.hex_resources_expanded = False
-                    self.hex_resources_toggle_rect = None
-                    self.hex_panel_specialization_mode = False
-                self.selection_border.position = (self.selected_tile.center_x, self.selected_tile.center_y)
-                self.selection_border.visible = True
-                self.last_visible_update = 0
+            tile = self.get_tile_at(world_x, world_y)
+            if self.shift_modifier_active(modifiers):
+                self.toggle_tile_multi_selection(tile)
+            elif tile:
+                self.set_single_selected_tile(tile)
             else:
                 self.close_hex_panel()
 
