@@ -1733,17 +1733,18 @@ class Game(arcade.View):
 
     @staticmethod
     def normalize_industry_allocation(allocation):
-        clean_allocation = {
-            sector: max(0.0, value)
+        clean_sectors = [
+            sector
             for sector, value in (allocation or {}).items()
             if sector in INDUSTRY_SECTOR_LABELS and value > 0
-        }
-        if not clean_allocation:
-            clean_allocation = {"consumer_goods": 1.0}
-        total = sum(clean_allocation.values()) or 1.0
+        ]
+        if not clean_sectors:
+            clean_sectors = ["consumer_goods"]
+        clean_sectors = list(dict.fromkeys(clean_sectors))
+        share = 1.0 / max(1, len(clean_sectors))
         return {
-            sector: value / total
-            for sector, value in clean_allocation.items()
+            sector: share
+            for sector in clean_sectors
         }
 
     def resource_score_near_tile(self, player, tile, weights, radius=3):
@@ -1793,20 +1794,15 @@ class Game(arcade.View):
         if not ranked:
             ranked = [("consumer_goods", 0.5)]
 
-        allocation = {ranked[0][0]: 1.0}
+        sectors = [ranked[0][0]]
         if len(ranked) > 1 and ranked[1][1] >= ranked[0][1] * 0.72:
-            allocation[ranked[0][0]] = 0.78
-            allocation[ranked[1][0]] = 0.22
+            sectors.append(ranked[1][0])
         if len(ranked) > 2 and ranked[2][1] >= ranked[0][1] * 0.88:
-            first, second = list(allocation.keys())[:2]
-            allocation[first] = 0.70
-            allocation[second] = 0.20
-            allocation[ranked[2][0]] = 0.10
+            sectors.append(ranked[2][0])
 
-        total = sum(allocation.values()) or 1.0
         tile.industry_allocation = self.normalize_industry_allocation({
-            sector: value / total
-            for sector, value in allocation.items()
+            sector: 1.0
+            for sector in sectors
         })
         return tile.industry_allocation
 
@@ -1816,15 +1812,14 @@ class Game(arcade.View):
         if current_share >= target_share:
             return False
 
-        remaining_share = max(0.0, 1.0 - target_share)
-        other_total = sum(value for key, value in allocation.items() if key != "consumer_goods")
-        new_allocation = {"consumer_goods": target_share}
-        if other_total > 0:
-            for key, value in allocation.items():
-                if key != "consumer_goods":
-                    new_allocation[key] = remaining_share * value / other_total
-
-        tile.industry_allocation = self.normalize_industry_allocation(new_allocation)
+        sectors = [key for key in allocation if key != "consumer_goods"]
+        sectors.insert(0, "consumer_goods")
+        while len(sectors) > 1 and 1.0 / len(sectors) < target_share:
+            sectors.pop()
+        tile.industry_allocation = self.normalize_industry_allocation({
+            sector: 1.0
+            for sector in sectors
+        })
         return True
 
     def ensure_starting_consumer_goods_industry(self, player):
@@ -3247,6 +3242,9 @@ class Game(arcade.View):
             allocation = getattr(tile, "industry_allocation", {}) or {}
             if not allocation:
                 allocation = self.assign_industry_allocation(tile.owner, tile) if tile.owner else {}
+            else:
+                allocation = self.normalize_industry_allocation(allocation)
+                tile.industry_allocation = allocation
             for sector, share in allocation.items():
                 totals[sector] = totals.get(sector, 0.0) + share
         return {
@@ -3263,6 +3261,9 @@ class Game(arcade.View):
             allocation = getattr(tile, "industry_allocation", {}) or {}
             if not allocation:
                 allocation = self.assign_industry_allocation(tile.owner, tile) if tile.owner else {}
+            else:
+                allocation = self.normalize_industry_allocation(allocation)
+                tile.industry_allocation = allocation
             modifiers = tile.owner.production_modifiers if tile.owner else {}
             total += self.specialization_efficiency(
                 allocation,
@@ -6132,27 +6133,45 @@ class Game(arcade.View):
             return
 
         allocations = []
+        fallback_counts = {}
         for tile in industry_tiles:
             allocation = {
                 key: value
-                for key, value in (getattr(tile, "industry_allocation", {}) or {}).items()
+                for key, value in self.normalize_industry_allocation(
+                    getattr(tile, "industry_allocation", {}) or {}
+                ).items()
                 if value > 0
             }
             if not allocation:
                 allocation = {sector: 1.0}
+            for key in allocation:
+                if key != sector:
+                    fallback_counts[key] = fallback_counts.get(key, 0) + 1
             allocations.append(allocation)
 
-        remove_sector = all(sector in allocation and len(allocation) > 1 for allocation in allocations)
+        remove_sector = any(sector in allocation for allocation in allocations)
+        fallback_sector = next(
+            (
+                key
+                for key, _count in sorted(fallback_counts.items(), key=lambda item: item[1], reverse=True)
+                if key != sector
+            ),
+            None,
+        )
+        if fallback_sector is None:
+            fallback_sector = "consumer_goods" if sector != "consumer_goods" else "machinery"
+
         affected_players = {}
         for tile, allocation in zip(industry_tiles, allocations):
             if remove_sector:
                 allocation.pop(sector, None)
+                if not allocation:
+                    allocation[fallback_sector] = 1.0
             else:
                 allocation[sector] = allocation.get(sector, 0.0) or 1.0
 
-            share = 1.0 / max(1, len(allocation))
             tile.industry_allocation = self.normalize_industry_allocation({
-                key: share
+                key: 1.0
                 for key in allocation
             })
             self.update_tile_production_cache(tile)
@@ -6439,6 +6458,39 @@ class Game(arcade.View):
             if self.point_in_rect(x, y, rect):
                 return index
         return None
+
+    def handle_map_layer_control_click(self, x, y):
+        if self.map_layer == "resources":
+            resource_option_index = self.resource_group_option_at(x, y)
+            if resource_option_index is not None:
+                self.set_resource_group(resource_option_index)
+                return True
+
+            if self.point_in_rect(x, y, self.resource_group_button_rect()):
+                self.resource_group_menu_open = not self.resource_group_menu_open
+                self.map_layer_menu_open = False
+                return True
+
+        option_index = self.map_layer_option_at(x, y)
+        if option_index is not None:
+            layer_key, _label, enabled = MAP_LAYERS[option_index]
+            if enabled:
+                self.set_map_layer(layer_key)
+            else:
+                self.set_map_layer("weather")
+            return True
+
+        if self.point_in_rect(x, y, self.map_layer_button_rect()):
+            self.map_layer_menu_open = not self.map_layer_menu_open
+            self.resource_group_menu_open = False
+            return True
+
+        if self.map_layer_menu_open or self.resource_group_menu_open:
+            self.map_layer_menu_open = False
+            self.resource_group_menu_open = False
+            return True
+
+        return False
 
     def set_resource_group(self, index):
         self.resource_group_index = max(0, min(len(RESOURCE_MAP_GROUPS) - 1, index))
@@ -6878,6 +6930,9 @@ class Game(arcade.View):
                         self.handle_construction_panel_click(x, y)
                     return
 
+            if self.handle_map_layer_control_click(x, y):
+                return
+
             if self.selected_tile and self.point_in_rect(x, y, self.hex_panel_rect()):
                 if self.point_in_rect(x, y, self.hex_panel_close_rect()):
                     self.close_hex_panel()
@@ -6916,37 +6971,6 @@ class Game(arcade.View):
 
             if y >= self.window.height - TOP_UI_HEIGHT:
                 return
-
-            if self.map_layer == "resources":
-                resource_option_index = self.resource_group_option_at(x, y)
-                if resource_option_index is not None:
-                    self.set_resource_group(resource_option_index)
-                    return
-
-                if self.point_in_rect(x, y, self.resource_group_button_rect()):
-                    self.resource_group_menu_open = not self.resource_group_menu_open
-                    self.map_layer_menu_open = False
-                    return
-
-                if self.resource_group_menu_open:
-                    self.resource_group_menu_open = False
-
-            option_index = self.map_layer_option_at(x, y)
-            if option_index is not None:
-                layer_key, _label, enabled = MAP_LAYERS[option_index]
-                if enabled:
-                    self.set_map_layer(layer_key)
-                else:
-                    self.set_map_layer("weather")
-                return
-
-            if self.point_in_rect(x, y, self.map_layer_button_rect()):
-                self.map_layer_menu_open = not self.map_layer_menu_open
-                self.resource_group_menu_open = False
-                return
-
-            if self.map_layer_menu_open:
-                self.map_layer_menu_open = False
 
             for time_button in self.time_buttons:
                 if time_button.contains(x, y):
