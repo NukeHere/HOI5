@@ -178,7 +178,7 @@ CONSTRUCTION_STEP = 0.05
 BASE_BUILD_POWER_PER_MONTH = 100.0
 BUILDING_CONSTRUCTION_BASE = {
     "city": {
-        "work": 260.0,
+        "work": 520.0,
         "money": 17_500_000,
         "resources": {
             "construction_goods": 36_000,
@@ -189,7 +189,7 @@ BUILDING_CONSTRUCTION_BASE = {
         },
     },
     "village": {
-        "work": 80.0,
+        "work": 160.0,
         "money": 3_000_000,
         "resources": {
             "construction_goods": 7_000,
@@ -200,7 +200,7 @@ BUILDING_CONSTRUCTION_BASE = {
         },
     },
     "farms": {
-        "work": 55.0,
+        "work": 110.0,
         "money": 1_500_000,
         "resources": {
             "construction_goods": 4_500,
@@ -210,7 +210,7 @@ BUILDING_CONSTRUCTION_BASE = {
         },
     },
     "mine": {
-        "work": 120.0,
+        "work": 240.0,
         "money": 5_000_000,
         "resources": {
             "construction_goods": 11_000,
@@ -221,7 +221,7 @@ BUILDING_CONSTRUCTION_BASE = {
         },
     },
     "industry": {
-        "work": 170.0,
+        "work": 340.0,
         "money": 8_000_000,
         "resources": {
             "construction_goods": 22_000,
@@ -232,7 +232,7 @@ BUILDING_CONSTRUCTION_BASE = {
         },
     },
     "port": {
-        "work": 210.0,
+        "work": 420.0,
         "money": 10_000_000,
         "resources": {
             "construction_goods": 20_000,
@@ -243,7 +243,7 @@ BUILDING_CONSTRUCTION_BASE = {
         },
     },
     "warehouse": {
-        "work": 70.0,
+        "work": 140.0,
         "money": 2_500_000,
         "resources": {
             "construction_goods": 8_000,
@@ -254,7 +254,7 @@ BUILDING_CONSTRUCTION_BASE = {
         },
     },
     "fuel_storage": {
-        "work": 95.0,
+        "work": 190.0,
         "money": 4_000_000,
         "resources": {
             "construction_goods": 12_000,
@@ -265,7 +265,7 @@ BUILDING_CONSTRUCTION_BASE = {
         },
     },
     "refinery": {
-        "work": 230.0,
+        "work": 460.0,
         "money": 12_000_000,
         "resources": {
             "construction_goods": 28_000,
@@ -1394,6 +1394,7 @@ class Game(arcade.View):
         self.construction_placement_label_rects = []
         self.construction_placement_label_shapes = arcade.shape_list.ShapeElementList()
         self.construction_queue_toggle_rect = None
+        self.construction_queue_priority_rects = []
         self.construction_building_rects = []
         self.construction_start_button_rect = None
         self.hovered_hex_panel_close = False
@@ -2646,6 +2647,87 @@ class Game(arcade.View):
             and project.get("progress", 0.0) <= 0
             for project in player.construction_queue
         )
+
+    @staticmethod
+    def construction_project_is_locked(project):
+        return project.get("money_paid", False) or project.get("progress", 0.0) > 0
+
+    def can_move_construction_project(self, player, index, direction):
+        if not player:
+            return False
+        queue = player.construction_queue
+        target_index = index + direction
+        if index < 0 or index >= len(queue) or target_index < 0 or target_index >= len(queue):
+            return False
+        return (
+            not self.construction_project_is_locked(queue[index])
+            and not self.construction_project_is_locked(queue[target_index])
+        )
+
+    def move_construction_project(self, player, index, direction):
+        if not self.can_move_construction_project(player, index, direction):
+            return False
+        queue = player.construction_queue
+        target_index = index + direction
+        queue[index], queue[target_index] = queue[target_index], queue[index]
+        self.invalidate_construction_placement_cache()
+        self.recalculate_monthly_balance(player)
+        return True
+
+    def can_move_construction_group(self, player, group, direction):
+        if not player or not group:
+            return False
+        queue = player.construction_queue
+        groups = self.construction_queue_groups(queue)
+        group_index = next(
+            (
+                index
+                for index, candidate in enumerate(groups)
+                if candidate["start_index"] == group["start_index"]
+                and candidate["end_index"] == group["end_index"]
+            ),
+            None,
+        )
+        target_group_index = group_index + direction if group_index is not None else None
+        if group_index is None or target_group_index < 0 or target_group_index >= len(groups):
+            return False
+        target_group = groups[target_group_index]
+        return (
+            not any(self.construction_project_is_locked(project) for project in group["projects"])
+            and not any(self.construction_project_is_locked(project) for project in target_group["projects"])
+        )
+
+    def move_construction_group(self, player, group, direction):
+        if not self.can_move_construction_group(player, group, direction):
+            return False
+        queue = player.construction_queue
+        groups = self.construction_queue_groups(queue)
+        group_index = next(
+            (
+                index
+                for index, candidate in enumerate(groups)
+                if candidate["start_index"] == group["start_index"]
+                and candidate["end_index"] == group["end_index"]
+            ),
+            None,
+        )
+        target_group_index = group_index + direction
+        current_group = groups[group_index]
+        target_group = groups[target_group_index]
+        current_projects = current_group["projects"]
+        target_projects = target_group["projects"]
+        if direction < 0:
+            replacement = current_projects + target_projects
+            start = target_group["start_index"]
+            end = current_group["end_index"] + 1
+        else:
+            replacement = target_projects + current_projects
+            start = current_group["start_index"]
+            end = target_group["end_index"] + 1
+        queue[start:end] = replacement
+        self.invalidate_construction_placement_cache()
+        self.recalculate_monthly_balance(player)
+        return True
 
     def complete_construction_project(self, player, project):
         tile = project.get("tile")
@@ -5781,13 +5863,55 @@ class Game(arcade.View):
             return f"{label} {tile.q}:{tile.r}"
         return label
 
+    @staticmethod
+    def construction_project_group_key(project):
+        cost = project.get("cost", {})
+        tile = project.get("tile")
+        building_key = cost.get("building") or project.get("building")
+        return id(tile), building_key
+
+    def construction_queue_groups(self, rows=None):
+        rows = self.construction_queue_rows() if rows is None else rows
+        groups = []
+        for index, project in enumerate(rows):
+            group_key = self.construction_project_group_key(project)
+            if groups and groups[-1]["key"] == group_key:
+                groups[-1]["projects"].append(project)
+                groups[-1]["end_index"] = index
+                continue
+            groups.append({
+                "key": group_key,
+                "projects": [project],
+                "start_index": index,
+                "end_index": index,
+            })
+        return groups
+
+    def construction_group_label(self, group):
+        label = self.construction_project_label(group["projects"][0])
+        count = len(group["projects"])
+        return f"{label} x{count}" if count > 1 else label
+
+    @staticmethod
+    def construction_group_coverage_label(group):
+        projects = group["projects"]
+        first_cost = projects[0].get("cost", {})
+        last_cost = projects[-1].get("cost", {})
+        from_coverage = first_cost.get("from_coverage", 0.0)
+        if group["start_index"] == 0 and projects[0].get("progress", 0.0) > 0:
+            target = first_cost.get("target_coverage", from_coverage)
+            from_coverage += (target - from_coverage) * max(0.0, min(1.0, projects[0].get("progress", 0.0)))
+        target_coverage = last_cost.get("target_coverage", from_coverage)
+        return f"{from_coverage:.0%}->{target_coverage:.0%}"
+
     def construction_queue_item_rects(self, rows):
+        groups = self.construction_queue_groups(rows)
         panel_x, panel_y, panel_width, panel_height = self.side_panel_rect()
         start_y = panel_y + panel_height - 112
         row_height = 26
         reserved_bottom = panel_y + 310
         max_expanded_count = max(4, int((start_y - reserved_bottom) / row_height) + 1)
-        visible_count = min(len(rows), max_expanded_count) if self.construction_queue_expanded else min(4, len(rows))
+        visible_count = min(len(groups), max_expanded_count) if self.construction_queue_expanded else min(4, len(groups))
         return [
             (panel_x + 18, start_y - index * row_height, panel_width - 36, row_height - 3)
             for index in range(visible_count)
@@ -5795,11 +5919,12 @@ class Game(arcade.View):
 
     def construction_content_layout(self, rows=None):
         rows = self.construction_queue_rows() if rows is None else rows
+        groups = self.construction_queue_groups(rows)
         panel_x, panel_y, panel_width, panel_height = self.side_panel_rect()
         queue_rects = self.construction_queue_item_rects(rows)
         if queue_rects:
             queue_bottom = queue_rects[-1][1]
-            if len(rows) > 4:
+            if len(groups) > 4:
                 queue_bottom -= 24
         else:
             queue_bottom = panel_y + panel_height - 112
@@ -5835,46 +5960,67 @@ class Game(arcade.View):
             return
 
         self.construction_queue_toggle_rect = None
+        self.construction_queue_priority_rects = []
         self.construction_building_rects = self.construction_building_option_rects()
         self.construction_start_button_rect = self.construction_start_rect()
         rows = self.construction_queue_rows()
+        groups = self.construction_queue_groups(rows)
         queue_y = panel_y + panel_height - 70
         self.draw_ui_text("Очередь строительства", panel_x + 18, queue_y, arcade.color.WHITE, 14)
         layout = self.construction_content_layout(rows)
         queue_rects = layout["queue_rects"]
         visible_count = len(queue_rects)
-        if rows:
-            for index, project in enumerate(rows[:visible_count]):
+        if groups:
+            for index, group in enumerate(groups[:visible_count]):
+                project = group["projects"][0]
                 x, y, width, height = queue_rects[index]
-                active = index == 0
+                active = group["start_index"] == 0
                 fill = (46, 70, 58, 190) if active else (30, 40, 52, 160)
                 arcade.draw_lbwh_rectangle_filled(x, y, width, height, fill)
                 arcade.draw_lbwh_rectangle_outline(x, y, width, height, (82, 108, 132), 1)
-                progress = max(0.0, min(1.0, project.get("progress", 0.0)))
                 if active and not project.get("money_paid", False):
                     prefix = "Ждет денег"
                 else:
                     prefix = "Строится" if active else "Ждет"
                 self.draw_ui_text(
-                    f"{prefix}: {self.construction_project_label(project)}",
+                    f"{prefix}: {self.construction_group_label(group)}",
                     x + 8,
                     y + height / 2,
                     (226, 236, 244),
                     10,
                     anchor_y="center",
                 )
+                up_rect = (x + width - 58, y + 3, 20, height - 6)
+                down_rect = (x + width - 34, y + 3, 20, height - 6)
+                for rect, direction, label in ((up_rect, -1, "^"), (down_rect, 1, "v")):
+                    enabled = self.can_move_construction_group(self.human_player, group, direction)
+                    button_fill = (52, 70, 88, 210) if enabled else (34, 40, 48, 150)
+                    button_border = (128, 156, 184, 220) if enabled else (70, 82, 96, 150)
+                    text_color = (232, 240, 248) if enabled else (128, 138, 148)
+                    arcade.draw_lbwh_rectangle_filled(*rect, button_fill)
+                    arcade.draw_lbwh_rectangle_outline(*rect, button_border, 1)
+                    self.draw_ui_text(
+                        label,
+                        rect[0] + rect[2] / 2,
+                        rect[1] + rect[3] / 2,
+                        text_color,
+                        10,
+                        anchor_x="center",
+                        anchor_y="center",
+                    )
+                    self.construction_queue_priority_rects.append((rect, group["start_index"], group["end_index"], direction))
                 self.draw_ui_text(
-                    f"{progress:.0%}",
-                    x + width - 8,
+                    self.construction_group_coverage_label(group),
+                    x + width - 66,
                     y + height / 2,
                     (226, 236, 244),
                     10,
                     anchor_x="right",
                     anchor_y="center",
                 )
-            if len(rows) > 4:
+            if len(groups) > 4:
                 toggle_y = queue_rects[-1][1] - 24
-                hidden_count = max(0, len(rows) - visible_count)
+                hidden_count = max(0, len(groups) - visible_count)
                 toggle_text = "Свернуть очередь" if self.construction_queue_expanded else f"Показать еще {hidden_count}"
                 self.construction_queue_toggle_rect = (panel_x + 18, toggle_y, panel_width - 36, 20)
                 self.draw_ui_text(toggle_text, panel_x + 24, toggle_y + 10, (180, 194, 210), 10, anchor_y="center")
@@ -5921,6 +6067,20 @@ class Game(arcade.View):
     def handle_construction_panel_click(self, x, y):
         if self.active_top_panel_key != "construction":
             return False
+
+        for rect, start_index, end_index, direction in self.construction_queue_priority_rects:
+            if self.point_in_rect(x, y, rect):
+                group = next(
+                    (
+                        candidate
+                        for candidate in self.construction_queue_groups()
+                        if candidate["start_index"] == start_index
+                        and candidate["end_index"] == end_index
+                    ),
+                    None,
+                )
+                self.move_construction_group(self.human_player, group, direction)
+                return True
 
         if self.construction_queue_toggle_rect and self.point_in_rect(x, y, self.construction_queue_toggle_rect):
             self.construction_queue_expanded = not self.construction_queue_expanded
