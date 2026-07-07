@@ -166,16 +166,6 @@ class MapTileData:
             or self.ridge_value > 0.25
             or self.rock_cover > 0.55
         )
-        sediment_wet = wet or (
-            self.moisture > 0.38
-            and self.elevation < 0.62
-            and self.water_cover < 0.5
-        )
-        sandy_deposit = (
-            self.sand_cover > 0.18
-            or self.terrain_type in ["desert", "plains", "shallow_water"]
-            or (dry and self.water_cover < 0.5)
-        )
         peatland = (
             self.terrain_type in ["swamp", "bog", "tundra", "taiga", "lake"]
             or (self.moisture > 0.55 and self.temperature < 0.55 and self.elevation < 0.55)
@@ -198,9 +188,6 @@ class MapTileData:
             add("zinc", 0.12, (100, 600), (2000, 30000))
             add("nickel", 0.12, (200, 1000), (2000, 40000))
             add("silver", 0.04, (100, 800), (50, 5000))
-            add("limestone", 0.22, (0, 200), (10000, 200000))
-            add("gravel", 0.25, (0, 10), (5000, 50000))
-            add("crushed_stone", 0.3, (0, 50), (10000, 100000))
             add("apatite", 0.09, (50, 300), (5000, 50000))
             add("graphite", 0.08, (50, 500), (1000, 20000))
             add("mica", 0.08, (50, 300), (500, 10000))
@@ -220,9 +207,6 @@ class MapTileData:
         if dry:
             add("oil", 0.18, (500, 3000), (100000, 1000000))
             add("potash", 0.15, (100, 1000), (10000, 200000))
-            add("salt", 0.18, (0, 50), (50000, 500000))
-        if sandy_deposit:
-            add("sand", 0.7, (0, 20), (10000, 100000))
 
         if self.terrain_type in ["mountains", "hills", "desert"] or self.temperature > 0.7:
             add("sulfur", 0.1, (0, 1500), (1000, 50000))
@@ -230,15 +214,11 @@ class MapTileData:
         if any(resource[0] == "oil" for resource in resources):
             add("natural_gas", 0.6, (500, 4000), (50000, 500000))
 
-        if sediment_wet:
-            add("clay", 0.42, (0, 20), (5000, 50000))
         if peatland:
             add("peat", 0.22, (0, 10), (1000, 20000))
 
         if water:
             add("phosphorite", 0.1, (0, 100), (10000, 100000))
-            if self.terrain_type in ["ocean", "shallow_water"]:
-                resources.append(["salt", 0, 1000000])
 
         self.resources = resources
 

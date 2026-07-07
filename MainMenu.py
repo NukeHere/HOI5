@@ -5,7 +5,7 @@ import arcade
 
 from Constants import MAX_BOTS, RESOLUTIONS
 from MainGame import Game
-from Settings import create_window_with_fallback, load_settings, save_settings
+from Settings import apply_window_settings_safely, create_window_with_fallback, load_settings, save_settings
 
 
 DIFFICULTIES = ["Легкая", "Обычная", "Сложная"]
@@ -347,11 +347,9 @@ class MainMenuView(arcade.View):
         self.fullscreen = self.pending_fullscreen
         self.resolution_index = self.pending_resolution_index
         width, height = RESOLUTIONS[self.resolution_index]
-        self.window.set_fullscreen(self.fullscreen)
-        if not self.fullscreen:
-            self.window.set_size(width, height)
+        self.fullscreen, error = apply_window_settings_safely(self.window, width, height, self.fullscreen)
         save_settings(self.sound_volume, self.music_volume, self.fullscreen, self.resolution_index, RESOLUTIONS)
-        self.message = "Настройки применены."
+        self.message = "Полный экран не применен, включен оконный режим." if error else "Настройки применены."
         self.rebuild_layout()
 
     def set_difficulty(self, index):

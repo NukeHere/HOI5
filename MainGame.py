@@ -4,7 +4,7 @@ import math
 import struct
 import time
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from perlin_noise import PerlinNoise
@@ -14,7 +14,7 @@ from arcade.gl import BufferDescription
 from Constants import *
 from HexTile import HexTile
 from MapData import MapTileData
-from Settings import create_window_with_fallback, load_settings, save_settings
+from Settings import apply_window_settings_safely, create_window_with_fallback, load_settings, save_settings
 
 RESOURCE_MAP_GROUPS = [
     (
@@ -35,23 +35,16 @@ RESOURCE_MAP_GROUPS = [
         350_000,
     ),
     (
-        "construction",
-        "Стройсырье",
-        ["limestone", "sand", "gravel", "crushed_stone", "clay", "quartz"],
-        (174, 156, 124),
-        450_000,
-    ),
-    (
         "chemistry",
         "Химсырье",
-        ["sulfur", "potash", "phosphorite", "apatite", "salt", "rubber"],
+        ["sulfur", "potash", "phosphorite", "apatite", "rubber"],
         (112, 184, 132),
         250_000,
     ),
     (
         "gems",
         "Редкие минералы",
-        ["gold", "silver", "rare_earth_metals", "uranium", "graphite", "mica"],
+        ["gold", "silver", "rare_earth_metals", "uranium", "graphite", "mica", "quartz"],
         (156, 124, 218),
         80_000,
     ),
@@ -76,10 +69,6 @@ STARTING_STOCK_MULTIPLIERS = {
     "oil": 1.7,
     "natural_gas": 1.7,
     "coal": 1.35,
-    "salt": 1.5,
-    "sand": 1.45,
-    "gravel": 1.35,
-    "crushed_stone": 1.35,
     "food": 15.0,
     "fertilizer": 2.2,
     "consumer_goods": 12.0,
@@ -93,8 +82,10 @@ BUILDING_TYPES = [
     ("city", "Город"),
     ("village", "Село"),
     ("warehouse", "Склад"),
+    ("supply_depot", "Пункт снабжения"),
     ("fuel_storage", "Топливохранилище"),
     ("refinery", "НПЗ"),
+    ("oil_gas_rig", "Нефтегазовая вышка"),
     ("industry", "Промзона"),
     ("farms", "Поля/фермы"),
     ("mine", "Шахта"),
@@ -136,6 +127,7 @@ RURAL_POPULATION_WEIGHTS = {
     "village": 3.8,
     "farms": 0.30,
     "mine": 0.16,
+    "oil_gas_rig": 0.12,
     "warehouse": 0.12,
     "fuel_storage": 0.08,
     "refinery": 0.10,
@@ -146,6 +138,7 @@ STARTING_INFRASTRUCTURE_BUDGET = {
     "village": 1.20,
     "farms": 5.20,
     "mine": 1.20,
+    "oil_gas_rig": 0.85,
     "industry": 3.50,
     "port": 0.45,
     "warehouse": 0.35,
@@ -156,6 +149,7 @@ INFRASTRUCTURE_COVERAGE_COSTS = {
     "village": 0.85,
     "farms": 1.00,
     "mine": 1.15,
+    "oil_gas_rig": 1.25,
     "industry": 1.35,
     "port": 1.20,
     "warehouse": 0.90,
@@ -167,14 +161,17 @@ INFRASTRUCTURE_COVERAGE_LIMITS = {
     "village": (0.06, 0.30),
     "farms": (0.08, 0.42),
     "mine": (0.06, 0.34),
+    "oil_gas_rig": (0.05, 0.28),
     "industry": (0.06, 0.32),
     "port": (0.08, 0.30),
     "warehouse": (0.05, 0.26),
+    "supply_depot": (0.04, 0.24),
     "fuel_storage": (0.06, 0.34),
     "refinery": (0.05, 0.22),
 }
 CONSTRUCTION_LEVEL_MULTIPLIER = 1.10
 CONSTRUCTION_STEP = 0.05
+CONSTRUCTION_STATUS_CHECK_MONTH_FRACTION = 1 / 30
 BASE_BUILD_POWER_PER_MONTH = 100.0
 BUILDING_CONSTRUCTION_BASE = {
     "city": {
@@ -182,7 +179,6 @@ BUILDING_CONSTRUCTION_BASE = {
         "money": 17_500_000,
         "resources": {
             "construction_goods": 36_000,
-            "cement": 18_000,
             "steel": 9_000,
             "machinery": 1_200,
             "refined_fuel": 650,
@@ -193,7 +189,6 @@ BUILDING_CONSTRUCTION_BASE = {
         "money": 3_000_000,
         "resources": {
             "construction_goods": 7_000,
-            "cement": 2_800,
             "steel": 1_000,
             "machinery": 180,
             "refined_fuel": 120,
@@ -204,7 +199,6 @@ BUILDING_CONSTRUCTION_BASE = {
         "money": 1_500_000,
         "resources": {
             "construction_goods": 4_500,
-            "cement": 1_300,
             "machinery": 160,
             "refined_fuel": 140,
         },
@@ -214,10 +208,19 @@ BUILDING_CONSTRUCTION_BASE = {
         "money": 5_000_000,
         "resources": {
             "construction_goods": 11_000,
-            "cement": 4_200,
             "steel": 3_500,
             "machinery": 750,
             "refined_fuel": 420,
+        },
+    },
+    "oil_gas_rig": {
+        "work": 260.0,
+        "money": 6_500_000,
+        "resources": {
+            "construction_goods": 13_000,
+            "steel": 4_600,
+            "machinery": 900,
+            "refined_fuel": 500,
         },
     },
     "industry": {
@@ -225,7 +228,6 @@ BUILDING_CONSTRUCTION_BASE = {
         "money": 8_000_000,
         "resources": {
             "construction_goods": 22_000,
-            "cement": 9_000,
             "steel": 8_000,
             "machinery": 1_800,
             "refined_fuel": 520,
@@ -236,7 +238,6 @@ BUILDING_CONSTRUCTION_BASE = {
         "money": 10_000_000,
         "resources": {
             "construction_goods": 20_000,
-            "cement": 11_000,
             "steel": 8_500,
             "machinery": 1_250,
             "refined_fuel": 850,
@@ -247,10 +248,19 @@ BUILDING_CONSTRUCTION_BASE = {
         "money": 2_500_000,
         "resources": {
             "construction_goods": 8_000,
-            "cement": 3_500,
             "steel": 1_800,
             "machinery": 220,
             "refined_fuel": 120,
+        },
+    },
+    "supply_depot": {
+        "work": 120.0,
+        "money": 2_200_000,
+        "resources": {
+            "construction_goods": 6_500,
+            "steel": 1_200,
+            "machinery": 240,
+            "refined_fuel": 110,
         },
     },
     "fuel_storage": {
@@ -258,7 +268,6 @@ BUILDING_CONSTRUCTION_BASE = {
         "money": 4_000_000,
         "resources": {
             "construction_goods": 12_000,
-            "cement": 6_000,
             "steel": 4_800,
             "machinery": 650,
             "refined_fuel": 260,
@@ -269,24 +278,50 @@ BUILDING_CONSTRUCTION_BASE = {
         "money": 12_000_000,
         "resources": {
             "construction_goods": 28_000,
-            "cement": 13_000,
             "steel": 11_000,
             "machinery": 2_600,
             "refined_fuel": 900,
         },
     },
 }
+STORAGE_CATEGORIES = ["raw", "semi_finished", "finished", "fuel"]
+STORAGE_CATEGORY_LABELS = {
+    "raw": "Сырье",
+    "semi_finished": "Полуфабрикаты",
+    "finished": "Готовая продукция",
+    "fuel": "Топливо",
+}
 STORAGE_CAPACITY_BY_COVERAGE = {
-    "city": 1_800_000,
-    "village": 520_000,
-    "warehouse": 2_400_000,
+    "raw": {
+        "city": 520_000,
+        "village": 180_000,
+        "warehouse": 1_050_000,
+        "supply_depot": 240_000,
+        "port": 280_000,
+    },
+    "semi_finished": {
+        "city": 470_000,
+        "village": 140_000,
+        "warehouse": 820_000,
+        "supply_depot": 210_000,
+        "port": 240_000,
+    },
+    "finished": {
+        "city": 560_000,
+        "village": 200_000,
+        "warehouse": 760_000,
+        "supply_depot": 190_000,
+        "port": 220_000,
+    },
 }
 FUEL_STORAGE_CAPACITY_BY_COVERAGE = {
     "city": 180_000,
     "village": 35_000,
     "port": 220_000,
+    "supply_depot": 120_000,
     "fuel_storage": 3_200_000,
     "refinery": 850_000,
+    "oil_gas_rig": 420_000,
 }
 FUEL_STORAGE_RESOURCE_KEYS = {
     "coal",
@@ -295,6 +330,80 @@ FUEL_STORAGE_RESOURCE_KEYS = {
     "peat",
     "uranium",
     "refined_fuel",
+}
+SUPPLY_SOURCE_WEIGHTS = {
+    "city": 1.00,
+    "village": 0.48,
+    "warehouse": 0.50,
+    "supply_depot": 0.92,
+    "port": 0.46,
+    "fuel_storage": 0.22,
+    "refinery": 0.30,
+    "oil_gas_rig": 0.18,
+    "industry": 0.18,
+}
+SUPPLY_RELAY_BUILDING_WEIGHTS = {
+    "warehouse": 0.28,
+    "supply_depot": 0.72,
+    "port": 0.22,
+}
+SUPPLY_DECAY_PER_HEX = 0.78
+SUPPLY_SOURCE_RADIUS = 7
+TRADE_CONTRACT_STEP = 1_000.0
+TRADE_CONTRACT_SHIFT_STEP = 10_000.0
+TRADE_BASE_CAPACITY = 8_000.0
+TRADE_BASE_MAX_CAPACITY = 160_000.0
+TRADE_SELL_LIMIT_MULTIPLIER = 2.0
+TRADE_PORT_CAPACITY_PER_COVERAGE = 90_000.0
+TRADE_WAREHOUSE_CAPACITY_PER_COVERAGE = 22_000.0
+TRADE_SUPPLY_DEPOT_CAPACITY_PER_COVERAGE = 12_000.0
+TRADE_SETTLEMENT_CAPACITY_PER_COVERAGE = 8_000.0
+TRADE_BUY_PRICE_MARKUP = 1.08
+TRADE_SELL_PRICE_MARKDOWN = 0.92
+TRADE_WEEKLY_FRACTION = 7 / 30
+MARKET_SHOCK_FACTOR = 2.0
+MARKET_SHOCK_DECAY = 0.55
+MARKET_PRICE_SMOOTHING = 0.42
+MARKET_LINKED_PRICE_SMOOTHING = 0.35
+MARKET_MAX_WEEKLY_PRICE_MOVE = 0.35
+MARKET_HISTORY_LIMIT = 16
+TRADE_BASE_PRICES = {
+    "coal": 34,
+    "oil": 72,
+    "natural_gas": 48,
+    "peat": 16,
+    "uranium": 420,
+    "iron_ore": 38,
+    "copper_ore": 96,
+    "bauxite": 62,
+    "lead": 58,
+    "zinc": 54,
+    "nickel": 118,
+    "gold": 1_800,
+    "silver": 620,
+    "rare_earth_metals": 980,
+    "alloying_additives": 180,
+    "potash": 44,
+    "phosphorite": 40,
+    "apatite": 42,
+    "sulfur": 58,
+    "rubber": 120,
+    "graphite": 160,
+    "mica": 110,
+    "quartz": 92,
+    "steel": 135,
+    "refined_fuel": 118,
+    "chemicals": 145,
+    "food": 22,
+    "fertilizer": 105,
+    "copper_wire": 210,
+    "consumer_goods": 260,
+    "machinery": 620,
+    "vehicles": 850,
+    "electronics": 1_250,
+    "construction_goods": 170,
+    "weapons": 1_100,
+    "ships": 4_200,
 }
 REFINERY_RESOURCE_WEIGHTS = {
     "oil": 1.0,
@@ -309,15 +418,19 @@ STARTING_MINE_RESOURCE_WEIGHTS = {
     "iron_ore": 1.00,
     "copper_ore": 0.82,
     "bauxite": 0.64,
-    "limestone": 0.72,
-    "sand": 0.60,
-    "gravel": 0.58,
-    "crushed_stone": 0.58,
-    "clay": 0.52,
-    "salt": 0.38,
     "sulfur": 0.42,
     "phosphorite": 0.40,
     "apatite": 0.36,
+}
+OIL_GAS_RESOURCE_KEYS = {"oil", "natural_gas"}
+STARTING_OIL_GAS_RIG_RESOURCE_WEIGHTS = {
+    "oil": 1.0,
+    "natural_gas": 0.95,
+}
+STARTING_SOLID_MINE_RESOURCE_WEIGHTS = {
+    key: value
+    for key, value in STARTING_MINE_RESOURCE_WEIGHTS.items()
+    if key not in OIL_GAS_RESOURCE_KEYS
 }
 STARTING_RESOURCE_COMPENSATION_GROUPS = [
     {
@@ -331,12 +444,6 @@ STARTING_RESOURCE_COMPENSATION_GROUPS = [
         "target": 450_000,
         "stock": [("raw", "iron_ore", 45_000, 280), ("raw", "copper_ore", 20_000, 420)],
         "budget": 18_000_000,
-    },
-    {
-        "resources": ["limestone", "sand", "gravel", "crushed_stone", "clay"],
-        "target": 500_000,
-        "stock": [("raw", "limestone", 40_000, 90), ("raw", "sand", 40_000, 45), ("raw", "gravel", 30_000, 60)],
-        "budget": 12_000_000,
     },
 ]
 STARTING_AGRICULTURE_COMPENSATION = {
@@ -352,10 +459,8 @@ RESOURCE_PANEL_CATEGORIES = [
 ]
 SEMI_FINISHED_RESOURCE_NAMES = [
     "steel",
-    "cement",
     "refined_fuel",
     "chemicals",
-    "lumber",
     "food",
     "fertilizer",
     "copper_wire",
@@ -369,6 +474,75 @@ FINISHED_RESOURCE_NAMES = [
     "weapons",
     "ships",
 ]
+MARKET_RESOURCE_RARITY = {
+    "coal": 1.05,
+    "oil": 0.85,
+    "natural_gas": 0.80,
+    "peat": 0.90,
+    "uranium": 0.18,
+    "iron_ore": 1.00,
+    "copper_ore": 0.62,
+    "bauxite": 0.55,
+    "lead": 0.72,
+    "zinc": 0.72,
+    "nickel": 0.36,
+    "gold": 0.50,
+    "silver": 0.58,
+    "rare_earth_metals": 0.10,
+    "alloying_additives": 0.25,
+    "potash": 0.42,
+    "phosphorite": 0.50,
+    "apatite": 0.46,
+    "sulfur": 0.48,
+    "rubber": 0.30,
+    "graphite": 0.25,
+    "mica": 0.28,
+    "quartz": 0.42,
+    "steel": 0.85,
+    "refined_fuel": 0.78,
+    "chemicals": 0.64,
+    "food": 1.20,
+    "fertilizer": 0.52,
+    "copper_wire": 0.44,
+    "consumer_goods": 0.78,
+    "machinery": 0.46,
+    "vehicles": 0.36,
+    "electronics": 0.22,
+    "construction_goods": 0.95,
+    "weapons": 0.26,
+    "ships": 0.14,
+}
+MARKET_RESOURCE_VOLATILITY = {
+    "rare_earth_metals": 1.80,
+    "uranium": 1.55,
+    "gold": 1.20,
+    "silver": 1.15,
+    "electronics": 1.35,
+    "ships": 1.45,
+    "weapons": 1.30,
+    "oil": 1.25,
+    "natural_gas": 1.20,
+    "rubber": 1.25,
+    "food": 0.75,
+    "construction_goods": 0.82,
+    "iron_ore": 0.85,
+    "coal": 0.80,
+    "steel": 0.92,
+}
+MARKET_LINKED_PRICE_EFFECTS = {
+    "refined_fuel": {"oil": 0.80, "natural_gas": 0.20, "coal": 0.12, "peat": 0.06},
+    "fertilizer": {"natural_gas": 0.34, "potash": 0.24, "phosphorite": 0.18, "apatite": 0.16, "chemicals": 0.22},
+    "chemicals": {"natural_gas": 0.22, "oil": 0.16, "sulfur": 0.18},
+    "steel": {"iron_ore": 0.45, "coal": 0.26, "alloying_additives": 0.12},
+    "copper_wire": {"copper_ore": 0.62, "refined_fuel": 0.08},
+    "machinery": {"steel": 0.34, "copper_wire": 0.18, "chemicals": 0.08},
+    "vehicles": {"steel": 0.28, "rubber": 0.20, "refined_fuel": 0.12, "machinery": 0.24},
+    "electronics": {"rare_earth_metals": 0.34, "copper_wire": 0.22, "chemicals": 0.10},
+    "consumer_goods": {"chemicals": 0.12, "food": 0.08, "refined_fuel": 0.06},
+    "construction_goods": {"steel": 0.12, "refined_fuel": 0.06, "machinery": 0.05},
+    "weapons": {"steel": 0.26, "machinery": 0.22, "electronics": 0.12},
+    "ships": {"steel": 0.38, "machinery": 0.20, "electronics": 0.08, "refined_fuel": 0.08},
+}
 PRODUCTION_STAGES = ["raw", "semi_finished", "agriculture", "finished", "upkeep"]
 PRODUCTION_MONTH_HOURS = 24 * 30
 FARM_FOOD_BASE_RATE = 30_000
@@ -377,36 +551,81 @@ FERTILIZER_CONSUMPTION_PER_FARM_COVERAGE = 950
 STARTING_CONSUMER_GOODS_INDUSTRY_SHARE = 0.30
 STARTING_CONSUMER_GOODS_TILE_SHARE = 0.45
 POPULATION_INCOME_PER_MILLION = {
-    "rural": 180_000,
-    "city": 950_000,
-    "village": 420_000,
-    "farms": 320_000,
-    "mine": 620_000,
-    "industry": 850_000,
-    "port": 700_000,
-    "warehouse": 450_000,
-    "fuel_storage": 420_000,
-    "refinery": 900_000,
+    "rural": 150_000,
+    "city": 700_000,
+    "village": 300_000,
+    "farms": 220_000,
+    "mine": 360_000,
+    "oil_gas_rig": 420_000,
+    "industry": 460_000,
+    "port": 390_000,
+    "warehouse": 240_000,
+    "supply_depot": 210_000,
+    "fuel_storage": 230_000,
+    "refinery": 480_000,
 }
 POPULATION_INCOME_TYPE_WEIGHTS = {
     "city": 5.0,
     "village": 3.0,
     "farms": 1.6,
     "mine": 1.8,
+    "oil_gas_rig": 1.7,
     "industry": 2.3,
     "port": 1.9,
     "warehouse": 1.2,
+    "supply_depot": 1.1,
     "fuel_storage": 1.1,
     "refinery": 2.2,
 }
 COMPANY_INCOME_PER_COVERAGE = {
-    "farms": 900_000,
-    "mine": 1_350_000,
-    "industry": 2_400_000,
-    "port": 1_600_000,
-    "warehouse": 450_000,
-    "fuel_storage": 650_000,
-    "refinery": 2_200_000,
+    "farms": 90_000,
+    "mine": 135_000,
+    "oil_gas_rig": 165_000,
+    "industry": 240_000,
+    "port": 160_000,
+    "warehouse": 45_000,
+    "supply_depot": 52_000,
+    "fuel_storage": 65_000,
+    "refinery": 220_000,
+}
+POPULATION_CAPACITY_BASE_LAND = 55_000
+POPULATION_CAPACITY_BASE_WATER = 0
+POPULATION_CAPACITY_PER_COVERAGE = {
+    "city": 10_000_000,
+    "village": 2_200_000,
+    "farms": 180_000,
+    "mine": 130_000,
+    "oil_gas_rig": 110_000,
+    "industry": 520_000,
+    "port": 320_000,
+    "warehouse": 90_000,
+    "supply_depot": 80_000,
+    "fuel_storage": 70_000,
+    "refinery": 180_000,
+}
+POPULATION_MAX_OVERCAPACITY = 1.20
+POPULATION_BASE_ANNUAL_GROWTH = 0.012
+CITY_NATURAL_ANNUAL_GROWTH = 0.015
+VILLAGE_NATURAL_ANNUAL_GROWTH = 0.025
+MONEY_GOVERNMENT_BASE_EXPENSE = 450_000
+MONEY_GOVERNMENT_PER_MILLION = 48_000
+MONEY_GOVERNMENT_PER_TILE = 3_500
+MONEY_SOCIAL_BASE_PER_MILLION = 62_000
+MONEY_SOCIAL_CITY_BONUS = 70_000
+MONEY_SOCIAL_VILLAGE_BONUS = 28_000
+MONEY_ARMY_BASE_EXPENSE = 0
+INFRASTRUCTURE_UPKEEP_PER_COVERAGE = {
+    "city": 145_000,
+    "village": 42_000,
+    "farms": 18_000,
+    "mine": 50_000,
+    "oil_gas_rig": 62_000,
+    "industry": 92_000,
+    "port": 75_000,
+    "warehouse": 18_000,
+    "supply_depot": 24_000,
+    "fuel_storage": 28_000,
+    "refinery": 115_000,
 }
 INDUSTRY_SECTOR_RESOURCE_WEIGHTS = {
     "metallurgy": {
@@ -414,17 +633,10 @@ INDUSTRY_SECTOR_RESOURCE_WEIGHTS = {
         "coal": 0.8,
         "alloying_additives": 0.35,
     },
-    "construction_materials": {
-        "limestone": 1.0,
-        "sand": 0.75,
-        "gravel": 0.65,
-        "crushed_stone": 0.55,
-        "clay": 0.35,
-    },
+    "construction_materials": {},
     "chemicals": {
         "natural_gas": 0.9,
         "sulfur": 0.85,
-        "salt": 0.45,
         "phosphorite": 0.35,
         "apatite": 0.35,
         "potash": 0.35,
@@ -433,6 +645,12 @@ INDUSTRY_SECTOR_RESOURCE_WEIGHTS = {
         "iron_ore": 0.6,
         "copper_ore": 0.35,
         "coal": 0.25,
+    },
+    "vehicles": {
+        "iron_ore": 0.45,
+        "oil": 0.30,
+        "rubber": 0.30,
+        "bauxite": 0.20,
     },
     "electronics": {
         "copper_ore": 0.85,
@@ -454,6 +672,7 @@ INDUSTRY_SECTOR_LABELS = {
     "construction_materials": "Стройматериалы",
     "chemicals": "Химия",
     "machinery": "Машиностроение",
+    "vehicles": "Транспорт",
     "consumer_goods": "Товары",
     "electronics": "Электроника",
     "shipbuilding": "Судостроение",
@@ -470,14 +689,12 @@ LIFE_SUPPORT_CONSUMPTION_PER_MILLION = {
 }
 SETTLEMENT_UPKEEP_PER_COVERAGE = {
     "city": {
-        "construction_goods": 1750,
-        "cement": 620,
+        "construction_goods": 2370,
         "machinery": 120,
         "refined_fuel": 260,
     },
     "village": {
-        "construction_goods": 520,
-        "cement": 180,
+        "construction_goods": 700,
         "machinery": 45,
         "refined_fuel": 80,
     },
@@ -491,13 +708,6 @@ PRODUCTION_RECIPES = {
             "inputs": {"iron_ore": 2.0, "coal": 0.8},
             "outputs": {"steel": 1.0},
         },
-        "cement": {
-            "building": "industry",
-            "sector": "construction_materials",
-            "base_rate": 4200,
-            "inputs": {"limestone": 1.2, "sand": 0.7, "gravel": 0.5},
-            "outputs": {"cement": 1.0},
-        },
         "oil_refining": {
             "building": "refinery",
             "sector": "refining",
@@ -509,7 +719,7 @@ PRODUCTION_RECIPES = {
             "building": "industry",
             "sector": "chemicals",
             "base_rate": 3600,
-            "inputs": {"natural_gas": 0.7, "sulfur": 0.25, "salt": 0.15},
+            "inputs": {"natural_gas": 0.7, "sulfur": 0.25},
             "outputs": {"chemicals": 1.0},
         },
         "fertilizer": {
@@ -544,7 +754,7 @@ PRODUCTION_RECIPES = {
         },
         "vehicles": {
             "building": "industry",
-            "sector": "machinery",
+            "sector": "vehicles",
             "base_rate": 1700,
             "inputs": {"steel": 0.8, "machinery": 0.45, "refined_fuel": 0.2},
             "outputs": {"vehicles": 1.0},
@@ -559,8 +769,8 @@ PRODUCTION_RECIPES = {
         "construction_goods": {
             "building": "industry",
             "sector": "construction_materials",
-            "base_rate": 3600,
-            "inputs": {"cement": 0.9, "steel": 0.25},
+            "base_rate": 4400,
+            "inputs": {},
             "outputs": {"construction_goods": 1.0},
         },
         "weapons": {
@@ -596,24 +806,16 @@ RESOURCE_DISPLAY_NAMES = {
     "silver": "Серебро",
     "rare_earth_metals": "Редкоземы",
     "potash": "Калийные соли",
-    "salt": "Соль",
     "phosphorite": "Фосфориты",
     "apatite": "Апатиты",
     "sulfur": "Сера",
     "rubber": "Каучук",
-    "sand": "Песок",
-    "gravel": "Гравий",
-    "crushed_stone": "Щебень",
-    "limestone": "Известняк",
-    "clay": "Глина",
     "graphite": "Графит",
     "mica": "Слюда",
     "quartz": "Кварц",
     "steel": "Сталь",
-    "cement": "Цемент",
     "refined_fuel": "Топливо",
     "chemicals": "Химикаты",
-    "lumber": "Пиломатериалы",
     "food": "Еда",
     "fertilizer": "Удобрения",
     "copper_wire": "Медная проволока",
@@ -642,24 +844,16 @@ RESOURCE_USAGE_DESCRIPTIONS = {
     "silver": "Используется в электронике, химии, медицине и торговых товарах.",
     "rare_earth_metals": "Критичны для электроники, датчиков, батарей и высоких технологий.",
     "potash": "Основа удобрений и аграрного производства.",
-    "salt": "Пищевое сырье, химическая промышленность и базовые товары населения.",
     "phosphorite": "Сырье для удобрений и роста сельского хозяйства.",
     "apatite": "Источник фосфатов для удобрений и химической промышленности.",
     "sulfur": "Химикаты, удобрения, взрывчатка и переработка нефти.",
     "rubber": "Шины, техника, военное снабжение и потребительские товары.",
-    "sand": "Стекло, бетон, строительство и базовая промышленность.",
-    "gravel": "Дороги, бетон, инфраструктура и строительство.",
-    "crushed_stone": "Фундамент для дорог, бетона, зданий и укреплений.",
-    "limestone": "Цемент, сталь, строительство и химическая промышленность.",
-    "clay": "Кирпич, керамика, цемент и строительные материалы.",
     "graphite": "Электроды, батареи, металлургия и высокотехнологичная промышленность.",
     "mica": "Изоляция, электроника, оптика и специальные материалы.",
     "quartz": "Стекло, электроника, оптика и точная промышленность.",
     "steel": "Главный материал для строительства, машин, транспорта и армии.",
-    "cement": "Базовый материал для зданий, дорог, портов и укреплений.",
     "refined_fuel": "Горючее для транспорта, армии, авиации и промышленности.",
     "chemicals": "Промежуточный ресурс для удобрений, пластмасс, медицины и боеприпасов.",
-    "lumber": "Строительство, мебель, упаковка и простая промышленность.",
     "food": "Снабжение населения и армии, основа стабильности страны.",
     "fertilizer": "Повышает выпуск сельского хозяйства и продовольствия.",
     "copper_wire": "Электросети, техника, электроника и промышленное оборудование.",
@@ -681,8 +875,10 @@ TILE_VISUAL_ASSETS = {
     "city": "city.png",
     "village": "village.png",
     "warehouse": "warehouse.png",
+    "supply_depot": "warehouse.png",
     "fuel_storage": "fuel_storage.png",
     "refinery": "refinery.png",
+    "oil_gas_rig": "refinery.png",
     "industry": "industry.png",
     "farms": "farms.png",
     "mine": "mine.png",
@@ -695,7 +891,9 @@ VISUAL_FACTOR_WEIGHTS = {
     "farms": 1.22,
     "mine": 1.2,
     "warehouse": 1.16,
+    "supply_depot": 1.18,
     "refinery": 1.15,
+    "oil_gas_rig": 1.13,
     "fuel_storage": 1.14,
     "village": 1.08,
     "water": 1.18,
@@ -722,6 +920,7 @@ TOP_NAV_TABS = [
     ("politics", "Внутренняя политика", "politics.png"),
     ("economy", "Экономика", "economy.png"),
     ("resources", "Ресурсы", "resources.png"),
+    ("trade", "Торговля", "economy.png"),
     ("construction", "Строительство", "construction.png"),
     ("research", "Исследования", "research.png"),
     ("diplomacy", "Дипломатия", "diplomacy.png"),
@@ -932,6 +1131,35 @@ class GameTimeSnapshot:
     speed_level: int
     hours_per_tick: int
     tick_count: int
+    market_tick_count: int
+
+
+@dataclass
+class MarketState:
+    base_prices: dict = field(default_factory=lambda: dict(TRADE_BASE_PRICES))
+    current_prices: dict = field(default_factory=dict)
+    previous_prices: dict = field(default_factory=dict)
+    price_shocks: dict = field(default_factory=dict)
+    demand: dict = field(default_factory=dict)
+    supply: dict = field(default_factory=dict)
+    external_demand: dict = field(default_factory=dict)
+    external_supply: dict = field(default_factory=dict)
+    history: dict = field(default_factory=dict)
+    revision: int = 0
+    last_execution_time: datetime | None = None
+
+    def ensure_resource(self, resource_key):
+        base_price = float(self.base_prices.get(resource_key, TRADE_BASE_PRICES.get(resource_key, 60.0)))
+        self.base_prices.setdefault(resource_key, base_price)
+        self.current_prices.setdefault(resource_key, base_price)
+        self.previous_prices.setdefault(resource_key, base_price)
+        self.price_shocks.setdefault(resource_key, 0.0)
+        self.demand.setdefault(resource_key, 0.0)
+        self.supply.setdefault(resource_key, 0.0)
+        self.external_demand.setdefault(resource_key, 0.0)
+        self.external_supply.setdefault(resource_key, 0.0)
+        self.history.setdefault(resource_key, [base_price])
+        return base_price
 
 
 @dataclass
@@ -948,12 +1176,26 @@ class StatePlayer:
     resource_stockpiles: dict = None
     production_modifiers: dict = None
     production_cache: dict = None
+    resource_balance_breakdown: dict = None
+    resource_balance_dirty: bool = True
+    resource_balance_last_update: float = 0.0
+    storage_capacity: dict = None
+    storage_used: dict = None
+    storage_overflow: dict = None
+    storage_dirty: bool = True
+    tile_stockpiles_dirty: bool = True
+    supply_summary: dict = None
+    trade_contracts: list = None
+    trade_modifiers: dict = None
     construction_modifiers: dict = None
     construction_queue: list = None
     monthly_income_breakdown: dict = None
+    monthly_expenses_breakdown: dict = None
     population: float | None = None
     budget: float = 250_000_000.0
     monthly_balance: float = 0.0
+    monthly_trade_balance: float = 0.0
+    population_month_accumulator: float = 0.0
     stability: float = 0.72
     legitimacy: float = 0.61
 
@@ -986,6 +1228,30 @@ class StatePlayer:
                 stage: {"inputs": {}, "outputs": {}}
                 for stage in PRODUCTION_STAGES
             }
+        if self.resource_balance_breakdown is None:
+            self.resource_balance_breakdown = {
+                category: {}
+                for category in ["raw", "semi_finished", "finished"]
+            }
+        if self.storage_capacity is None:
+            self.storage_capacity = {category: 0.0 for category in STORAGE_CATEGORIES}
+        if self.storage_used is None:
+            self.storage_used = {category: 0.0 for category in STORAGE_CATEGORIES}
+        if self.storage_overflow is None:
+            self.storage_overflow = {category: 0.0 for category in STORAGE_CATEGORIES}
+        if self.supply_summary is None:
+            self.supply_summary = {
+                "average": 1.0,
+                "low_tiles": 0,
+                "critical_tiles": 0,
+            }
+        if self.trade_contracts is None:
+            self.trade_contracts = []
+        if self.trade_modifiers is None:
+            self.trade_modifiers = {
+                "external_market_limit": 1.0,
+                "diplomacy_trade_bonus": 0.0,
+            }
         if self.construction_modifiers is None:
             self.construction_modifiers = {
                 "build_efficiency": 1.0,
@@ -998,7 +1264,16 @@ class StatePlayer:
             self.monthly_income_breakdown = {
                 "population": 0.0,
                 "companies": 0.0,
+                "trade": 0.0,
                 "multiplier": 1.0,
+                "total": 0.0,
+            }
+        if self.monthly_expenses_breakdown is None:
+            self.monthly_expenses_breakdown = {
+                "army": 0.0,
+                "government": 0.0,
+                "social": 0.0,
+                "infrastructure": 0.0,
                 "total": 0.0,
             }
 
@@ -1009,11 +1284,27 @@ class LocalSimulationServer:
         self.paused = True
         self.speed_level = 1
         self.tick_count = 0
+        self.market_tick_count = 0
+        self.pending_market_ticks = 0
         self.accumulator = 0.0
+        self.market_state = MarketState()
+        self.next_market_execution_time = self.next_weekly_market_time(self.current_time)
 
     @property
     def hours_per_tick(self):
         return SIMULATION_HOURS_PER_TICK[self.speed_level - 1]
+
+    @staticmethod
+    def next_weekly_market_time(current_time):
+        days_until_monday = (0 - current_time.weekday()) % 7
+        execution_time = datetime(
+            current_time.year,
+            current_time.month,
+            current_time.day,
+        ) + timedelta(days=days_until_monday)
+        if execution_time <= current_time:
+            execution_time += timedelta(days=7)
+        return execution_time
 
     def update(self, delta_time):
         if self.paused:
@@ -1025,8 +1316,22 @@ class LocalSimulationServer:
             return
 
         self.accumulator -= ticks_to_process * SIMULATION_REAL_SECONDS_PER_TICK
+        previous_time = self.current_time
         self.current_time += timedelta(hours=self.hours_per_tick * ticks_to_process)
         self.tick_count += ticks_to_process
+        self.update_market_schedule(previous_time, self.current_time)
+
+    def update_market_schedule(self, previous_time, current_time):
+        while previous_time < self.next_market_execution_time <= current_time:
+            self.pending_market_ticks += 1
+            self.market_tick_count += 1
+            self.market_state.last_execution_time = self.next_market_execution_time
+            self.next_market_execution_time += timedelta(days=7)
+
+    def consume_market_ticks(self):
+        count = self.pending_market_ticks
+        self.pending_market_ticks = 0
+        return count
 
     def set_paused(self, paused):
         self.paused = paused
@@ -1049,6 +1354,7 @@ class LocalSimulationServer:
             speed_level=self.speed_level,
             hours_per_tick=self.hours_per_tick,
             tick_count=self.tick_count,
+            market_tick_count=self.market_tick_count,
         )
 
 
@@ -1343,7 +1649,15 @@ class Game(arcade.View):
         self.selection_border = None
         self.selection_border_sprite_list = arcade.SpriteList()
         self.batch = Batch()
-        self.debug_text = arcade.Text("", 10, 30, arcade.color.YELLOW, 12)
+        self.debug_text = arcade.Text(
+            "",
+            0,
+            0,
+            arcade.color.YELLOW,
+            12,
+            anchor_x="right",
+            anchor_y="top",
+        )
         self.simulation_server = LocalSimulationServer()
         self.simulation_client = LocalSimulationClient(self.simulation_server)
         self.last_production_tick_count = 0
@@ -1354,6 +1668,7 @@ class Game(arcade.View):
         self.time_clock_text = arcade.Text("", 0, 0, (225, 232, 240), 13, anchor_x="center", anchor_y="center")
         self.ui_text_pool = []
         self.ui_text_pool_cursor = 0
+        self.ui_text_pool_max_used = 0
         self.map_layer = "terrain"
         self.map_layer_menu_open = False
         self.map_layer_menu_progress = 0.0
@@ -1378,11 +1693,19 @@ class Game(arcade.View):
         self.resource_panel_category = "raw"
         self.selected_resource_key = None
         self.resource_scroll_index = 0
+        self.resource_rows_cache = None
+        self.budget_summary_rect = None
+        self.hovered_budget_summary = False
         self.resource_summary_rect = None
         self.hovered_resource_summary = False
         self.resource_warning_rects = []
         self.selected_resource_signal_cache_key = None
         self.selected_resource_signal_cache = {}
+        self.trade_panel_category = "raw"
+        self.trade_scroll_index = 0
+        self.trade_action_rects = []
+        self.trade_category_rects = []
+        self.trade_panel_cache = None
         self.construction_queue_expanded = False
         self.selected_construction_index = 0
         self.construction_placement_mode = False
@@ -1397,6 +1720,7 @@ class Game(arcade.View):
         self.construction_queue_priority_rects = []
         self.construction_building_rects = []
         self.construction_start_button_rect = None
+        self.construction_pause_button_rect = None
         self.hovered_hex_panel_close = False
         self.hovered_hex_build_button = False
         self.hovered_hex_specialization_button = False
@@ -1610,7 +1934,54 @@ class Game(arcade.View):
 
         if changed or player.resource_stockpiles is None:
             player.resource_stockpiles = stockpiles
+            self.mark_player_stockpiles_changed(player)
         return stockpiles
+
+    @staticmethod
+    def mark_player_resource_balance_dirty(player):
+        if player:
+            player.resource_balance_dirty = True
+
+    @staticmethod
+    def mark_player_storage_dirty(player):
+        if player:
+            player.storage_dirty = True
+            player.tile_stockpiles_dirty = True
+            player.resource_balance_dirty = True
+
+    def mark_player_stockpiles_changed(self, player):
+        self.mark_player_resource_balance_dirty(player)
+        if player:
+            player.tile_stockpiles_dirty = True
+
+    def cached_resource_balance_breakdown(self, player, max_age=0.35):
+        if not player:
+            return {}
+        now = time.time()
+        last_update = getattr(player, "resource_balance_last_update", 0.0)
+        if (
+            not player.resource_balance_breakdown
+            or last_update <= 0
+            or (player.resource_balance_dirty and now - last_update >= max_age)
+        ):
+            return self.recalculate_resource_balance_breakdown(player)
+        return player.resource_balance_breakdown
+
+    def ensure_player_storage(self, player):
+        if not player:
+            return self.empty_storage_summary(), self.empty_storage_summary(), self.empty_storage_summary()
+        if (
+            player.storage_dirty
+            or not player.storage_capacity
+            or not player.storage_used
+            or not player.storage_overflow
+        ):
+            return self.recalculate_player_storage(player)
+        return player.storage_capacity, player.storage_used, player.storage_overflow
+
+    def ensure_player_tile_stockpiles(self, player):
+        if player and getattr(player, "tile_stockpiles_dirty", True):
+            self.distribute_player_stockpiles_to_tiles(player)
 
     @staticmethod
     def empty_tile_stockpiles():
@@ -1620,64 +1991,161 @@ class Game(arcade.View):
             "finished": {},
         }
 
-    def tile_storage_capacity(self, tile):
+    @staticmethod
+    def storage_bucket_for_resource(resource_key):
+        return "fuel" if resource_key in FUEL_STORAGE_RESOURCE_KEYS else Game.resource_category_for_key(resource_key)
+
+    @staticmethod
+    def empty_storage_summary():
+        return {category: 0.0 for category in STORAGE_CATEGORIES}
+
+    def tile_storage_capacity_by_category(self, tile):
         coverage = getattr(tile, "building_coverage", {}) or {}
-        capacity = 0.0
-        for building_key, capacity_per_coverage in STORAGE_CAPACITY_BY_COVERAGE.items():
-            capacity += coverage.get(building_key, 0.0) * capacity_per_coverage
-        return capacity
+        capacities = self.empty_storage_summary()
+        for category_key, building_values in STORAGE_CAPACITY_BY_COVERAGE.items():
+            for building_key, capacity_per_coverage in building_values.items():
+                capacities[category_key] += coverage.get(building_key, 0.0) * capacity_per_coverage
+        for building_key, capacity_per_coverage in FUEL_STORAGE_CAPACITY_BY_COVERAGE.items():
+            capacities["fuel"] += coverage.get(building_key, 0.0) * capacity_per_coverage
+        return capacities
+
+    def tile_storage_capacity(self, tile, category_key=None):
+        capacities = self.tile_storage_capacity_by_category(tile)
+        if category_key:
+            return capacities.get(category_key, 0.0)
+        return sum(capacities.get(key, 0.0) for key in ("raw", "semi_finished", "finished"))
 
     def tile_fuel_storage_capacity(self, tile):
-        coverage = getattr(tile, "building_coverage", {}) or {}
-        capacity = 0.0
-        for building_key, capacity_per_coverage in FUEL_STORAGE_CAPACITY_BY_COVERAGE.items():
-            capacity += coverage.get(building_key, 0.0) * capacity_per_coverage
-        return capacity
+        return self.tile_storage_capacity(tile, "fuel")
+
+    def tile_storage_used_by_category(self, tile):
+        used = self.empty_storage_summary()
+        for category_bucket in (getattr(tile, "resource_stockpiles", {}) or {}).values():
+            for resource_key, amount in category_bucket.items():
+                storage_key = self.storage_bucket_for_resource(resource_key)
+                used[storage_key] = used.get(storage_key, 0.0) + max(0.0, amount)
+        return used
+
+    def storage_summary_for_tiles(self, tiles):
+        capacity = self.empty_storage_summary()
+        used = self.empty_storage_summary()
+        for tile in tiles:
+            tile_capacity = self.tile_storage_capacity_by_category(tile)
+            tile_used = self.tile_storage_used_by_category(tile)
+            for category_key in STORAGE_CATEGORIES:
+                capacity[category_key] += tile_capacity.get(category_key, 0.0)
+                used[category_key] += tile_used.get(category_key, 0.0)
+        return capacity, used
+
+    def recalculate_player_storage(self, player):
+        capacity = self.empty_storage_summary()
+        used = self.empty_storage_summary()
+        efficiency = (player.production_modifiers or {}).get("storage_efficiency", 1.0)
+
+        for tile in player.tiles:
+            tile_capacity = self.tile_storage_capacity_by_category(tile)
+            for category_key, amount in tile_capacity.items():
+                capacity[category_key] += amount * efficiency
+
+        stockpiles = self.ensure_player_stockpiles(player)
+        for category_key, bucket in stockpiles.items():
+            for resource_key, amount in bucket.items():
+                storage_key = self.storage_bucket_for_resource(resource_key)
+                used[storage_key] = used.get(storage_key, 0.0) + max(0.0, amount)
+
+        overflow = {
+            category_key: max(0.0, used.get(category_key, 0.0) - capacity.get(category_key, 0.0))
+            for category_key in STORAGE_CATEGORIES
+        }
+        player.storage_capacity = capacity
+        player.storage_used = used
+        player.storage_overflow = overflow
+        player.storage_dirty = False
+        return capacity, used, overflow
+
+    def storage_free_capacity_for_resource(self, player, resource_key):
+        capacity, used, _overflow = self.ensure_player_storage(player)
+        storage_key = self.storage_bucket_for_resource(resource_key)
+        return max(0.0, capacity.get(storage_key, 0.0) - used.get(storage_key, 0.0))
+
+    def enforce_player_storage_capacity(self, player):
+        capacity, used, overflow = self.recalculate_player_storage(player)
+        if not any(amount > 0 for amount in overflow.values()):
+            return overflow
+
+        stockpiles = self.ensure_player_stockpiles(player)
+        removed = self.empty_storage_summary()
+        for storage_key, overflow_amount in overflow.items():
+            if overflow_amount <= 0:
+                continue
+            resources = []
+            for category_key, bucket in stockpiles.items():
+                for resource_key, amount in bucket.items():
+                    if amount > 0 and self.storage_bucket_for_resource(resource_key) == storage_key:
+                        resources.append((category_key, resource_key, amount))
+            total_amount = sum(amount for _category, _key, amount in resources)
+            if total_amount <= 0:
+                continue
+            keep_ratio = max(0.0, min(1.0, capacity.get(storage_key, 0.0) / total_amount))
+            for category_key, resource_key, amount in resources:
+                new_amount = amount * keep_ratio
+                stockpiles[category_key][resource_key] = new_amount
+                removed[storage_key] += max(0.0, amount - new_amount)
+
+        self.recalculate_player_storage(player)
+        player.tile_stockpiles_dirty = False
+        player.storage_overflow = removed
+        return removed
 
     def distribute_player_stockpiles_to_tiles(self, player):
         for tile in player.tiles:
             tile.resource_stockpiles = self.empty_tile_stockpiles()
 
-        storage_tiles = [
-            (tile, self.tile_storage_capacity(tile))
-            for tile in player.tiles
-            if self.tile_storage_capacity(tile) > 0
-        ]
-        total_capacity = sum(capacity for _tile, capacity in storage_tiles)
-        fuel_storage_tiles = [
-            (tile, self.tile_fuel_storage_capacity(tile))
-            for tile in player.tiles
-            if self.tile_fuel_storage_capacity(tile) > 0
-        ]
-        total_fuel_capacity = sum(capacity for _tile, capacity in fuel_storage_tiles)
-        if total_capacity <= 0:
+        capacity_tiles = {
+            category_key: []
+            for category_key in STORAGE_CATEGORIES
+        }
+        for tile in player.tiles:
+            capacities = self.tile_storage_capacity_by_category(tile)
+            for category_key, capacity in capacities.items():
+                if capacity > 0:
+                    capacity_tiles[category_key].append((tile, capacity))
+
+        if not any(capacity_tiles[key] for key in ("raw", "semi_finished", "finished")):
             fallback_tile = player.capital_tile or next((tile for tile in player.tiles if not self.is_water_tile(tile)), None)
             if fallback_tile:
                 self.set_tile_building_coverage(fallback_tile, "warehouse", 0.12, INFRASTRUCTURE_COVERAGE_LIMITS["warehouse"][1])
-                storage_tiles = [(fallback_tile, self.tile_storage_capacity(fallback_tile))]
-                total_capacity = storage_tiles[0][1]
-        if total_fuel_capacity <= 0:
+                capacities = self.tile_storage_capacity_by_category(fallback_tile)
+                for category_key in ("raw", "semi_finished", "finished"):
+                    capacity_tiles[category_key] = [(fallback_tile, capacities.get(category_key, 0.0))]
+        if not capacity_tiles["fuel"]:
             fallback_tile = player.capital_tile or next((tile for tile in player.tiles if not self.is_water_tile(tile)), None)
             if fallback_tile:
                 self.set_tile_building_coverage(fallback_tile, "fuel_storage", 0.14, INFRASTRUCTURE_COVERAGE_LIMITS["fuel_storage"][1])
-                fuel_storage_tiles = [(fallback_tile, self.tile_fuel_storage_capacity(fallback_tile))]
-                total_fuel_capacity = fuel_storage_tiles[0][1]
-        if total_capacity <= 0:
-            return
+                capacity_tiles["fuel"] = [(fallback_tile, self.tile_fuel_storage_capacity(fallback_tile))]
 
+        total_capacity = {
+            category_key: sum(capacity for _tile, capacity in tiles)
+            for category_key, tiles in capacity_tiles.items()
+        }
+
+        self.enforce_player_storage_capacity(player)
         stockpiles = self.ensure_player_stockpiles(player)
         for category_key, bucket in stockpiles.items():
             for resource_key, amount in bucket.items():
                 if amount <= 0:
                     continue
-                target_tiles = fuel_storage_tiles if resource_key in FUEL_STORAGE_RESOURCE_KEYS else storage_tiles
-                target_capacity = total_fuel_capacity if resource_key in FUEL_STORAGE_RESOURCE_KEYS else total_capacity
+                storage_key = self.storage_bucket_for_resource(resource_key)
+                target_tiles = capacity_tiles.get(storage_key, [])
+                target_capacity = total_capacity.get(storage_key, 0.0)
                 if target_capacity <= 0:
                     continue
                 for tile, capacity in target_tiles:
                     share = capacity / target_capacity
                     tile_bucket = tile.resource_stockpiles.setdefault(category_key, {})
                     tile_bucket[resource_key] = tile_bucket.get(resource_key, 0.0) + amount * share
+
+        self.recalculate_player_storage(player)
 
     @staticmethod
     def add_resource_amount(bucket, key, amount):
@@ -1707,11 +2175,116 @@ class Game(arcade.View):
 
         player.resource_totals = totals
         player.resource_sources = sources
+        self.mark_player_resource_balance_dirty(player)
         return totals
 
     def recalculate_all_state_resources(self):
         for player in self.players:
             self.recalculate_state_resources(player)
+
+    def tile_supply_source_strength(self, player, tile):
+        if not tile or self.is_water_tile(tile):
+            return 0.0
+        coverage = getattr(tile, "building_coverage", {}) or {}
+        strength = 0.0
+        for building_key, weight in SUPPLY_SOURCE_WEIGHTS.items():
+            strength += max(0.0, coverage.get(building_key, 0.0)) * weight
+        if tile == player.capital_tile:
+            strength += 0.85
+        return self.clamp01(strength)
+
+    def recalculate_player_supply(self, player):
+        land_tiles = [tile for tile in player.tiles if not self.is_water_tile(tile)]
+        if not land_tiles:
+            player.supply_summary = {"average": 0.0, "low_tiles": 0, "critical_tiles": 0}
+            return player.supply_summary
+
+        sources = [
+            (tile, strength)
+            for tile in land_tiles
+            for strength in [self.tile_supply_source_strength(player, tile)]
+            if strength > 0
+        ]
+        if not sources and player.capital_tile:
+            sources = [(player.capital_tile, 0.65)]
+
+        total_supply = 0.0
+        low_tiles = 0
+        critical_tiles = 0
+        for tile in land_tiles:
+            passability = self.clamp01(getattr(tile, "passability", 0.0))
+            best = 0.0
+            for source_tile, strength in sources:
+                distance = self.hex_distance(tile, source_tile)
+                if distance > SUPPLY_SOURCE_RADIUS:
+                    continue
+                distance_factor = SUPPLY_DECAY_PER_HEX ** distance
+                passability_factor = 0.42 + passability * 0.58
+                best = max(best, strength * distance_factor * passability_factor)
+            tile.supply_score = self.clamp01(best)
+            total_supply += tile.supply_score
+            if tile.supply_score < 0.25:
+                critical_tiles += 1
+            elif tile.supply_score < 0.50:
+                low_tiles += 1
+
+        for _pass_index in range(2):
+            changed_tiles = []
+            for tile in land_tiles:
+                coverage = getattr(tile, "building_coverage", {}) or {}
+                relay_strength = sum(
+                    coverage.get(building_key, 0.0) * weight
+                    for building_key, weight in SUPPLY_RELAY_BUILDING_WEIGHTS.items()
+                )
+                if relay_strength <= 0:
+                    continue
+                tile_passability = self.clamp01(getattr(tile, "passability", 0.0))
+                for neighbor in self.neighbor_tiles(tile):
+                    if neighbor.owner != player or self.is_water_tile(neighbor):
+                        continue
+                    inbound = getattr(neighbor, "supply_score", 0.0) * (0.46 + relay_strength * 0.38) * (
+                        0.62 + tile_passability * 0.28
+                    )
+                    if inbound > getattr(tile, "supply_score", 0.0) + 0.001:
+                        changed_tiles.append((tile, self.clamp01(inbound)))
+                if getattr(tile, "supply_score", 0.0) <= 0.35:
+                    continue
+                relay_value = self.clamp01(tile.supply_score * (0.42 + relay_strength))
+                for neighbor in self.neighbor_tiles(tile):
+                    if neighbor.owner != player or self.is_water_tile(neighbor):
+                        continue
+                    passability = self.clamp01(getattr(neighbor, "passability", 0.0))
+                    candidate = relay_value * (0.58 + passability * 0.30)
+                    if candidate > getattr(neighbor, "supply_score", 0.0) + 0.001:
+                        changed_tiles.append((neighbor, self.clamp01(candidate)))
+            for tile, value in changed_tiles:
+                tile.supply_score = max(getattr(tile, "supply_score", 0.0), value)
+
+        total_supply = 0.0
+        low_tiles = 0
+        critical_tiles = 0
+        for tile in land_tiles:
+            total_supply += getattr(tile, "supply_score", 0.0)
+            if tile.supply_score < 0.25:
+                critical_tiles += 1
+            elif tile.supply_score < 0.50:
+                low_tiles += 1
+
+        for tile in player.tiles:
+            if self.is_water_tile(tile):
+                tile.supply_score = 0.0
+
+        average = total_supply / max(1, len(land_tiles))
+        player.supply_summary = {
+            "average": average,
+            "low_tiles": low_tiles,
+            "critical_tiles": critical_tiles,
+        }
+        return player.supply_summary
+
+    def recalculate_all_supply_scores(self):
+        for player in self.players:
+            self.recalculate_player_supply(player)
 
     @staticmethod
     def add_production_amount(cache, stage, direction, key, amount):
@@ -1771,6 +2344,7 @@ class Game(arcade.View):
             + passability * 0.20
         )
         scores["machinery"] += nearby_city * 0.28 + nearby_mine * 0.24 + passability * 0.14
+        scores["vehicles"] += nearby_city * 0.20 + nearby_port * 0.18 + nearby_refinery * 0.14 + passability * 0.12
         scores["metallurgy"] += nearby_mine * 0.18
         scores["construction_materials"] += nearby_city * 0.16 + nearby_mine * 0.10
         scores["chemicals"] += nearby_refinery * 0.24 + nearby_city * 0.10
@@ -1880,9 +2454,25 @@ class Game(arcade.View):
                 key, _depth, mass = resource
                 if key not in RAW_RESOURCE_NAMES:
                     continue
+                if key in OIL_GAS_RESOURCE_KEYS:
+                    continue
                 abundance = min(1.0, math.log10(max(0.0, float(mass)) + 1) / math.log10(1_500_000 + 1))
                 weight = STARTING_MINE_RESOURCE_WEIGHTS.get(key, 0.35)
                 output = mine_coverage * abundance * (0.55 + weight) * mining_efficiency * 5200
+                self.add_production_amount(cache, "raw", "outputs", key, output)
+
+        rig_coverage = coverage.get("oil_gas_rig", 0.0)
+        if rig_coverage > 0:
+            mining_efficiency = modifiers.get("mining_efficiency", 1.0)
+            for resource in getattr(tile, "resources", []):
+                if len(resource) < 3:
+                    continue
+                key, _depth, mass = resource
+                if key not in OIL_GAS_RESOURCE_KEYS:
+                    continue
+                abundance = min(1.0, math.log10(max(0.0, float(mass)) + 1) / math.log10(1_500_000 + 1))
+                weight = STARTING_OIL_GAS_RIG_RESOURCE_WEIGHTS.get(key, 0.8)
+                output = rig_coverage * abundance * (0.62 + weight) * mining_efficiency * 5600
                 self.add_production_amount(cache, "raw", "outputs", key, output)
 
         farms_coverage = coverage.get("farms", 0.0)
@@ -2022,10 +2612,32 @@ class Game(arcade.View):
                 source_tiles.append((tile, output))
         return source_tiles
 
-    def resource_consumption_breakdown(self, player, resource_key):
+    @staticmethod
+    def breakdown_with_percent(items):
+        total = sum(amount for _label, amount in items)
+        if total <= 0:
+            return [(label, amount, 0.0) for label, amount in items]
+        return [(label, amount, amount / total * 100.0) for label, amount in items]
+
+    def production_breakdown_from_flows(self, flows, resource_key):
+        stage_outputs = flows["stage_outputs"]
+        items = [
+            ("Добыча/фермы", stage_outputs.get("raw", {}).get(resource_key, 0.0)),
+            ("Удобрения", stage_outputs.get("agriculture", {}).get(resource_key, 0.0)),
+            ("Промышленность", (
+                stage_outputs.get("semi_finished", {}).get(resource_key, 0.0)
+                + stage_outputs.get("finished", {}).get(resource_key, 0.0)
+            )),
+            ("Импорт", flows["trade_outputs"].get(resource_key, 0.0)),
+        ]
+        return self.breakdown_with_percent(items)
+
+    def resource_production_breakdown(self, player, resource_key):
         if not player:
             return []
-        flows = self.estimate_monthly_resource_flows(player)
+        return self.production_breakdown_from_flows(self.estimate_monthly_resource_flows(player), resource_key)
+
+    def consumption_breakdown_from_flows(self, flows, resource_key):
         stage_inputs = flows["stage_inputs"]
         construction = flows["construction_inputs"].get(resource_key, 0.0)
         industry = sum(
@@ -2033,17 +2645,69 @@ class Game(arcade.View):
             for stage in ("semi_finished", "agriculture", "finished")
         )
         upkeep = stage_inputs.get("upkeep", {}).get(resource_key, 0.0)
-        repair = 0.0
+        exports = flows["trade_inputs"].get(resource_key, 0.0)
         items = [
             ("Стройки", construction),
             ("Производство", industry),
-            ("Снабжение/поддержание", upkeep),
-            ("Ремонт", repair),
+            ("Поддержание", upkeep),
+            ("Экспорт", exports),
         ]
-        total = sum(amount for _label, amount in items)
-        if total <= 0:
-            return [(label, amount, 0.0) for label, amount in items]
-        return [(label, amount, amount / total * 100.0) for label, amount in items]
+        return self.breakdown_with_percent(items)
+
+    def resource_consumption_breakdown(self, player, resource_key):
+        if not player:
+            return []
+        return self.consumption_breakdown_from_flows(self.estimate_monthly_resource_flows(player), resource_key)
+
+    def all_resource_keys_for_category(self, player, category_key, flows=None):
+        keys = set(self.resource_names_for_category(category_key))
+        stockpiles = self.ensure_player_stockpiles(player)
+        keys.update(stockpiles.get(category_key, {}).keys())
+        if category_key == "raw":
+            keys.update((player.resource_totals or {}).get("raw", {}).keys())
+        if flows:
+            keys.update(
+                key
+                for key in set(flows["inputs"]) | set(flows["outputs"])
+                if self.resource_category_for_key(key) == category_key
+            )
+        return sorted(keys, key=lambda key: self.resource_display_name(key))
+
+    def recalculate_resource_balance_breakdown(self, player):
+        if not player:
+            return {}
+        if not player.resource_totals:
+            self.recalculate_state_resources(player)
+        if not player.production_cache:
+            self.recalculate_state_production_cache(player)
+
+        stockpiles = self.ensure_player_stockpiles(player)
+        flows = self.estimate_monthly_resource_flows(player)
+        breakdown = {
+            category_key: {}
+            for category_key in ["raw", "semi_finished", "finished"]
+        }
+        for category_key in breakdown:
+            ground = (player.resource_totals or {}).get("raw", {}) if category_key == "raw" else {}
+            for resource_key in self.all_resource_keys_for_category(player, category_key, flows):
+                stock = stockpiles.get(category_key, {}).get(resource_key, 0.0)
+                production = flows["outputs"].get(resource_key, 0.0)
+                consumption = flows["inputs"].get(resource_key, 0.0)
+                breakdown[category_key][resource_key] = {
+                    "key": resource_key,
+                    "ground": ground.get(resource_key, None) if category_key == "raw" else None,
+                    "stock": stock,
+                    "production": production,
+                    "consumption": consumption,
+                    "balance": production - consumption,
+                    "months": self.resource_duration_months(stock, production, consumption),
+                    "production_breakdown": self.production_breakdown_from_flows(flows, resource_key),
+                    "consumption_breakdown": self.consumption_breakdown_from_flows(flows, resource_key),
+                }
+        player.resource_balance_breakdown = breakdown
+        player.resource_balance_dirty = False
+        player.resource_balance_last_update = time.time()
+        return breakdown
 
     def estimate_monthly_resource_flows(self, player):
         stockpiles = self.ensure_player_stockpiles(player)
@@ -2052,12 +2716,20 @@ class Game(arcade.View):
             category: dict(resources)
             for category, resources in stockpiles.items()
         }
+        simulated_capacity, simulated_used, _overflow = self.ensure_player_storage(player)
+        simulated_capacity = dict(simulated_capacity)
+        simulated_used = dict(simulated_used)
         flows = {
             "inputs": {},
             "outputs": {},
             "stage_inputs": {stage: {} for stage in PRODUCTION_STAGES},
             "stage_outputs": {stage: {} for stage in PRODUCTION_STAGES},
             "construction_inputs": {},
+            "trade_inputs": {},
+            "trade_outputs": {},
+            "trade_money": 0.0,
+            "trade_capacity_used": 0.0,
+            "trade_capacity_limit": self.trade_capacity_per_month(player),
         }
 
         def add_amount(bucket, key, amount):
@@ -2071,10 +2743,20 @@ class Game(arcade.View):
 
         def add_stock(key, amount):
             if amount <= 0:
-                return
+                return 0.0
+            storage_key = self.storage_bucket_for_resource(key)
+            free_capacity = max(
+                0.0,
+                simulated_capacity.get(storage_key, 0.0) - simulated_used.get(storage_key, 0.0),
+            )
+            accepted = min(amount, free_capacity)
+            if accepted <= 0:
+                return 0.0
             category = self.resource_category_for_key(key)
             bucket = simulated_stockpiles.setdefault(category, {})
-            bucket[key] = bucket.get(key, 0.0) + amount
+            bucket[key] = bucket.get(key, 0.0) + accepted
+            simulated_used[storage_key] = simulated_used.get(storage_key, 0.0) + accepted
+            return accepted
 
         def consume_stock(key, amount):
             if amount <= 0:
@@ -2084,6 +2766,8 @@ class Game(arcade.View):
             available = bucket.get(key, 0.0)
             consumed = min(available, amount)
             bucket[key] = max(0.0, available - consumed)
+            storage_key = self.storage_bucket_for_resource(key)
+            simulated_used[storage_key] = max(0.0, simulated_used.get(storage_key, 0.0) - consumed)
             return consumed
 
         def record_input(stage, key, amount):
@@ -2093,6 +2777,19 @@ class Game(arcade.View):
         def record_output(stage, key, amount):
             add_amount(flows["outputs"], key, amount)
             add_amount(flows["stage_outputs"].setdefault(stage, {}), key, amount)
+
+        trade_flows = self.estimate_monthly_trade_flows(player)
+        flows["trade_money"] = trade_flows["money_balance"]
+        flows["trade_capacity_used"] = trade_flows["capacity_used"]
+        flows["trade_capacity_limit"] = trade_flows["capacity_limit"]
+        for key, amount in trade_flows["imports"].items():
+            accepted = add_stock(key, amount)
+            add_amount(flows["outputs"], key, accepted)
+            add_amount(flows["trade_outputs"], key, accepted)
+        for key, amount in trade_flows["exports"].items():
+            exported = consume_stock(key, amount)
+            add_amount(flows["inputs"], key, exported)
+            add_amount(flows["trade_inputs"], key, exported)
 
         for stage in PRODUCTION_STAGES:
             if stage == "agriculture":
@@ -2104,8 +2801,8 @@ class Game(arcade.View):
                     bonus_food = planned_bonus_food * fertilizer_ratio
                     record_input(stage, "fertilizer", consumed)
                     if bonus_food > 0:
-                        add_stock("food", bonus_food)
-                        record_output(stage, "food", bonus_food)
+                        accepted = add_stock("food", bonus_food)
+                        record_output(stage, "food", accepted)
                 continue
 
             planned_inputs = {
@@ -2135,8 +2832,8 @@ class Game(arcade.View):
                 record_input(stage, key, consumed)
             for key, output in planned_outputs.items():
                 actual_output = output * actual_ratio
-                add_stock(key, actual_output)
-                record_output(stage, key, actual_output)
+                accepted = add_stock(key, actual_output)
+                record_output(stage, key, accepted)
 
         for key, amount in self.estimate_active_construction_consumption(player, stock_amount).items():
             consumed = consume_stock(key, amount)
@@ -2149,37 +2846,16 @@ class Game(arcade.View):
         if not player.construction_queue:
             return {}
         project = player.construction_queue[0]
-        cost = project.get("cost", {})
-        if not project.get("money_paid", False) and player.budget < cost.get("money_cost", 0.0):
+        status_info = self.evaluate_construction_project_status(
+            player,
+            project,
+            month_fraction=CONSTRUCTION_STATUS_CHECK_MONTH_FRACTION,
+            stock_amount_func=stock_amount_func,
+        )
+        if status_info["status"] != "building":
             return {}
-
-        resource_costs = cost.get("resource_costs", {})
-        if not resource_costs:
-            return {}
-
-        speed = self.build_power(player)
-        if speed <= 0:
-            return {}
-
-        old_progress = max(0.0, min(1.0, project.get("progress", 0.0)))
-        planned_delta = speed / max(1.0, cost.get("work_required", 1.0))
-        new_progress = min(1.0, old_progress + planned_delta)
-        resources_spent = cost.setdefault("resources_spent", {})
-        for key, total_amount in resource_costs.items():
-            if total_amount <= 0:
-                continue
-            already_spent = resources_spent.get(key, 0.0)
-            available_for_project = already_spent + stock_amount_func(key)
-            new_progress = min(new_progress, available_for_project / total_amount)
-
-        progress_delta = max(0.0, new_progress - old_progress)
-        if progress_delta <= 0:
-            return {}
-        return {
-            key: total_amount * progress_delta
-            for key, total_amount in resource_costs.items()
-            if total_amount > 0
-        }
+        monthly_delta = self.construction_project_progress_delta(player, project, month_fraction=1.0)
+        return self.construction_project_resource_needs(project, monthly_delta)
 
     def stockpile_amount(self, player, key):
         category = self.resource_category_for_key(key)
@@ -2187,11 +2863,24 @@ class Game(arcade.View):
 
     def add_to_stockpile(self, player, key, amount):
         if amount <= 0:
-            return
+            return 0.0
+        capacity, used, _overflow = self.ensure_player_storage(player)
+        storage_key = self.storage_bucket_for_resource(key)
+        free_capacity = max(0.0, capacity.get(storage_key, 0.0) - used.get(storage_key, 0.0))
+        accepted = min(amount, free_capacity)
+        if accepted <= 0:
+            return 0.0
         category = self.resource_category_for_key(key)
         stockpiles = self.ensure_player_stockpiles(player)
         bucket = stockpiles.setdefault(category, {})
-        bucket[key] = bucket.get(key, 0.0) + amount
+        bucket[key] = bucket.get(key, 0.0) + accepted
+        player.storage_used[storage_key] = player.storage_used.get(storage_key, 0.0) + accepted
+        player.storage_overflow[storage_key] = max(
+            0.0,
+            player.storage_used.get(storage_key, 0.0) - player.storage_capacity.get(storage_key, 0.0),
+        )
+        self.mark_player_stockpiles_changed(player)
+        return accepted
 
     def consume_from_stockpile(self, player, key, amount):
         if amount <= 0:
@@ -2202,7 +2891,438 @@ class Game(arcade.View):
         available = bucket.get(key, 0.0)
         consumed = min(available, amount)
         bucket[key] = max(0.0, available - consumed)
+        self.ensure_player_storage(player)
+        storage_key = self.storage_bucket_for_resource(key)
+        player.storage_used[storage_key] = max(0.0, player.storage_used.get(storage_key, 0.0) - consumed)
+        player.storage_overflow[storage_key] = max(
+            0.0,
+            player.storage_used.get(storage_key, 0.0) - player.storage_capacity.get(storage_key, 0.0),
+        )
+        if consumed > 0:
+            self.mark_player_stockpiles_changed(player)
         return consumed
+
+    def tradeable_resource_keys(self, category_key=None):
+        categories = [category_key] if category_key else ["raw", "semi_finished", "finished"]
+        keys = []
+        for category in categories:
+            for resource_key in self.resource_names_for_category(category):
+                if resource_key not in keys:
+                    keys.append(resource_key)
+        return keys
+
+    def normalize_trade_contracts(self, player):
+        normalized = []
+        seen = {}
+        for contract in player.trade_contracts or []:
+            resource_key = contract.get("resource")
+            mode = contract.get("mode")
+            amount = max(0.0, float(contract.get("amount", 0.0)))
+            if resource_key not in self.tradeable_resource_keys() or mode not in ("buy", "sell") or amount <= 0:
+                continue
+            contract_key = (resource_key, mode)
+            if contract_key in seen:
+                normalized[seen[contract_key]]["amount"] += amount
+            else:
+                seen[contract_key] = len(normalized)
+                normalized.append({"resource": resource_key, "mode": mode, "amount": amount})
+        player.trade_contracts = normalized
+        return normalized
+
+    def trade_contract_amount(self, player, resource_key, mode):
+        for contract in self.normalize_trade_contracts(player):
+            if contract["resource"] == resource_key and contract["mode"] == mode:
+                return contract["amount"]
+        return 0.0
+
+    def adjust_trade_contract(self, player, resource_key, mode, delta):
+        if not player or resource_key not in self.tradeable_resource_keys() or mode not in ("buy", "sell"):
+            return False
+        contracts = self.normalize_trade_contracts(player)
+        opposite = "sell" if mode == "buy" else "buy"
+        remaining_delta = max(0.0, delta)
+        changed = False
+        if delta > 0:
+            for contract in list(contracts):
+                if contract["resource"] == resource_key and contract["mode"] == opposite:
+                    removed = min(contract["amount"], remaining_delta)
+                    contract["amount"] -= removed
+                    remaining_delta -= removed
+                    changed = changed or removed > 0
+                    if remaining_delta <= 0:
+                        break
+            if remaining_delta <= 0:
+                player.trade_contracts = [contract for contract in contracts if contract["amount"] > 0]
+                if changed:
+                    self.recalculate_monthly_balance(player)
+                    self.mark_player_resource_balance_dirty(player)
+                return True
+
+        if delta > 0:
+            used_capacity = sum(
+                contract["amount"]
+                for contract in contracts
+                if contract["mode"] == mode
+            )
+            free_capacity = max(0.0, self.trade_capacity_per_month(player, mode) - used_capacity)
+            applied_delta = min(remaining_delta, free_capacity)
+            if applied_delta <= 0:
+                player.trade_contracts = [contract for contract in contracts if contract["amount"] > 0]
+                if changed:
+                    self.recalculate_monthly_balance(player)
+                    self.mark_player_resource_balance_dirty(player)
+                return changed
+        else:
+            applied_delta = delta
+
+        for contract in contracts:
+            if contract["resource"] == resource_key and contract["mode"] == mode:
+                old_amount = contract["amount"]
+                contract["amount"] = max(0.0, contract["amount"] + applied_delta)
+                changed = changed or contract["amount"] != old_amount
+                break
+        else:
+            if applied_delta > 0:
+                contracts.append({"resource": resource_key, "mode": mode, "amount": applied_delta})
+                changed = True
+
+        player.trade_contracts = [contract for contract in contracts if contract["amount"] > 0]
+        if changed:
+            self.recalculate_monthly_balance(player)
+            self.mark_player_resource_balance_dirty(player)
+        return changed
+
+    def market_base_price(self, resource_key):
+        market_state = getattr(self.simulation_server, "market_state", None)
+        if market_state:
+            return market_state.ensure_resource(resource_key)
+        if resource_key in TRADE_BASE_PRICES:
+            return float(TRADE_BASE_PRICES[resource_key])
+        category = self.resource_category_for_key(resource_key)
+        if category == "finished":
+            return 420.0
+        if category == "semi_finished":
+            return 160.0
+        return 60.0
+
+    def market_current_price(self, resource_key):
+        market_state = getattr(self.simulation_server, "market_state", None)
+        if not market_state:
+            return self.market_base_price(resource_key)
+        market_state.ensure_resource(resource_key)
+        return max(0.01, market_state.current_prices.get(resource_key, self.market_base_price(resource_key)))
+
+    def market_previous_price(self, resource_key):
+        market_state = getattr(self.simulation_server, "market_state", None)
+        if not market_state:
+            return self.market_base_price(resource_key)
+        market_state.ensure_resource(resource_key)
+        return max(0.01, market_state.previous_prices.get(resource_key, self.market_base_price(resource_key)))
+
+    def market_price_change_fraction(self, resource_key):
+        previous = self.market_previous_price(resource_key)
+        current = self.market_current_price(resource_key)
+        if previous <= 0:
+            return 0.0
+        return current / previous - 1.0
+
+    def market_unit_price(self, resource_key, mode):
+        price = self.market_current_price(resource_key)
+        if mode == "buy":
+            return price * TRADE_BUY_PRICE_MARKUP
+        return price * TRADE_SELL_PRICE_MARKDOWN
+
+    def trade_unit_price(self, player, resource_key, mode):
+        return self.market_unit_price(resource_key, mode)
+
+    @staticmethod
+    def trade_mode_capacity_multiplier(mode):
+        if mode == "sell":
+            return TRADE_SELL_LIMIT_MULTIPLIER
+        if mode == "buy":
+            return 1.0
+        return 1.0 + TRADE_SELL_LIMIT_MULTIPLIER
+
+    def trade_logistics_capacity_per_month(self, player, mode=None):
+        coverage_totals = {}
+        for tile in player.tiles:
+            for key, value in (getattr(tile, "building_coverage", {}) or {}).items():
+                coverage_totals[key] = coverage_totals.get(key, 0.0) + max(0.0, value)
+        supply = (player.supply_summary or {}).get("average", 1.0)
+        logistics = (player.production_modifiers or {}).get("logistics_efficiency", 1.0)
+        port_capacity = coverage_totals.get("port", 0.0) * TRADE_PORT_CAPACITY_PER_COVERAGE
+        warehouse_capacity = coverage_totals.get("warehouse", 0.0) * TRADE_WAREHOUSE_CAPACITY_PER_COVERAGE
+        supply_depot_capacity = coverage_totals.get("supply_depot", 0.0) * TRADE_SUPPLY_DEPOT_CAPACITY_PER_COVERAGE
+        settlement_capacity = (
+            coverage_totals.get("city", 0.0)
+            + coverage_totals.get("village", 0.0) * 0.5
+        ) * TRADE_SETTLEMENT_CAPACITY_PER_COVERAGE
+        scale = getattr(player, "starting_scale", 1.0)
+        base_capacity = TRADE_BASE_CAPACITY * max(0.5, scale)
+        supply_factor = 0.35 + self.clamp01(supply) * 0.65
+        capacity = max(
+            0.0,
+            (base_capacity + port_capacity + warehouse_capacity + supply_depot_capacity + settlement_capacity)
+            * logistics
+            * supply_factor,
+        )
+        return capacity * self.trade_mode_capacity_multiplier(mode)
+
+    def trade_max_capacity_per_month(self, player, mode=None):
+        scale = getattr(player, "starting_scale", 1.0)
+        modifiers = player.trade_modifiers or {}
+        external_limit = modifiers.get("external_market_limit", 1.0)
+        diplomacy_bonus = modifiers.get("diplomacy_trade_bonus", 0.0)
+        capacity = max(0.0, TRADE_BASE_MAX_CAPACITY * max(0.5, scale) * external_limit + diplomacy_bonus)
+        return capacity * self.trade_mode_capacity_multiplier(mode)
+
+    def trade_capacity_per_month(self, player, mode=None):
+        return min(
+            self.trade_logistics_capacity_per_month(player, mode),
+            self.trade_max_capacity_per_month(player, mode),
+        )
+
+    def estimate_monthly_trade_flows(self, player):
+        contracts = self.normalize_trade_contracts(player)
+        capacity_limits = {
+            "buy": self.trade_capacity_per_month(player, "buy"),
+            "sell": self.trade_capacity_per_month(player, "sell"),
+        }
+        remaining_capacity = dict(capacity_limits)
+        imports = {}
+        exports = {}
+        buy_cost = 0.0
+        sell_income = 0.0
+        capacity, used, _overflow = self.ensure_player_storage(player)
+        storage_free = {
+            category_key: max(0.0, capacity.get(category_key, 0.0) - used.get(category_key, 0.0))
+            for category_key in STORAGE_CATEGORIES
+        }
+
+        for contract in contracts:
+            resource_key = contract["resource"]
+            mode = contract["mode"]
+            if remaining_capacity.get(mode, 0.0) <= 0:
+                continue
+            amount = min(contract["amount"], remaining_capacity.get(mode, 0.0))
+            if mode == "sell":
+                amount = min(amount, self.stockpile_amount(player, resource_key))
+                storage_key = self.storage_bucket_for_resource(resource_key)
+                storage_free[storage_key] = storage_free.get(storage_key, 0.0) + amount
+            else:
+                storage_key = self.storage_bucket_for_resource(resource_key)
+                amount = min(amount, storage_free.get(storage_key, 0.0))
+            if amount <= 0:
+                continue
+            price = self.trade_unit_price(player, resource_key, mode)
+            if mode == "buy":
+                imports[resource_key] = imports.get(resource_key, 0.0) + amount
+                buy_cost += amount * price
+                storage_free[storage_key] = max(0.0, storage_free.get(storage_key, 0.0) - amount)
+            else:
+                exports[resource_key] = exports.get(resource_key, 0.0) + amount
+                sell_income += amount * price
+            remaining_capacity[mode] = max(0.0, remaining_capacity.get(mode, 0.0) - amount)
+
+        capacity_used = {
+            mode: max(0.0, capacity_limits[mode] - remaining_capacity.get(mode, 0.0))
+            for mode in ("buy", "sell")
+        }
+
+        return {
+            "imports": imports,
+            "exports": exports,
+            "buy_cost": buy_cost,
+            "sell_income": sell_income,
+            "money_balance": sell_income - buy_cost,
+            "capacity_used": capacity_used["buy"] + capacity_used["sell"],
+            "capacity_limit": capacity_limits["buy"] + capacity_limits["sell"],
+            "buy_capacity_used": capacity_used["buy"],
+            "sell_capacity_used": capacity_used["sell"],
+            "buy_capacity_limit": capacity_limits["buy"],
+            "sell_capacity_limit": capacity_limits["sell"],
+            "logistics_capacity_limit": self.trade_logistics_capacity_per_month(player),
+            "max_capacity_limit": self.trade_max_capacity_per_month(player),
+            "buy_logistics_capacity_limit": self.trade_logistics_capacity_per_month(player, "buy"),
+            "sell_logistics_capacity_limit": self.trade_logistics_capacity_per_month(player, "sell"),
+            "buy_max_capacity_limit": self.trade_max_capacity_per_month(player, "buy"),
+            "sell_max_capacity_limit": self.trade_max_capacity_per_month(player, "sell"),
+        }
+
+    def trade_weekly_capacity_limits(self, player):
+        return {
+            "buy": self.trade_capacity_per_month(player, "buy") * TRADE_WEEKLY_FRACTION,
+            "sell": self.trade_capacity_per_month(player, "sell") * TRADE_WEEKLY_FRACTION,
+        }
+
+    def collect_player_market_orders(self, player, weekly_fraction=TRADE_WEEKLY_FRACTION, enforce_budget=True):
+        contracts = self.normalize_trade_contracts(player)
+        remaining_capacity = self.trade_weekly_capacity_limits(player)
+        capacity, used, _overflow = self.ensure_player_storage(player)
+        storage_free = {
+            category_key: max(0.0, capacity.get(category_key, 0.0) - used.get(category_key, 0.0))
+            for category_key in STORAGE_CATEGORIES
+        }
+        available_budget = max(0.0, player.budget)
+        orders = []
+
+        for contract in contracts:
+            resource_key = contract["resource"]
+            mode = contract["mode"]
+            if remaining_capacity.get(mode, 0.0) <= 0:
+                continue
+            amount = min(contract["amount"] * weekly_fraction, remaining_capacity.get(mode, 0.0))
+            if mode == "buy":
+                storage_key = self.storage_bucket_for_resource(resource_key)
+                amount = min(amount, storage_free.get(storage_key, 0.0))
+                if enforce_budget:
+                    unit_price = self.trade_unit_price(player, resource_key, "buy")
+                    cost = amount * unit_price
+                    if cost > available_budget and cost > 0:
+                        amount *= max(0.0, available_budget / cost)
+            else:
+                amount = min(amount, self.stockpile_amount(player, resource_key))
+            if amount <= 0:
+                continue
+            orders.append({
+                "player": player,
+                "resource": resource_key,
+                "mode": mode,
+                "amount": amount,
+            })
+            remaining_capacity[mode] = max(0.0, remaining_capacity.get(mode, 0.0) - amount)
+            if mode == "buy":
+                storage_key = self.storage_bucket_for_resource(resource_key)
+                storage_free[storage_key] = max(0.0, storage_free.get(storage_key, 0.0) - amount)
+                if enforce_budget:
+                    available_budget = max(0.0, available_budget - amount * self.trade_unit_price(player, resource_key, "buy"))
+            else:
+                storage_key = self.storage_bucket_for_resource(resource_key)
+                storage_free[storage_key] = storage_free.get(storage_key, 0.0) + amount
+        return orders
+
+    def external_market_volume_for_resource(self, resource_key, weekly_total_trade_capacity):
+        rarity = MARKET_RESOURCE_RARITY.get(resource_key, 0.45)
+        return max(750.0, weekly_total_trade_capacity * max(0.05, rarity) * 0.55)
+
+    def update_market_prices_from_orders(self, orders):
+        market_state = self.simulation_server.market_state
+        keys = self.tradeable_resource_keys()
+        weekly_total_trade_capacity = sum(
+            self.trade_capacity_per_month(player) * TRADE_WEEKLY_FRACTION
+            for player in self.players
+        )
+        demand = {key: 0.0 for key in keys}
+        supply = {key: 0.0 for key in keys}
+        for order in orders:
+            bucket = demand if order["mode"] == "buy" else supply
+            bucket[order["resource"]] = bucket.get(order["resource"], 0.0) + order["amount"]
+
+        market_state.previous_prices = dict(market_state.current_prices or {})
+        external_demand = {}
+        external_supply = {}
+        total_market_demand = {}
+        total_market_supply = {}
+        new_prices = {}
+        for resource_key in keys:
+            base_price = market_state.ensure_resource(resource_key)
+            external_volume = self.external_market_volume_for_resource(resource_key, weekly_total_trade_capacity)
+            external_demand[resource_key] = external_volume
+            external_supply[resource_key] = external_volume
+            total_demand = demand.get(resource_key, 0.0) + external_volume
+            total_supply = supply.get(resource_key, 0.0) + external_volume
+            total_market_demand[resource_key] = total_demand
+            total_market_supply[resource_key] = total_supply
+            denominator = max(1.0, min(total_demand, total_supply))
+            imbalance = (total_demand - total_supply) / denominator
+            volatility = MARKET_RESOURCE_VOLATILITY.get(resource_key, 1.0)
+            base_change = max(
+                -MARKET_MAX_WEEKLY_PRICE_MOVE,
+                min(MARKET_MAX_WEEKLY_PRICE_MOVE, imbalance * 0.10 * volatility),
+            )
+            old_shock = market_state.price_shocks.get(resource_key, 0.0)
+            shock = old_shock * MARKET_SHOCK_DECAY + base_change * max(0.0, MARKET_SHOCK_FACTOR - 1.0)
+            shock = max(-MARKET_MAX_WEEKLY_PRICE_MOVE, min(MARKET_MAX_WEEKLY_PRICE_MOVE, shock))
+            old_price = market_state.current_prices.get(resource_key, base_price)
+            target_price = base_price * max(0.25, 1.0 + base_change + shock)
+            new_price = old_price + (target_price - old_price) * MARKET_PRICE_SMOOTHING
+            new_prices[resource_key] = max(base_price * 0.25, min(base_price * 4.0, new_price))
+            market_state.price_shocks[resource_key] = shock
+
+        linked_prices = dict(new_prices)
+        for target_key, sources in MARKET_LINKED_PRICE_EFFECTS.items():
+            if target_key not in linked_prices:
+                continue
+            source_pressure = 0.0
+            weight_total = 0.0
+            for source_key, weight in sources.items():
+                base = market_state.base_prices.get(source_key, TRADE_BASE_PRICES.get(source_key, 60.0))
+                source_price = new_prices.get(source_key, market_state.current_prices.get(source_key, base))
+                if base <= 0:
+                    continue
+                source_pressure += (source_price / base - 1.0) * weight
+                weight_total += weight
+            if weight_total <= 0:
+                continue
+            base = market_state.base_prices.get(target_key, TRADE_BASE_PRICES.get(target_key, 60.0))
+            linked_target = base * max(0.25, 1.0 + source_pressure)
+            linked_prices[target_key] = linked_prices[target_key] + (linked_target - linked_prices[target_key]) * MARKET_LINKED_PRICE_SMOOTHING
+
+        market_state.current_prices = {
+            key: max(market_state.base_prices.get(key, 60.0) * 0.25, min(market_state.base_prices.get(key, 60.0) * 4.0, value))
+            for key, value in linked_prices.items()
+        }
+        market_state.demand = total_market_demand
+        market_state.supply = total_market_supply
+        market_state.external_demand = external_demand
+        market_state.external_supply = external_supply
+        for key, price in market_state.current_prices.items():
+            history = market_state.history.setdefault(key, [])
+            history.append(price)
+            if len(history) > MARKET_HISTORY_LIMIT:
+                del history[:-MARKET_HISTORY_LIMIT]
+        market_state.revision += 1
+
+    def execute_market_orders(self, orders):
+        money_by_player = {}
+        for order in orders:
+            player = order["player"]
+            resource_key = order["resource"]
+            mode = order["mode"]
+            amount = order["amount"]
+            price = self.trade_unit_price(player, resource_key, mode)
+            if mode == "buy":
+                amount = min(amount, self.storage_free_capacity_for_resource(player, resource_key))
+                cost = amount * price
+                if cost > player.budget and cost > 0:
+                    amount *= max(0.0, player.budget / cost)
+                    cost = amount * price
+                accepted = self.add_to_stockpile(player, resource_key, amount)
+                cost = accepted * price
+                player.budget -= cost
+                money_by_player[player.id] = money_by_player.get(player.id, 0.0) - cost
+            else:
+                amount = min(amount, self.stockpile_amount(player, resource_key))
+                sold = self.consume_from_stockpile(player, resource_key, amount)
+                income = sold * price
+                player.budget += income
+                money_by_player[player.id] = money_by_player.get(player.id, 0.0) + income
+        for player in self.players:
+            if money_by_player.get(player.id, 0.0) != 0.0:
+                self.mark_player_resource_balance_dirty(player)
+        return money_by_player
+
+    def run_weekly_market_tick(self):
+        orders = []
+        for player in self.players:
+            orders.extend(self.collect_player_market_orders(player, TRADE_WEEKLY_FRACTION, enforce_budget=True))
+        self.update_market_prices_from_orders(orders)
+        money_by_player = self.execute_market_orders(orders)
+        for player in self.players:
+            self.recalculate_monthly_balance(player)
+            self.mark_player_resource_balance_dirty(player)
+        self.trade_panel_cache = None
+        return money_by_player
 
     @staticmethod
     def construction_level_for_coverage(coverage):
@@ -2301,6 +3421,8 @@ class Game(arcade.View):
 
         if self.is_coastal_land_tile(tile):
             return "port"
+        if self.oil_gas_rig_score(player, tile) > 0.12:
+            return "oil_gas_rig"
         if self.mine_score(player, tile) > 0.12:
             return "mine"
         agriculture = self.agriculture_score(tile)
@@ -2549,6 +3671,10 @@ class Game(arcade.View):
                 return "Порт только рядом с водой"
         elif self.is_water_tile(tile):
             return "Нужна суша"
+        if building_key == "mine" and self.weighted_resource_score(tile, STARTING_SOLID_MINE_RESOURCE_WEIGHTS) <= 0:
+            return "Нужны твердые залежи"
+        if building_key == "oil_gas_rig" and self.weighted_resource_score(tile, STARTING_OIL_GAS_RIG_RESOURCE_WEIGHTS) <= 0:
+            return "Нужна нефть или газ"
         if not self.construction_cost(player, tile, building_key, coverage):
             return "Нельзя улучшить"
         return None
@@ -2590,13 +3716,26 @@ class Game(arcade.View):
 
         speed = self.build_power(player)
         cost = dict(cost)
-        cost["resources_spent"] = {}
+        resources_spent = {}
+        resource_costs = cost.get("resource_costs", {})
+        cost["resources_spent"] = resources_spent
         player.construction_queue.append({
             "tile": tile,
+            "building": building_key,
+            "from_coverage": cost.get("from_coverage", current_coverage),
+            "target_coverage": cost.get("target_coverage", current_coverage),
+            "money_cost": cost.get("money_cost", 0.0),
+            "resource_costs": resource_costs,
+            "resources_spent": resources_spent,
             "cost": cost,
             "speed": speed,
             "progress": 0.0,
             "money_paid": False,
+            "status": "queued",
+            "status_reason": "Ждет очереди",
+            "stall_reasons": [],
+            "missing_money": 0.0,
+            "missing_resources": {},
         })
         if refresh:
             self.refresh_construction_placement_tile(tile, building_key)
@@ -2729,9 +3868,210 @@ class Game(arcade.View):
         self.recalculate_monthly_balance(player)
         return True
 
+    def sync_construction_project_fields(self, project):
+        cost = project.setdefault("cost", {})
+        building_key = project.get("building") or cost.get("building")
+        if building_key:
+            project["building"] = building_key
+            cost["building"] = building_key
+
+        for key in ("from_coverage", "target_coverage", "money_cost", "work_required", "level"):
+            if key not in project and key in cost:
+                project[key] = cost[key]
+            elif key in project:
+                cost[key] = project[key]
+
+        resource_costs = project.get("resource_costs")
+        if resource_costs is None:
+            resource_costs = cost.get("resource_costs", {})
+        project["resource_costs"] = resource_costs
+        cost["resource_costs"] = resource_costs
+
+        resources_spent = project.get("resources_spent")
+        if resources_spent is None:
+            resources_spent = cost.get("resources_spent", {})
+        project["resources_spent"] = resources_spent
+        cost["resources_spent"] = resources_spent
+
+        project.setdefault("status", "queued")
+        project.setdefault("status_reason", "Ждет очереди")
+        project.setdefault("stall_reasons", [])
+        project.setdefault("missing_money", 0.0)
+        project.setdefault("missing_resources", {})
+        project.setdefault("progress", 0.0)
+        project.setdefault("money_paid", False)
+        project.setdefault("paused", False)
+        return cost
+
+    @staticmethod
+    def construction_project_status_label(status):
+        labels = {
+            "queued": "Ждет очереди",
+            "building": "Строится",
+            "waiting_money": "Ждет деньги",
+            "waiting_resources": "Ждет ресурсы",
+            "waiting_power": "Нет строймощности",
+            "paused": "Пауза",
+            "complete": "Готово",
+        }
+        return labels.get(status, "Ждет")
+
+    def set_construction_project_status(
+        self,
+        project,
+        status,
+        reasons=None,
+        missing_money=0.0,
+        missing_resources=None,
+    ):
+        reasons = reasons or []
+        missing_resources = missing_resources or {}
+        project["status"] = status
+        project["stall_reasons"] = reasons
+        project["status_reason"] = "; ".join(reasons) if reasons else self.construction_project_status_label(status)
+        project["missing_money"] = max(0.0, missing_money)
+        project["missing_resources"] = dict(missing_resources)
+
+    def construction_project_progress_delta(self, player, project, month_fraction=1.0):
+        cost = self.sync_construction_project_fields(project)
+        speed = self.build_power(player)
+        project["speed"] = speed
+        if speed <= 0:
+            return 0.0
+        work_required = max(1.0, cost.get("work_required", project.get("work_required", 1.0)))
+        progress = max(0.0, min(1.0, project.get("progress", 0.0)))
+        return min(1.0 - progress, speed * max(0.0, month_fraction) / work_required)
+
+    def construction_project_resource_needs(self, project, progress_delta):
+        self.sync_construction_project_fields(project)
+        progress = max(0.0, min(1.0, project.get("progress", 0.0)))
+        target_progress = min(1.0, progress + max(0.0, progress_delta))
+        resources_spent = project.get("resources_spent", {})
+        needs = {}
+        for key, total_amount in (project.get("resource_costs", {}) or {}).items():
+            if total_amount <= 0:
+                continue
+            target_spent = total_amount * target_progress
+            amount_needed = max(0.0, target_spent - resources_spent.get(key, 0.0))
+            if amount_needed > 0:
+                needs[key] = amount_needed
+        return needs
+
+    def construction_project_remaining_months(self, player, project):
+        cost = self.sync_construction_project_fields(project)
+        speed = self.build_power(player)
+        if speed <= 0:
+            return None
+        progress = max(0.0, min(1.0, project.get("progress", 0.0)))
+        work_required = max(0.0, cost.get("work_required", project.get("work_required", 0.0)))
+        return work_required * max(0.0, 1.0 - progress) / speed
+
+    def evaluate_construction_project_status(
+        self,
+        player,
+        project,
+        month_fraction=1.0,
+        stock_amount_func=None,
+        update=True,
+    ):
+        cost = self.sync_construction_project_fields(project)
+        stock_amount_func = stock_amount_func or (lambda key: self.stockpile_amount(player, key))
+        speed = self.build_power(player) if player else 0.0
+        project["speed"] = speed
+        progress = max(0.0, min(1.0, project.get("progress", 0.0)))
+        money_cost = max(0.0, cost.get("money_cost", project.get("money_cost", 0.0)))
+
+        info = {
+            "status": "queued",
+            "reasons": [],
+            "missing_money": 0.0,
+            "missing_resources": {},
+            "resource_needs": {},
+            "progress_delta": 0.0,
+            "remaining_months": self.construction_project_remaining_months(player, project),
+        }
+
+        if progress >= 0.999:
+            info["status"] = "complete"
+            if update:
+                self.set_construction_project_status(project, "complete")
+            return info
+
+        if project.get("paused", False):
+            info["status"] = "paused"
+            info["reasons"] = ["остановлено игроком"]
+            if update:
+                self.set_construction_project_status(project, "paused", info["reasons"])
+            return info
+
+        if not project.get("money_paid", False) and player and player.budget < money_cost:
+            missing_money = money_cost - player.budget
+            info.update({
+                "status": "waiting_money",
+                "missing_money": missing_money,
+                "reasons": [f"не хватает денег {self.format_money(missing_money)}"],
+            })
+            if update:
+                self.set_construction_project_status(
+                    project,
+                    "waiting_money",
+                    info["reasons"],
+                    missing_money=missing_money,
+                )
+            return info
+
+        if speed <= 0:
+            info.update({
+                "status": "waiting_power",
+                "reasons": ["нет строительной мощности"],
+            })
+            if update:
+                self.set_construction_project_status(project, "waiting_power", info["reasons"])
+            return info
+
+        progress_delta = self.construction_project_progress_delta(player, project, month_fraction)
+        info["progress_delta"] = progress_delta
+        if progress_delta <= 0:
+            info["status"] = "complete"
+            if update:
+                self.set_construction_project_status(project, "complete")
+            return info
+
+        resource_needs = self.construction_project_resource_needs(project, progress_delta)
+        missing_resources = {}
+        for key, amount_needed in resource_needs.items():
+            available = stock_amount_func(key)
+            if available + 0.001 < amount_needed:
+                missing_resources[key] = amount_needed - available
+
+        info["resource_needs"] = resource_needs
+        if missing_resources:
+            reasons = [
+                f"нет {self.resource_display_name(key)} {self.format_resource_amount(amount)}"
+                for key, amount in sorted(missing_resources.items(), key=lambda item: item[1], reverse=True)
+            ]
+            info.update({
+                "status": "waiting_resources",
+                "missing_resources": missing_resources,
+                "reasons": reasons,
+            })
+            if update:
+                self.set_construction_project_status(
+                    project,
+                    "waiting_resources",
+                    reasons,
+                    missing_resources=missing_resources,
+                )
+            return info
+
+        info["status"] = "building"
+        if update:
+            self.set_construction_project_status(project, "building")
+        return info
+
     def complete_construction_project(self, player, project):
         tile = project.get("tile")
-        cost = project.get("cost", {})
+        cost = self.sync_construction_project_fields(project)
         building_key = project.get("building") or cost.get("building")
         if not tile or not building_key:
             return
@@ -2746,7 +4086,10 @@ class Game(arcade.View):
             tile.buildings.append(building_key)
         self.recalculate_state_resources(player)
         self.update_tile_production_cache(tile)
+        self.recalculate_player_supply(player)
+        self.mark_player_storage_dirty(player)
         self.distribute_player_stockpiles_to_tiles(player)
+        self.recalculate_resource_balance_breakdown(player)
         self.recalculate_monthly_balance(player)
         self.tile_visual_revision += 1
         self.invalidate_tile_visual_cache()
@@ -2756,6 +4099,9 @@ class Game(arcade.View):
         if not player.construction_queue:
             return
         project = player.construction_queue[0]
+        if project.get("paused", False):
+            self.evaluate_construction_project_status(player, project, update=True)
+            return
         month_fraction = max(0.0, (elapsed_hours or 0.0) / PRODUCTION_MONTH_HOURS)
         if month_fraction <= 0:
             return
@@ -2764,35 +4110,23 @@ class Game(arcade.View):
         money_cost = cost.get("money_cost", 0.0)
         if not project.get("money_paid", False):
             if player.budget < money_cost:
-                project["speed"] = self.build_power(player)
+                self.evaluate_construction_project_status(player, project, month_fraction)
                 return
             player.budget -= money_cost
             project["money_paid"] = True
 
-        resource_costs = cost.get("resource_costs", {})
-        resources_spent = cost.setdefault("resources_spent", {})
-        project["speed"] = self.build_power(player)
-        progress_delta = project["speed"] * month_fraction / max(1.0, cost.get("work_required", 1.0))
-        old_progress = max(0.0, min(1.0, project.get("progress", 0.0)))
-        planned_progress = min(1.0, old_progress + progress_delta)
-        new_progress = planned_progress
-        for key, total_amount in resource_costs.items():
-            if total_amount <= 0:
-                continue
-            already_spent = resources_spent.get(key, 0.0)
-            available_for_project = already_spent + self.stockpile_amount(player, key)
-            new_progress = min(new_progress, available_for_project / total_amount)
-        actual_delta = max(0.0, new_progress - old_progress)
-        if actual_delta <= 0:
+        status_info = self.evaluate_construction_project_status(player, project, month_fraction)
+        if status_info["status"] != "building":
             return
 
-        for key, total_amount in resource_costs.items():
-            already_spent = resources_spent.get(key, 0.0)
-            target_spent = total_amount * new_progress
-            consumed = self.consume_from_stockpile(player, key, max(0.0, target_spent - already_spent))
-            resources_spent[key] = already_spent + consumed
+        resources_spent = project.get("resources_spent", cost.setdefault("resources_spent", {}))
+        for key, amount_needed in status_info["resource_needs"].items():
+            consumed = self.consume_from_stockpile(player, key, amount_needed)
+            resources_spent[key] = resources_spent.get(key, 0.0) + consumed
 
-        project["progress"] = new_progress
+        project["progress"] = min(1.0, project.get("progress", 0.0) + status_info["progress_delta"])
+        self.set_construction_project_status(project, "building")
+        self.mark_player_resource_balance_dirty(player)
         if project["progress"] >= 0.999:
             self.complete_construction_project(player, project)
             player.construction_queue.pop(0)
@@ -2802,78 +4136,42 @@ class Game(arcade.View):
         if not player.construction_queue:
             return {}
         project = player.construction_queue[0]
-
-        cost = project.get("cost", {})
-        if not project.get("money_paid", False) and player.budget < cost.get("money_cost", 0.0):
+        if project.get("paused", False):
             return {}
-
-        resource_costs = cost.get("resource_costs", {})
-        if not resource_costs:
+        status_info = self.evaluate_construction_project_status(
+            player,
+            project,
+            month_fraction=CONSTRUCTION_STATUS_CHECK_MONTH_FRACTION,
+        )
+        if status_info["status"] != "building":
             return {}
-
-        speed = self.build_power(player)
-        if speed <= 0:
-            return {}
-
-        old_progress = max(0.0, min(1.0, project.get("progress", 0.0)))
-        planned_delta = speed / max(1.0, cost.get("work_required", 1.0))
-        planned_progress = min(1.0, old_progress + planned_delta)
-        new_progress = planned_progress
-        resources_spent = cost.setdefault("resources_spent", {})
-        for key, total_amount in resource_costs.items():
-            if total_amount <= 0:
-                continue
-            already_spent = resources_spent.get(key, 0.0)
-            available_for_project = already_spent + self.stockpile_amount(player, key)
-            new_progress = min(new_progress, available_for_project / total_amount)
-
-        progress_delta = max(0.0, new_progress - old_progress)
-        if progress_delta <= 0:
-            return {}
-
-        return {
-            key: total_amount * progress_delta
-            for key, total_amount in resource_costs.items()
-            if total_amount > 0
-        }
+        monthly_delta = self.construction_project_progress_delta(player, project, month_fraction=1.0)
+        return self.construction_project_resource_needs(project, monthly_delta)
 
     def construction_stall_reasons(self, player):
         if not player.construction_queue:
             return []
         project = player.construction_queue[0]
-        cost = project.get("cost", {})
-        reasons = []
-        money_cost = cost.get("money_cost", 0.0)
-        if not project.get("money_paid", False):
-            if player.budget < money_cost:
-                reasons.append(f"не хватает денег {self.format_money(money_cost - player.budget)}")
-            return reasons
-
-        speed = self.build_power(player)
-        if speed <= 0:
-            reasons.append("нет строительной мощности")
-
-        resource_costs = cost.get("resource_costs", {})
-        resources_spent = cost.setdefault("resources_spent", {})
-        for key, total_amount in resource_costs.items():
-            if total_amount <= 0:
-                continue
-            progress = max(0.0, min(1.0, project.get("progress", 0.0)))
-            required_now = total_amount * progress
-            spent = resources_spent.get(key, 0.0)
-            if spent + self.stockpile_amount(player, key) <= required_now + 0.001:
-                reasons.append(f"нет {self.resource_display_name(key)}")
-
-        return reasons
+        if project.get("paused", False):
+            return []
+        status_info = self.evaluate_construction_project_status(
+            player,
+            project,
+            month_fraction=CONSTRUCTION_STATUS_CHECK_MONTH_FRACTION,
+        )
+        if status_info["status"] in ("waiting_money", "waiting_resources", "waiting_power"):
+            return status_info["reasons"]
+        return []
 
     def construction_warning_summary(self, player):
         reasons = self.construction_stall_reasons(player)
         if not reasons:
             return None
         project = player.construction_queue[0]
+        status_label = self.construction_project_status_label(project.get("status", "queued"))
         return {
             "level": "red",
-            "title": "Стройка остановлена",
+            "title": f"Стройка: {status_label}",
             "lines": [self.construction_project_label(project)] + reasons[:5],
         }
 
@@ -2923,18 +4221,75 @@ class Game(arcade.View):
     def monthly_tile_income(self, tile):
         return self.monthly_tile_population_income(tile) + self.monthly_tile_company_income(tile)
 
+    def monthly_government_expenses(self, player):
+        population_millions = max(0.0, (player.population or 0.0) / 1_000_000)
+        land_tiles = sum(1 for tile in player.tiles if not self.is_water_tile(tile))
+        return (
+            MONEY_GOVERNMENT_BASE_EXPENSE
+            + population_millions * MONEY_GOVERNMENT_PER_MILLION
+            + land_tiles * MONEY_GOVERNMENT_PER_TILE
+        )
+
+    def monthly_social_expenses(self, player):
+        expenses = 0.0
+        for tile in player.tiles:
+            population = self.estimated_tile_population(tile) or 0.0
+            if population <= 0:
+                continue
+            coverage = getattr(tile, "building_coverage", {}) or {}
+            city_share = self.clamp01(coverage.get("city", 0.0))
+            village_share = self.clamp01(coverage.get("village", 0.0))
+            rate = (
+                MONEY_SOCIAL_BASE_PER_MILLION
+                + MONEY_SOCIAL_CITY_BONUS * city_share
+                + MONEY_SOCIAL_VILLAGE_BONUS * village_share
+            )
+            expenses += population / 1_000_000 * rate
+        return expenses
+
+    @staticmethod
+    def monthly_infrastructure_expenses(player):
+        expenses = 0.0
+        for tile in player.tiles:
+            coverage = getattr(tile, "building_coverage", {}) or {}
+            for building_key, amount_per_coverage in INFRASTRUCTURE_UPKEEP_PER_COVERAGE.items():
+                expenses += max(0.0, coverage.get(building_key, 0.0)) * amount_per_coverage
+        return expenses
+
+    def monthly_army_expenses(self, player):
+        return MONEY_ARMY_BASE_EXPENSE
+
+    def monthly_expenses(self, player):
+        army = self.monthly_army_expenses(player)
+        government = self.monthly_government_expenses(player)
+        social = self.monthly_social_expenses(player)
+        infrastructure = self.monthly_infrastructure_expenses(player)
+        return {
+            "army": army,
+            "government": government,
+            "social": social,
+            "infrastructure": infrastructure,
+            "total": army + government + social + infrastructure,
+        }
+
     def recalculate_monthly_balance(self, player):
         population_income = self.monthly_population_income(player)
         company_income = self.monthly_company_income(player)
-        total_income = population_income + company_income
+        trade_balance = self.estimate_monthly_trade_flows(player)["money_balance"]
+        expenses = self.monthly_expenses(player)
+        total_income = population_income + company_income + trade_balance
+        total_balance = total_income - expenses["total"]
+        player.monthly_trade_balance = trade_balance
         player.monthly_income_breakdown = {
             "population": population_income,
             "companies": company_income,
+            "trade": trade_balance,
             "multiplier": 1.0,
             "total": total_income,
         }
-        player.monthly_balance = total_income
-        return total_income
+        player.monthly_expenses_breakdown = expenses
+        player.monthly_balance = total_balance
+        return total_balance
 
     def recalculate_all_monthly_balances(self):
         for player in self.players:
@@ -2944,8 +4299,16 @@ class Game(arcade.View):
         month_fraction = max(0.0, (elapsed_hours or 0.0) / PRODUCTION_MONTH_HOURS)
         if month_fraction <= 0:
             return
-        monthly_balance = self.recalculate_monthly_balance(player)
-        player.budget += monthly_balance * month_fraction
+        income_breakdown = player.monthly_income_breakdown or {}
+        if not income_breakdown:
+            self.recalculate_monthly_balance(player)
+            income_breakdown = player.monthly_income_breakdown or {}
+        population_income = income_breakdown.get("population", 0.0)
+        company_income = income_breakdown.get("companies", 0.0)
+        expenses = player.monthly_expenses_breakdown or self.monthly_expenses(player)
+        player.monthly_expenses_breakdown = expenses
+        player.budget += (population_income + company_income - expenses.get("total", 0.0)) * month_fraction
+        self.mark_player_resource_balance_dirty(player)
 
     def run_production_stage(self, player, stage, month_fraction):
         if stage == "agriculture":
@@ -3014,7 +4377,7 @@ class Game(arcade.View):
             return
         for stage in PRODUCTION_STAGES:
             self.run_production_stage(player, stage, month_fraction)
-        self.distribute_player_stockpiles_to_tiles(player)
+        self.mark_player_resource_balance_dirty(player)
 
     @staticmethod
     def top_resource_items(resources, limit=3):
@@ -3026,11 +4389,13 @@ class Game(arcade.View):
 
     @staticmethod
     def format_resource_amount(amount):
-        if amount >= 1_000_000:
-            return f"{amount / 1_000_000:.1f}M"
-        if amount >= 1_000:
-            return f"{amount / 1_000:.1f}K"
-        return f"{amount:.0f}"
+        sign = "-" if amount < 0 else ""
+        value = abs(amount)
+        if value >= 1_000_000:
+            return f"{sign}{value / 1_000_000:.1f}M"
+        if value >= 1_000:
+            return f"{sign}{value / 1_000:.1f}K"
+        return f"{sign}{value:.0f}"
 
     @staticmethod
     def resource_duration_months(stock, production, consumption):
@@ -3124,6 +4489,12 @@ class Game(arcade.View):
         if value >= 1_000:
             return f"{sign}${value / 1_000:.1f}K"
         return f"{sign}${value:.0f}"
+
+    @staticmethod
+    def format_money_delta(amount):
+        if amount > 0:
+            return f"+{Game.format_money(amount)}"
+        return Game.format_money(amount)
 
     @staticmethod
     def format_population(population):
@@ -3230,6 +4601,207 @@ class Game(arcade.View):
         weight += coverage.get("farms", 0.0) * 1.5
         return max(0.05, weight)
 
+    def tile_population_capacity(self, tile):
+        if self.is_water_tile(tile):
+            capacity = POPULATION_CAPACITY_BASE_WATER
+        else:
+            capacity = POPULATION_CAPACITY_BASE_LAND
+        coverage = getattr(tile, "building_coverage", {}) or {}
+        for building_key, capacity_per_coverage in POPULATION_CAPACITY_PER_COVERAGE.items():
+            capacity += max(0.0, coverage.get(building_key, 0.0)) * capacity_per_coverage
+        return max(0.0, capacity)
+
+    def tile_population_max_capacity(self, tile):
+        return self.tile_population_capacity(tile) * POPULATION_MAX_OVERCAPACITY
+
+    @staticmethod
+    def tile_population(tile):
+        return max(0.0, getattr(tile, "population", 0.0) or 0.0)
+
+    def sync_player_population_from_tiles(self, player):
+        total = sum(self.tile_population(tile) for tile in player.tiles)
+        if total > 0:
+            player.population = total
+        return player.population or 0.0
+
+    def add_population_to_available_capacity(self, player, amount):
+        remaining = max(0.0, amount)
+        added = 0.0
+        for _pass in range(3):
+            if remaining <= 0:
+                break
+            candidates = []
+            total_weight = 0.0
+            for tile in player.tiles:
+                free_capacity = max(0.0, self.tile_population_max_capacity(tile) - self.tile_population(tile))
+                if free_capacity <= 1:
+                    continue
+                weight = free_capacity * (0.35 + self.tile_population_weight(tile))
+                candidates.append((tile, free_capacity, weight))
+                total_weight += weight
+            if total_weight <= 0:
+                break
+            pass_added = 0.0
+            for tile, free_capacity, weight in candidates:
+                share = remaining * weight / total_weight
+                delta = min(free_capacity, share)
+                if delta <= 0:
+                    continue
+                tile.population = self.tile_population(tile) + delta
+                pass_added += delta
+            remaining -= pass_added
+            added += pass_added
+            if pass_added <= 0:
+                break
+        return added
+
+    def enforce_population_capacity(self, player):
+        excess = 0.0
+        for tile in player.tiles:
+            population = self.tile_population(tile)
+            max_capacity = self.tile_population_max_capacity(tile)
+            if population <= max_capacity:
+                continue
+            overflow = population - max_capacity
+            tile.population = max_capacity
+            excess += overflow
+        if excess > 0:
+            self.add_population_to_available_capacity(player, excess)
+        self.sync_player_population_from_tiles(player)
+
+    def population_resource_ratio(self, player, resource_key):
+        monthly_need = self.production_amount_for_key(player, resource_key, "inputs")
+        if monthly_need <= 0:
+            return 1.25
+        stock = self.stockpile_amount(player, resource_key)
+        monthly_output = self.production_amount_for_key(player, resource_key, "outputs")
+        return max(0.0, min(1.25, (stock + monthly_output) / monthly_need))
+
+    def population_growth_multiplier(self, player):
+        food_ratio = self.population_resource_ratio(player, "food")
+        goods_ratio = self.population_resource_ratio(player, "consumer_goods")
+        welfare = min(food_ratio, goods_ratio)
+        if welfare >= 1.0:
+            welfare_factor = min(1.15, 0.95 + (welfare - 1.0) * 0.2)
+        elif welfare >= 0.70:
+            welfare_factor = (welfare - 0.70) / 0.30
+        else:
+            welfare_factor = -min(2.0, (0.70 - welfare) / 0.70 * 1.8)
+
+        supply = (player.supply_summary or {}).get("average", 1.0)
+        supply_factor = 0.45 + self.clamp01(supply) * 0.55
+        return welfare_factor * supply_factor
+
+    def apply_positive_population_growth(self, player, month_fraction, growth_multiplier):
+        monthly_rate = POPULATION_BASE_ANNUAL_GROWTH / 12
+        if monthly_rate <= 0 or month_fraction <= 0 or growth_multiplier <= 0:
+            return 0.0
+
+        added = 0.0
+        for tile in player.tiles:
+            population = self.tile_population(tile)
+            max_population = self.tile_population_capacity(tile)
+            max_overcapacity = self.tile_population_max_capacity(tile)
+            if population <= 0 or max_population <= 0:
+                continue
+            free_capacity = max(0.0, max_overcapacity - population)
+            if free_capacity <= 0:
+                continue
+            capacity_pressure = 0.1 + 0.9 * ((POPULATION_MAX_OVERCAPACITY * max_population - population) / population)
+            capacity_pressure = max(0.0, capacity_pressure)
+            delta = population * monthly_rate * month_fraction * growth_multiplier * capacity_pressure
+            delta = min(free_capacity, delta)
+            if delta <= 0:
+                continue
+            tile.population = population + delta
+            added += delta
+
+        if added > 0:
+            self.sync_player_population_from_tiles(player)
+        return added
+
+    def apply_population_delta(self, player, delta):
+        if abs(delta) <= 0:
+            return 0.0
+        if delta > 0:
+            added = self.add_population_to_available_capacity(player, delta)
+            self.sync_player_population_from_tiles(player)
+            return added
+
+        total_population = self.sync_player_population_from_tiles(player)
+        loss = min(total_population, abs(delta))
+        if total_population <= 0 or loss <= 0:
+            return 0.0
+        for tile in player.tiles:
+            population = self.tile_population(tile)
+            if population <= 0:
+                continue
+            tile.population = max(0.0, population - loss * population / total_population)
+        self.sync_player_population_from_tiles(player)
+        return -loss
+
+    def grow_settlements_from_overcrowding(self, player, month_fraction):
+        changed = False
+        for tile in player.tiles:
+            coverage = getattr(tile, "building_coverage", {}) or {}
+            population = self.tile_population(tile)
+            capacity = self.tile_population_capacity(tile)
+            if population <= 0 or capacity <= 0:
+                continue
+            overcrowding = self.clamp01((population / capacity - 1.0) / (POPULATION_MAX_OVERCAPACITY - 1.0))
+            if overcrowding <= 0:
+                continue
+            for building_key, annual_growth in (
+                ("city", CITY_NATURAL_ANNUAL_GROWTH),
+                ("village", VILLAGE_NATURAL_ANNUAL_GROWTH),
+            ):
+                current = coverage.get(building_key, 0.0)
+                if current <= 0:
+                    continue
+                max_coverage = INFRASTRUCTURE_COVERAGE_LIMITS[building_key][1]
+                delta = current * annual_growth / 12 * month_fraction * overcrowding
+                if delta <= 0:
+                    continue
+                new_value = min(max_coverage, current + delta)
+                if new_value > current:
+                    coverage[building_key] = new_value
+                    changed = True
+        if changed:
+            self.recalculate_state_production_cache(player)
+            self.recalculate_player_supply(player)
+            self.mark_player_storage_dirty(player)
+            self.tile_visual_revision += 1
+            self.invalidate_tile_visual_cache()
+            self.invalidate_construction_placement_cache()
+        return changed
+
+    def run_population_tick(self, player, elapsed_hours=None):
+        month_fraction = max(0.0, (elapsed_hours or 0.0) / PRODUCTION_MONTH_HOURS)
+        if month_fraction <= 0:
+            return
+        player.population_month_accumulator += month_fraction
+        if player.population_month_accumulator < 1.0:
+            return
+
+        accumulated_months = player.population_month_accumulator
+        player.population_month_accumulator = 0.0
+        self.enforce_population_capacity(player)
+        population = self.sync_player_population_from_tiles(player)
+        if population <= 0:
+            return
+
+        growth_multiplier = self.population_growth_multiplier(player)
+        if growth_multiplier > 0:
+            self.apply_positive_population_growth(player, accumulated_months, growth_multiplier)
+        else:
+            monthly_rate = POPULATION_BASE_ANNUAL_GROWTH / 12
+            growth = population * monthly_rate * accumulated_months * growth_multiplier
+            self.apply_population_delta(player, growth)
+        self.grow_settlements_from_overcrowding(player, accumulated_months)
+        self.enforce_population_capacity(player)
+        self.recalculate_monthly_balance(player)
+        self.mark_player_resource_balance_dirty(player)
+
     def hex_resource_rows(self, tile):
         stockpiles = {}
         if tile.owner:
@@ -3275,6 +4847,12 @@ class Game(arcade.View):
 
     def hex_resource_rows_for_tiles(self, tiles):
         tiles = [tile for tile in tiles if tile]
+        owners = {}
+        for tile in tiles:
+            if tile.owner:
+                owners[id(tile.owner)] = tile.owner
+        for owner in owners.values():
+            self.ensure_player_tile_stockpiles(owner)
         if len(tiles) == 1:
             return self.hex_resource_rows(tiles[0])
 
@@ -3377,39 +4955,17 @@ class Game(arcade.View):
         return metals, fuel, consumer_goods
 
     def resource_problem_summary(self, player):
-        stockpiles = self.ensure_player_stockpiles(player)
-        construction_consumption = self.active_construction_consumption(player)
-        cache = player.production_cache or self.recalculate_state_production_cache(player)
+        breakdown = self.cached_resource_balance_breakdown(player)
         problems = {
             "raw": {"yellow": [], "red": []},
             "semi_finished": {"yellow": [], "red": []},
             "finished": {"yellow": [], "red": []},
         }
-        for category in problems:
-            keys = set(stockpiles.get(category, {}).keys())
-            keys.update(self.resource_names_for_category(category))
-            keys.update(
-                key
-                for key in construction_consumption
-                if self.resource_category_for_key(key) == category
-            )
-            for stage in PRODUCTION_STAGES:
-                keys.update(
-                    key
-                    for key, amount in cache[stage]["inputs"].items()
-                    if amount > 0 and self.resource_category_for_key(key) == category
-                )
-            for key in keys:
-                stock = stockpiles.get(category, {}).get(key, 0.0)
-                production = self.production_amount_for_key(player, key, "outputs")
-                consumption = (
-                    self.production_amount_for_key(player, key, "inputs")
-                    + construction_consumption.get(key, 0.0)
-                )
-                net_consumption = max(0.0, consumption - production)
-                if net_consumption <= 0:
+        for category, entries in breakdown.items():
+            for key, entry in entries.items():
+                if entry.get("consumption", 0.0) <= entry.get("production", 0.0):
                     continue
-                months_left = self.resource_duration_months(stock, production, consumption)
+                months_left = entry.get("months")
                 if months_left is not None and months_left < 1:
                     problems[category]["red"].append(key)
                 elif months_left is not None and months_left < 3:
@@ -3418,46 +4974,47 @@ class Game(arcade.View):
         return problems
 
     def resource_surplus_summary(self, player):
-        stockpiles = self.ensure_player_stockpiles(player)
-        construction_consumption = self.active_construction_consumption(player)
-        cache = player.production_cache or self.recalculate_state_production_cache(player)
+        breakdown = self.cached_resource_balance_breakdown(player)
         surplus = {
             "raw": [],
             "semi_finished": [],
             "finished": [],
         }
-        for category in surplus:
-            keys = set(stockpiles.get(category, {}).keys())
-            keys.update(self.resource_names_for_category(category))
-            keys.update(
-                key
-                for key in construction_consumption
-                if self.resource_category_for_key(key) == category
-            )
-            for stage in PRODUCTION_STAGES:
-                keys.update(
-                    key
-                    for key, amount in cache[stage]["inputs"].items()
-                    if amount > 0 and self.resource_category_for_key(key) == category
-                )
-            for key in keys:
-                consumption = (
-                    self.production_amount_for_key(player, key, "inputs")
-                    + construction_consumption.get(key, 0.0)
-                )
-                if consumption <= 0:
-                    continue
-                stock = stockpiles.get(category, {}).get(key, 0.0)
-                if stock / consumption >= 6.0:
+        for category, entries in breakdown.items():
+            for key, entry in entries.items():
+                consumption = entry.get("consumption", 0.0)
+                if consumption > 0 and entry.get("stock", 0.0) / consumption >= 6.0:
                     surplus[category].append(key)
 
         return surplus
 
+    def storage_problem_summary(self, player):
+        self.ensure_player_storage(player)
+        problems = {"yellow": [], "red": []}
+        for category_key in STORAGE_CATEGORIES:
+            capacity = player.storage_capacity.get(category_key, 0.0)
+            used = player.storage_used.get(category_key, 0.0)
+            if capacity <= 0:
+                if used > 0:
+                    problems["red"].append(category_key)
+                continue
+            fullness = used / capacity
+            if fullness >= 1.0:
+                problems["red"].append(category_key)
+            elif fullness >= 0.88:
+                problems["yellow"].append(category_key)
+        return problems
+
     def resource_problem_level(self, player):
         problems = self.resource_problem_summary(player)
+        storage = self.storage_problem_summary(player)
         if any(problems[key]["red"] for key in problems):
             return "red"
+        if storage["red"]:
+            return "red"
         if any(problems[key]["yellow"] for key in problems):
+            return "yellow"
+        if storage["yellow"]:
             return "yellow"
         return "green"
 
@@ -4064,7 +5621,7 @@ class Game(arcade.View):
         if self.is_water_tile(tile):
             return 0.0
 
-        resource_score = self.weighted_resource_score(tile, STARTING_MINE_RESOURCE_WEIGHTS)
+        resource_score = self.weighted_resource_score(tile, STARTING_SOLID_MINE_RESOURCE_WEIGHTS)
         if resource_score <= 0:
             return 0.0
 
@@ -4072,19 +5629,41 @@ class Game(arcade.View):
         passability = self.clamp01(getattr(tile, "passability", 0.0))
         return self.clamp01(resource_score * 0.74 + nearby_city * 0.12 + passability * 0.14)
 
+    def oil_gas_rig_score(self, player, tile):
+        if self.is_water_tile(tile):
+            return 0.0
+
+        resource_score = self.weighted_resource_score(tile, STARTING_OIL_GAS_RIG_RESOURCE_WEIGHTS)
+        if resource_score <= 0:
+            return 0.0
+
+        nearby_city = self.nearby_coverage_score(player, tile, ["city"], 3)
+        nearby_refinery = self.nearby_coverage_score(player, tile, ["refinery"], 3)
+        nearby_storage = self.nearby_coverage_score(player, tile, ["fuel_storage"], 2)
+        passability = self.clamp01(getattr(tile, "passability", 0.0))
+        return self.clamp01(
+            resource_score * 0.70
+            + nearby_city * 0.08
+            + nearby_refinery * 0.10
+            + nearby_storage * 0.06
+            + passability * 0.06
+        )
+
     def industry_score(self, player, tile):
         if self.is_water_tile(tile):
             return 0.0
 
         nearby_city = self.nearby_coverage_score(player, tile, ["city"], 3)
         nearby_mine = self.nearby_coverage_score(player, tile, ["mine"], 2)
+        nearby_rig = self.nearby_coverage_score(player, tile, ["oil_gas_rig"], 2)
         nearby_port = self.nearby_coverage_score(player, tile, ["port"], 3)
-        nearby_resources = self.nearby_resource_score(player, tile, STARTING_MINE_RESOURCE_WEIGHTS, 2)
+        nearby_resources = self.nearby_resource_score(player, tile, STARTING_SOLID_MINE_RESOURCE_WEIGHTS, 2)
         passability = self.clamp01(getattr(tile, "passability", 0.0))
         return self.clamp01(
             nearby_city * 0.38
             + nearby_resources * 0.18
             + nearby_mine * 0.16
+            + nearby_rig * 0.10
             + nearby_port * 0.10
             + passability * 0.18
         )
@@ -4116,12 +5695,14 @@ class Game(arcade.View):
         nearby_settlement = self.nearby_coverage_score(player, tile, ["city", "village"], 2)
         nearby_industry = self.nearby_coverage_score(player, tile, ["industry"], 2)
         nearby_mine = self.nearby_coverage_score(player, tile, ["mine"], 2)
+        nearby_rig = self.nearby_coverage_score(player, tile, ["oil_gas_rig"], 2)
         nearby_port = self.nearby_coverage_score(player, tile, ["port"], 3)
         passability = self.clamp01(getattr(tile, "passability", 0.0))
         return self.clamp01(
             nearby_settlement * 0.28
             + nearby_industry * 0.22
             + nearby_mine * 0.16
+            + nearby_rig * 0.10
             + nearby_port * 0.14
             + passability * 0.16
             + (1.0 - min(1.0, existing_storage)) * 0.04
@@ -4135,11 +5716,13 @@ class Game(arcade.View):
         nearby_industry = self.nearby_coverage_score(player, tile, ["industry", "refinery"], 2)
         nearby_port = self.nearby_coverage_score(player, tile, ["port"], 3)
         nearby_fuel = self.nearby_resource_score(player, tile, REFINERY_RESOURCE_WEIGHTS, 3)
+        nearby_rig = self.nearby_coverage_score(player, tile, ["oil_gas_rig"], 3)
         passability = self.clamp01(getattr(tile, "passability", 0.0))
         return self.clamp01(
             nearby_settlement * 0.24
             + nearby_industry * 0.24
             + nearby_fuel * 0.20
+            + nearby_rig * 0.12
             + nearby_port * 0.14
             + passability * 0.18
         )
@@ -4149,12 +5732,14 @@ class Game(arcade.View):
             return 0.0
 
         nearby_fuel = self.nearby_resource_score(player, tile, REFINERY_RESOURCE_WEIGHTS, 3)
+        nearby_rig = self.nearby_coverage_score(player, tile, ["oil_gas_rig"], 3)
         nearby_city = self.nearby_coverage_score(player, tile, ["city"], 3)
         nearby_industry = self.nearby_coverage_score(player, tile, ["industry"], 2)
         nearby_port = self.nearby_coverage_score(player, tile, ["port"], 3)
         passability = self.clamp01(getattr(tile, "passability", 0.0))
         return self.clamp01(
             nearby_fuel * 0.34
+            + nearby_rig * 0.16
             + nearby_city * 0.22
             + nearby_industry * 0.18
             + nearby_port * 0.12
@@ -4178,6 +5763,9 @@ class Game(arcade.View):
             self.generate_starting_infrastructure(player)
 
         self.recalculate_all_state_production_caches()
+        self.recalculate_all_supply_scores()
+        for player in self.players:
+            self.recalculate_player_storage(player)
         self.tile_visual_revision += 1
         self.invalidate_tile_visual_cache()
 
@@ -4210,6 +5798,11 @@ class Game(arcade.View):
             infrastructure_budget["farms"],
         )
         mine_unspent = self.place_starting_mines(player, land_tiles, infrastructure_budget["mine"])
+        oil_gas_unspent = self.place_starting_oil_gas_rigs(
+            player,
+            land_tiles,
+            infrastructure_budget["oil_gas_rig"],
+        )
 
         port_budget = infrastructure_budget["port"]
         port_scores = {tile: self.port_score(player, tile) for tile in land_tiles}
@@ -4253,6 +5846,7 @@ class Game(arcade.View):
             player,
             farm_unspent
             + mine_unspent
+            + oil_gas_unspent
             + industry_unspent
             + port_unspent
             + warehouse_unspent
@@ -4358,6 +5952,16 @@ class Game(arcade.View):
         coverage_budget = budget / INFRASTRUCTURE_COVERAGE_COSTS["mine"]
         return self.allocate_building_coverage("mine", candidates, coverage_budget, decay=0.84)
 
+    def place_starting_oil_gas_rigs(self, player, land_tiles, budget):
+        scores = {
+            tile: self.oil_gas_rig_score(player, tile)
+            for tile in land_tiles
+        }
+        limit = self.infrastructure_candidate_limit(len(land_tiles), 0.18, 1, 7)
+        candidates = self.sorted_scored_candidates(scores, limit, min_score=0.10)
+        coverage_budget = budget / INFRASTRUCTURE_COVERAGE_COSTS["oil_gas_rig"]
+        return self.allocate_building_coverage("oil_gas_rig", candidates, coverage_budget, decay=0.84)
+
     def place_starting_industry(self, player, land_tiles, budget):
         scores = {
             tile: self.industry_score(player, tile)
@@ -4417,9 +6021,7 @@ class Game(arcade.View):
     def add_stockpile_compensation(self, player, bucket_key, resource_key, amount):
         if amount <= 0:
             return
-        stockpiles = self.ensure_player_stockpiles(player)
-        bucket = stockpiles.setdefault(bucket_key, {})
-        bucket[resource_key] = bucket.get(resource_key, 0.0) + amount
+        self.add_to_stockpile(player, resource_key, amount)
 
     def apply_starting_compensation(self, player, missing_infrastructure_budget, agriculture_scores):
         raw_amounts = self.state_raw_resource_amounts(player)
@@ -4490,6 +6092,10 @@ class Game(arcade.View):
         for tile in self.hex_grid:
             tile.color = self.get_tile_map_color(tile)
         self.recalculate_all_state_resources()
+        self.recalculate_all_supply_scores()
+        for player in self.players:
+            self.recalculate_player_storage(player)
+            self.recalculate_resource_balance_breakdown(player)
         self.rebuild_state_borders()
         self.recalculate_all_monthly_balances()
 
@@ -4896,11 +6502,16 @@ class Game(arcade.View):
             f"Время: {self.format_build_duration(build_months)}",
             f"Деньги: {self.format_money(cost.get('money_cost', 0.0))}",
         ]
-        if building_key == "mine":
+        if building_key in ("mine", "oil_gas_rig"):
+            allowed_resources = (
+                STARTING_OIL_GAS_RIG_RESOURCE_WEIGHTS
+                if building_key == "oil_gas_rig"
+                else STARTING_SOLID_MINE_RESOURCE_WEIGHTS
+            )
             ground_resources = [
                 (key, max(0.0, float(mass)))
                 for key, _depth, mass in getattr(tile, "resources", [])
-                if key in RAW_RESOURCE_NAMES and max(0.0, float(mass)) > 0
+                if key in allowed_resources and max(0.0, float(mass)) > 0
             ]
             ground_resources.sort(key=lambda item: item[1], reverse=True)
             if ground_resources:
@@ -4978,6 +6589,27 @@ class Game(arcade.View):
             return self.blend_colors(base, (255, 255, 190), 0.18)
         return base
 
+    def supply_color(self, tile):
+        if not tile.owner or self.is_water_tile(tile):
+            return self.blend_colors(self.terrain_color(tile), (12, 16, 22), 0.62)
+        supply = getattr(tile, "supply_score", None)
+        if supply is None:
+            self.recalculate_player_supply(tile.owner)
+            supply = getattr(tile, "supply_score", 0.0)
+        supply = self.clamp01(supply)
+        if supply < 0.25:
+            target = (154, 48, 44)
+        elif supply < 0.50:
+            target = (190, 142, 54)
+        elif supply < 0.75:
+            target = (146, 174, 74)
+        else:
+            target = (62, 156, 88)
+        base = self.blend_colors((28, 34, 42), target, 0.36 + supply * 0.45)
+        if tile == self.selected_tile or tile == self.hovered_tile:
+            return self.blend_colors(base, (255, 255, 190), 0.18)
+        return base
+
     def get_tile_map_color(self, tile):
         if self.construction_placement_mode and self.active_top_panel_key == "construction":
             return self.construction_overlay_color(tile, self.terrain_color(tile))
@@ -4989,6 +6621,8 @@ class Game(arcade.View):
             return self.selected_resource_overlay_color(tile, self.climate_color(tile))
         if self.map_layer == "resources":
             return self.selected_resource_overlay_color(tile, self.resource_color(tile))
+        if self.map_layer == "supply":
+            return self.selected_resource_overlay_color(tile, self.supply_color(tile))
         return self.selected_resource_overlay_color(tile, self.terrain_color(tile))
 
     def create_map_overview(self):
@@ -5164,7 +6798,6 @@ class Game(arcade.View):
         self.begin_ui_text_frame()
         if not self.premium_shader_enabled and not self.premium_shader_attempted:
             self.setup_premium_shader()
-        start_time = time.time()
         self.world_camera.use()
         if self.use_overview_lod():
             self.map_overview_sprite_list.draw()
@@ -5191,10 +6824,10 @@ class Game(arcade.View):
             self.draw_pause_menu()
         self.draw_construction_hover_tooltip()
         self.draw_top_hover_tooltips()
-        draw_time = (time.time() - start_time) * 1000
-        draw_mode = "Overview" if self.use_overview_lod() else "Tiles"
-        layer_label = next(label for key, label, _enabled in MAP_LAYERS if key == self.map_layer)
-        self.debug_text.text = f"FPS: {self.fps:.0f} | Draw: {draw_time:.1f}ms | Mode: {draw_mode} | Layer: {layer_label} | Tiles: {len(self.visible_tiles)} | Seed: {self.world_seed}"
+        self.draw_ui_text_batch()
+        self.debug_text.text = f"FPS: {self.fps:.0f}"
+        self.debug_text.x = self.window.width - 12
+        self.debug_text.y = self.window.height - 8
         self.debug_text.draw()
 
     def refresh_visible_tiles(self):
@@ -5221,6 +6854,13 @@ class Game(arcade.View):
     def begin_ui_text_frame(self):
         self.ui_text_pool_cursor = 0
 
+    def draw_ui_text_batch(self):
+        for index in range(self.ui_text_pool_cursor, self.ui_text_pool_max_used):
+            if index < len(self.ui_text_pool) and self.ui_text_pool[index].text:
+                self.ui_text_pool[index].text = ""
+        self.ui_text_pool_max_used = max(self.ui_text_pool_max_used, self.ui_text_pool_cursor)
+        self.batch.draw()
+
     def draw_ui_text(
         self,
         text,
@@ -5245,6 +6885,7 @@ class Game(arcade.View):
                     font_size,
                     anchor_x=anchor_x,
                     anchor_y=anchor_y,
+                    batch=self.batch,
                 )
             )
 
@@ -5262,7 +6903,6 @@ class Game(arcade.View):
             label.color = color
         label.x = x
         label.y = y
-        label.draw()
 
     def draw_top_status_bar(self):
         if not self.human_player:
@@ -5277,7 +6917,8 @@ class Game(arcade.View):
         arcade.draw_lbwh_rectangle_filled(0, y, self.window.width, TOP_STATUS_BAR_HEIGHT, (18, 24, 31, 245))
         arcade.draw_line(0, y, self.window.width, y, (88, 106, 128), 2)
 
-        budget_text = f"{self.format_money(player.budget)}  {self.format_money(player.monthly_balance)}/мес"
+        self.budget_summary_rect = None
+        budget_text = f"{self.format_money(player.budget)}  {self.format_money_delta(player.monthly_balance)}/мес"
         resource_text = (
             f"Металлы {self.format_resource_amount(metals)}  "
             f"Топливо {self.format_resource_amount(fuel)}  "
@@ -5294,9 +6935,15 @@ class Game(arcade.View):
 
         x = 10
         for index, text in enumerate(items[:3]):
+            item_width = max(88, len(text) * 7 + 22)
+            if index == 2:
+                self.budget_summary_rect = (x - 6, y + 5, item_width - 8, TOP_STATUS_BAR_HEIGHT - 10)
+                if self.hovered_budget_summary:
+                    arcade.draw_lbwh_rectangle_filled(*self.budget_summary_rect, (36, 48, 62, 210))
+                    arcade.draw_lbwh_rectangle_outline(*self.budget_summary_rect, (118, 146, 176, 180), 1)
             color = (238, 244, 250) if index == 0 else (210, 220, 232)
             self.draw_ui_text(text, x, y + TOP_STATUS_BAR_HEIGHT / 2, color, 12, anchor_y="center")
-            x += max(88, len(text) * 7 + 22)
+            x += item_width
 
         status_reserved_width = 300
         available_resource_width = max(280, self.window.width - x - status_reserved_width)
@@ -5333,7 +6980,7 @@ class Game(arcade.View):
         tooltip_width = 320
         tooltip_height = 76 + (len(red_items) + len(yellow_items)) * 16
         tooltip_x = min(x, self.window.width - tooltip_width - 12)
-        tooltip_y = y - tooltip_height - 8
+        tooltip_y = max(8, y - tooltip_height - 8)
         arcade.draw_lbwh_rectangle_filled(tooltip_x, tooltip_y, tooltip_width, tooltip_height, (18, 24, 31, 245))
         arcade.draw_lbwh_rectangle_outline(tooltip_x, tooltip_y, tooltip_width, tooltip_height, (140, 160, 184), 1)
         line_y = tooltip_y + tooltip_height - 20
@@ -5347,6 +6994,71 @@ class Game(arcade.View):
             for item in items[:5]:
                 self.draw_ui_text(f"- {self.resource_display_name(item)}", tooltip_x + 22, line_y, (220, 230, 240), 11)
                 line_y -= 15
+
+    def draw_budget_summary_tooltip(self, player):
+        if not self.hovered_budget_summary or not self.budget_summary_rect:
+            return
+
+        income = player.monthly_income_breakdown or {}
+        expenses = player.monthly_expenses_breakdown or self.monthly_expenses(player)
+        trade_value = income.get("trade", player.monthly_trade_balance)
+        rows = [
+            ("Бюджет", self.format_money(player.budget), arcade.color.WHITE, 12),
+            (
+                "Месячный баланс",
+                f"{self.format_money_delta(player.monthly_balance)}/мес",
+                (174, 224, 158) if player.monthly_balance >= 0 else (236, 148, 132),
+                12,
+            ),
+            None,
+            ("Доходы:", None, arcade.color.WHITE, 12),
+            ("Налоги населения", self.format_money_delta(income.get("population", 0.0)), (190, 226, 174), 11),
+            ("Компании", self.format_money_delta(income.get("companies", 0.0)), (190, 226, 174), 11),
+            (
+                "Торговля",
+                self.format_money_delta(trade_value),
+                (190, 226, 174) if trade_value >= 0 else (236, 168, 154),
+                11,
+            ),
+            None,
+            ("Расходы:", None, arcade.color.WHITE, 12),
+            ("Армия", f"-{self.format_money(expenses.get('army', 0.0))}", (236, 168, 154), 11),
+            ("Правительство", f"-{self.format_money(expenses.get('government', 0.0))}", (236, 168, 154), 11),
+            ("Соц. обеспечение", f"-{self.format_money(expenses.get('social', 0.0))}", (236, 168, 154), 11),
+            ("Инфраструктура", f"-{self.format_money(expenses.get('infrastructure', 0.0))}", (236, 168, 154), 11),
+        ]
+        text_width = 0
+        for row in rows:
+            if row is None:
+                continue
+            label, value, _color, size = row
+            text_width = max(text_width, len(label) * size * 0.58)
+            if value is not None:
+                text_width = max(text_width, len(label) * size * 0.52 + len(value) * size * 0.58 + 46)
+        tooltip_width = int(max(300, min(430, text_width + 34)))
+        tooltip_height = 28 + sum(7 if row is None else 17 for row in rows)
+        x, y, _width, _height = self.budget_summary_rect
+        tooltip_x = max(12, min(x, self.window.width - tooltip_width - 12))
+        tooltip_y = max(8, y - tooltip_height - 8)
+        arcade.draw_lbwh_rectangle_filled(tooltip_x, tooltip_y, tooltip_width, tooltip_height, (18, 24, 31, 247))
+        arcade.draw_lbwh_rectangle_outline(tooltip_x, tooltip_y, tooltip_width, tooltip_height, (140, 160, 184), 1)
+
+        line_y = tooltip_y + tooltip_height - 20
+
+        def line(label, value=None, color=(220, 230, 240), size=11):
+            nonlocal line_y
+            if value is None:
+                self.draw_ui_text(label, tooltip_x + 14, line_y, color, size)
+            else:
+                self.draw_ui_text(label, tooltip_x + 14, line_y, color, size)
+                self.draw_ui_text(value, tooltip_x + tooltip_width - 14, line_y, color, size, anchor_x="right")
+            line_y -= 17
+
+        for row in rows:
+            if row is None:
+                line_y -= 7
+                continue
+            line(*row)
 
     def top_warning_items(self, player):
         items = []
@@ -5367,6 +7079,62 @@ class Game(arcade.View):
                 "lines": lines[:6],
                 "panel": "resources",
             })
+
+        storage = self.storage_problem_summary(player)
+        if storage["red"] or storage["yellow"]:
+            level = "red" if storage["red"] else "yellow"
+            storage_items = storage["red"] + storage["yellow"]
+            items.append({
+                "key": "storage",
+                "label": "S",
+                "title": "Склады заполнены" if storage["red"] else "Склады почти заполнены",
+                "level": level,
+                "lines": [
+                    (
+                        f"{STORAGE_CATEGORY_LABELS.get(category, category)}: "
+                        f"{self.format_resource_amount(player.storage_used.get(category, 0.0))}/"
+                        f"{self.format_resource_amount(player.storage_capacity.get(category, 0.0))}"
+                    )
+                    for category in storage_items[:6]
+                ],
+                "panel": "resources",
+            })
+
+        supply = player.supply_summary or self.recalculate_player_supply(player)
+        if supply.get("critical_tiles", 0) > 0 or supply.get("low_tiles", 0) > 0:
+            level = "red" if supply.get("critical_tiles", 0) > 0 else "yellow"
+            items.append({
+                "key": "supply",
+                "label": "L",
+                "title": "Проблемы снабжения",
+                "level": level,
+                "lines": [
+                    f"Среднее снабжение: {supply.get('average', 0.0):.0%}",
+                    f"Критичных клеток: {supply.get('critical_tiles', 0)}",
+                    f"Слабых клеток: {supply.get('low_tiles', 0)}",
+                ],
+                "panel": "resources",
+            })
+
+        contracts = self.normalize_trade_contracts(player)
+        if contracts:
+            planned_buy = sum(contract["amount"] for contract in contracts if contract["mode"] == "buy")
+            planned_sell = sum(contract["amount"] for contract in contracts if contract["mode"] == "sell")
+            buy_capacity = self.trade_capacity_per_month(player, "buy")
+            sell_capacity = self.trade_capacity_per_month(player, "sell")
+            if planned_buy > buy_capacity + 0.001 or planned_sell > sell_capacity + 0.001:
+                items.append({
+                    "key": "trade",
+                    "label": "T",
+                    "title": "Торговля уперлась в лимит",
+                    "level": "yellow",
+                    "lines": [
+                        f"Покупка: {self.format_resource_amount(planned_buy)}/{self.format_resource_amount(buy_capacity)}/мес",
+                        f"Продажа: {self.format_resource_amount(planned_sell)}/{self.format_resource_amount(sell_capacity)}/мес",
+                        "Нужны порты, склады, логистика или снабжение.",
+                    ],
+                    "panel": "trade",
+                })
 
         construction_warning = self.construction_warning_summary(player)
         if construction_warning:
@@ -5429,6 +7197,7 @@ class Game(arcade.View):
 
     def draw_top_hover_tooltips(self):
         if self.human_player:
+            self.draw_budget_summary_tooltip(self.human_player)
             self.draw_resource_summary_tooltip(self.human_player)
             self.draw_top_warning_tooltip(self.top_warning_items(self.human_player))
 
@@ -5500,6 +7269,8 @@ class Game(arcade.View):
         height = top - SIDE_PANEL_MARGIN
         if self.active_top_panel_key == "resources":
             width = 760
+        elif self.active_top_panel_key == "trade":
+            width = 760
         elif self.active_top_panel_key == "construction":
             width = 500
         else:
@@ -5530,50 +7301,64 @@ class Game(arcade.View):
             self.recalculate_state_resources(self.human_player)
         if not self.human_player.production_cache:
             self.recalculate_state_production_cache(self.human_player)
-        stockpiles = self.ensure_player_stockpiles(self.human_player)
-        flows = self.estimate_monthly_resource_flows(self.human_player)
+        breakdown = self.cached_resource_balance_breakdown(self.human_player)
+        cache_key = (
+            self.resource_panel_category,
+            round(getattr(self.human_player, "resource_balance_last_update", 0.0), 3),
+        )
+        if self.resource_rows_cache and self.resource_rows_cache.get("key") == cache_key:
+            return self.resource_rows_cache["rows"]
+
         if self.resource_panel_category == "raw":
-            raw = self.human_player.resource_totals.get("raw", {})
-            raw_stock = stockpiles.get("raw", {})
             keys = list(RAW_RESOURCE_NAMES)
-            for key in sorted(raw.keys()):
+            for key in sorted(breakdown["raw"].keys()):
                 if key not in keys:
                     keys.append(key)
             rows = []
             for key in keys:
-                production = flows["outputs"].get(key, 0.0)
-                consumption = flows["inputs"].get(key, 0.0)
-                stock = raw_stock.get(key, 0.0)
+                entry = breakdown["raw"].get(key, {})
+                production = entry.get("production", 0.0)
+                consumption = entry.get("consumption", 0.0)
+                stock = entry.get("stock", 0.0)
                 rows.append({
                     "key": key,
-                    "ground": raw.get(key, 0.0),
+                    "ground": entry.get("ground", 0.0),
                     "stock": stock,
                     "production": production,
                     "consumption": consumption,
-                    "months": self.resource_duration_months(stock, production, consumption),
+                    "months": entry.get("months", self.resource_duration_months(stock, production, consumption)),
                 })
-            return rows
-
-        names = SEMI_FINISHED_RESOURCE_NAMES if self.resource_panel_category == "semi_finished" else FINISHED_RESOURCE_NAMES
-        stock = stockpiles.get(self.resource_panel_category, {})
-        rows = []
-        for key in names:
-            production = flows["outputs"].get(key, 0.0)
-            consumption = flows["inputs"].get(key, 0.0)
-            stock_amount = stock.get(key, 0.0)
-            rows.append({
-                "key": key,
-                "ground": None,
-                "stock": stock_amount,
-                "production": production,
-                "consumption": consumption,
-                "months": self.resource_duration_months(stock_amount, production, consumption),
-            })
+        else:
+            names = SEMI_FINISHED_RESOURCE_NAMES if self.resource_panel_category == "semi_finished" else FINISHED_RESOURCE_NAMES
+            rows = []
+            for key in names:
+                entry = breakdown[self.resource_panel_category].get(key, {})
+                production = entry.get("production", 0.0)
+                consumption = entry.get("consumption", 0.0)
+                stock_amount = entry.get("stock", 0.0)
+                rows.append({
+                    "key": key,
+                    "ground": None,
+                    "stock": stock_amount,
+                    "production": production,
+                    "consumption": consumption,
+                    "months": entry.get("months", self.resource_duration_months(stock_amount, production, consumption)),
+                })
+        for row in rows:
+            row["display_values"] = [
+                (self.resource_display_name(row["key"]), (220, 230, 240)),
+                (self.format_resource_amount(row["ground"]) if row["ground"] is not None else "--", (220, 230, 240)),
+                ("--" if row["stock"] is None else self.format_resource_amount(row["stock"]), (220, 230, 240)),
+                ("--" if row["production"] is None else self.format_resource_amount(row["production"]), (220, 230, 240)),
+                ("--" if row["consumption"] is None else self.format_resource_amount(row["consumption"]), (220, 230, 240)),
+                (self.format_resource_duration(row["months"]), self.resource_duration_color(row["months"])),
+            ]
+        self.resource_rows_cache = {"key": cache_key, "rows": rows}
         return rows
 
     def resource_row_rects(self, rows):
         panel_x, panel_y, _panel_width, panel_height = self.side_panel_rect()
-        start_y = panel_y + panel_height - 300
+        start_y = panel_y + panel_height - 336
         row_height = 22
         bottom_y = panel_y + 26
         max_visible_count = max(8, int((start_y - bottom_y) / row_height) + 1)
@@ -5654,8 +7439,31 @@ class Game(arcade.View):
             self.draw_ui_text(f"Избыток: {surplus_count}", x + 10, y + 14, (180, 222, 166), 11)
 
         warning_y = panel_y + panel_height - 166
-        self.draw_ui_text("Состояние снабжения", panel_x + 18, warning_y, arcade.color.WHITE, 14)
-        warning_y -= 20
+        self.draw_ui_text("Склады и снабжение", panel_x + 18, warning_y, arcade.color.WHITE, 14)
+        warning_y -= 18
+        self.ensure_player_storage(self.human_player)
+        storage_parts = []
+        for category_key in STORAGE_CATEGORIES:
+            capacity = self.human_player.storage_capacity.get(category_key, 0.0)
+            used = self.human_player.storage_used.get(category_key, 0.0)
+            fullness = used / capacity if capacity > 0 else (1.0 if used > 0 else 0.0)
+            storage_parts.append(
+                f"{STORAGE_CATEGORY_LABELS[category_key]} "
+                f"{self.format_resource_amount(used)}/{self.format_resource_amount(capacity)} ({fullness:.0%})"
+            )
+        self.draw_ui_text(" | ".join(storage_parts[:2]), panel_x + 24, warning_y, (190, 210, 224), 9)
+        warning_y -= 14
+        self.draw_ui_text(" | ".join(storage_parts[2:]), panel_x + 24, warning_y, (190, 210, 224), 9)
+        warning_y -= 14
+        supply = self.human_player.supply_summary or self.recalculate_player_supply(self.human_player)
+        self.draw_ui_text(
+            f"Снабжение: {supply.get('average', 0.0):.0%} | слабых: {supply.get('low_tiles', 0)} | крит.: {supply.get('critical_tiles', 0)}",
+            panel_x + 24,
+            warning_y,
+            (190, 210, 224),
+            10,
+        )
+        warning_y -= 18
         red_items = []
         yellow_items = []
         for _category, category_problems in problems.items():
@@ -5666,7 +7474,7 @@ class Game(arcade.View):
             + [("yellow", item, f"Внимание: {self.resource_display_name(item)}") for item in yellow_items]
         )
         if warnings:
-            for level, resource_key, warning in warnings[:4]:
+            for level, resource_key, warning in warnings[:3]:
                 row_rect = (panel_x + 22, warning_y - 3, 360, 16)
                 self.resource_warning_rects.append((row_rect, resource_key))
                 fill = (92, 42, 42, 145) if level == "red" else (92, 76, 34, 135)
@@ -5677,7 +7485,7 @@ class Game(arcade.View):
             self.draw_ui_text("Все спокойно", panel_x + 28, warning_y, (180, 192, 205), 11)
 
         rows = self.resource_rows()
-        table_y = panel_y + panel_height - 250
+        table_y = panel_y + panel_height - 286
         title = next(label for key, label in RESOURCE_PANEL_CATEGORIES if key == self.resource_panel_category)
         self.draw_ui_text(title, panel_x + 18, table_y, arcade.color.WHITE, 15)
         header_y = table_y - 24
@@ -5700,15 +7508,7 @@ class Game(arcade.View):
             row_number = self.resource_scroll_index + index
             fill = (44, 58, 74, 180) if selected else ((24, 32, 42, 120) if row_number % 2 == 0 else (30, 38, 48, 120))
             arcade.draw_lbwh_rectangle_filled(x, y, width, height, fill)
-            values = [
-                (self.resource_display_name(row["key"]), (220, 230, 240)),
-                (self.format_resource_amount(row["ground"]) if row["ground"] is not None else "--", (220, 230, 240)),
-                ("--" if row["stock"] is None else self.format_resource_amount(row["stock"]), (220, 230, 240)),
-                ("--" if row["production"] is None else self.format_resource_amount(row["production"]), (220, 230, 240)),
-                ("--" if row["consumption"] is None else self.format_resource_amount(row["consumption"]), (220, 230, 240)),
-                (self.format_resource_duration(row["months"]), self.resource_duration_color(row["months"])),
-            ]
-            for (value, color), (_header, offset) in zip(values, headers):
+            for (value, color), (_header, offset) in zip(row["display_values"], headers):
                 self.draw_ui_text(
                     value,
                     panel_x + offset,
@@ -5774,19 +7574,33 @@ class Game(arcade.View):
         self.draw_ui_text(f"Источники: {sources_count} клетки", card_x + 14, y, (220, 230, 240), 12)
         y -= 30
 
-        consumption = self.estimate_monthly_resource_flows(self.human_player)["inputs"].get(
-            self.selected_resource_key,
-            0.0,
-        )
+        balance = self.cached_resource_balance_breakdown(self.human_player)
+        category = self.resource_category_for_key(self.selected_resource_key)
+        entry = balance.get(category, {}).get(self.selected_resource_key, {})
+        production = entry.get("production", 0.0)
+        consumption = entry.get("consumption", 0.0)
+        max_line_chars = max(20, int((card_width - 48) / 7))
+
+        self.draw_ui_text("Производство", card_x + 14, y, arcade.color.WHITE, 12)
+        y -= 20
+        if production > 0:
+            for label, amount, percent in entry.get("production_breakdown", []):
+                if amount <= 0:
+                    continue
+                text = f"{label}: {percent:.0f}% ({self.format_resource_amount(amount)}/мес)"
+                for line in textwrap.wrap(text, width=max_line_chars) or [text]:
+                    self.draw_ui_text(line, card_x + 20, y, (206, 218, 230), 11)
+                    y -= 16
+        else:
+            self.draw_ui_text("Текущего прихода нет", card_x + 20, y, (180, 192, 205), 11)
+            y -= 16
+        y -= 6
 
         self.draw_ui_text("Потребление", card_x + 14, y, arcade.color.WHITE, 12)
         y -= 20
-        breakdown = self.resource_consumption_breakdown(self.human_player, self.selected_resource_key)
-        max_line_chars = max(20, int((card_width - 48) / 7))
+        breakdown = entry.get("consumption_breakdown", [])
         if consumption > 0:
             for label, amount, percent in breakdown:
-                if label == "Ремонт":
-                    continue
                 if amount <= 0 and label != "Стройки":
                     continue
                 text = f"{label}: {percent:.0f}% ({self.format_resource_amount(amount)}/мес)"
@@ -5849,6 +7663,238 @@ class Game(arcade.View):
 
         return False
 
+    def trade_category_rects_for_panel(self):
+        panel_x, panel_y, panel_width, panel_height = self.side_panel_rect()
+        block_width = 190
+        block_height = 40
+        gap = 10
+        y = panel_y + panel_height - 198
+        return [
+            (panel_x + 18 + index * (block_width + gap), y, block_width, block_height)
+            for index, _category in enumerate(RESOURCE_PANEL_CATEGORIES)
+        ]
+
+    def trade_panel_snapshot(self):
+        if not self.human_player:
+            return {"rows": [], "flows": {}}
+        player = self.human_player
+        balance = self.cached_resource_balance_breakdown(player, max_age=1.0)
+        contracts = self.normalize_trade_contracts(player)
+        contract_signature = tuple(
+            sorted((contract["resource"], contract["mode"], round(contract["amount"], 3)) for contract in contracts)
+        )
+        market_state = self.simulation_server.market_state
+        cache_key = (
+            self.trade_panel_category,
+            contract_signature,
+            round(getattr(player, "resource_balance_last_update", 0.0), 3),
+            market_state.revision,
+        )
+        if self.trade_panel_cache and self.trade_panel_cache.get("key") == cache_key:
+            return self.trade_panel_cache
+
+        trade_flows = self.estimate_monthly_trade_flows(player)
+        contract_amounts = {
+            (contract["resource"], contract["mode"]): contract["amount"]
+            for contract in contracts
+        }
+        rows = []
+        for resource_key in self.tradeable_resource_keys(self.trade_panel_category):
+            entry = balance.get(self.trade_panel_category, {}).get(resource_key, {})
+            stock = entry.get("stock", self.stockpile_amount(player, resource_key))
+            market_state.ensure_resource(resource_key)
+            price_change = self.market_price_change_fraction(resource_key)
+            rows.append({
+                "key": resource_key,
+                "stock": stock,
+                "balance": entry.get("balance", 0.0),
+                "buy_price": self.trade_unit_price(player, resource_key, "buy"),
+                "sell_price": self.trade_unit_price(player, resource_key, "sell"),
+                "market_price": self.market_current_price(resource_key),
+                "price_change": price_change,
+                "market_demand": market_state.demand.get(resource_key, 0.0),
+                "market_supply": market_state.supply.get(resource_key, 0.0),
+                "buy": contract_amounts.get((resource_key, "buy"), 0.0),
+                "sell": contract_amounts.get((resource_key, "sell"), 0.0),
+            })
+        for row in rows:
+            contract_text = "--"
+            if row["buy"] > 0:
+                contract_text = f"Покупка {self.format_resource_amount(row['buy'])}"
+            elif row["sell"] > 0:
+                contract_text = f"Продажа {self.format_resource_amount(row['sell'])}"
+            price_text = f"{self.format_money(row['buy_price'])}/{self.format_money(row['sell_price'])}"
+            change_text = f"{row['price_change']:+.0%}"
+            change_color = (174, 224, 158) if row["price_change"] >= 0 else (236, 168, 154)
+            market_text = f"{self.format_resource_amount(row['market_demand'])}/{self.format_resource_amount(row['market_supply'])}"
+            balance_color = (170, 222, 154) if row["balance"] >= 0 else (238, 168, 154)
+            row["display_values"] = [
+                (self.resource_display_name(row["key"]), (220, 230, 240), 0),
+                (self.format_resource_amount(row["stock"]), (220, 230, 240), 118),
+                (self.format_resource_amount(row["balance"]), balance_color, 180),
+                (price_text, (220, 230, 240), 244),
+                (change_text, change_color, 332),
+                (market_text, (190, 210, 224), 378),
+                (contract_text, (220, 230, 240), 466),
+            ]
+        self.trade_panel_cache = {"key": cache_key, "rows": rows, "flows": trade_flows}
+        return self.trade_panel_cache
+
+    def trade_rows(self):
+        return self.trade_panel_snapshot().get("rows", [])
+
+    def scroll_trade_rows(self, amount):
+        rows = self.trade_rows()
+        panel_x, panel_y, _panel_width, panel_height = self.side_panel_rect()
+        table_y = panel_y + panel_height - 254
+        row_height = 28
+        max_rows = max(6, int((table_y - 28 - (panel_y + 28)) / row_height))
+        max_scroll = max(0, len(rows) - max_rows)
+        old_index = self.trade_scroll_index
+        self.trade_scroll_index = max(0, min(max_scroll, self.trade_scroll_index + int(amount)))
+        return self.trade_scroll_index != old_index
+
+    def draw_trade_panel_content(self, panel_x, panel_y, panel_width, panel_height):
+        if not self.human_player:
+            return
+        player = self.human_player
+        self.trade_action_rects = []
+        self.trade_category_rects = self.trade_category_rects_for_panel()
+        snapshot = self.trade_panel_snapshot()
+        trade_flows = snapshot["flows"]
+        balance = trade_flows["money_balance"]
+        buy_limit_text = (
+            f"Покупка: {self.format_resource_amount(trade_flows['buy_capacity_used'])}/"
+            f"{self.format_resource_amount(trade_flows['buy_capacity_limit'])} ед./мес"
+        )
+        sell_limit_text = (
+            f"Продажа: {self.format_resource_amount(trade_flows['sell_capacity_used'])}/"
+            f"{self.format_resource_amount(trade_flows['sell_capacity_limit'])} ед./мес"
+        )
+        money_color = (180, 226, 168) if balance >= 0 else (236, 168, 154)
+        self.draw_ui_text("Внешний рынок", panel_x + 18, panel_y + panel_height - 70, arcade.color.WHITE, 15)
+        self.draw_ui_text(buy_limit_text, panel_x + 18, panel_y + panel_height - 94, (205, 216, 228), 11)
+        self.draw_ui_text(sell_limit_text, panel_x + 18, panel_y + panel_height - 112, (205, 216, 228), 11)
+        self.draw_ui_text(
+            f"Деньги от торговли: {self.format_money(balance)}/мес",
+            panel_x + 330,
+            panel_y + panel_height - 94,
+            money_color,
+            11,
+        )
+        self.draw_ui_text(
+            "Логистика/рынок: "
+            f"пок. {self.format_resource_amount(trade_flows['buy_logistics_capacity_limit'])}/"
+            f"{self.format_resource_amount(trade_flows['buy_max_capacity_limit'])}; "
+            f"прод. {self.format_resource_amount(trade_flows['sell_logistics_capacity_limit'])}/"
+            f"{self.format_resource_amount(trade_flows['sell_max_capacity_limit'])}",
+            panel_x + 18,
+            panel_y + panel_height - 130,
+            (170, 188, 204),
+            10,
+        )
+        next_execution = self.simulation_server.next_market_execution_time
+        next_execution_text = (
+            f"{next_execution.day} {MONTH_NAMES[next_execution.month - 1]} "
+            f"{next_execution.hour:02}:{next_execution.minute:02}"
+        )
+        self.draw_ui_text(
+            f"Исполнение: понедельник 00:00, раз в неделю. След.: {next_execution_text}",
+            panel_x + 18,
+            panel_y + panel_height - 146,
+            (156, 176, 194),
+            10,
+        )
+
+        for index, (category_key, label) in enumerate(RESOURCE_PANEL_CATEGORIES):
+            x, y, width, height = self.trade_category_rects[index]
+            active = category_key == self.trade_panel_category
+            fill = (58, 88, 112, 220) if active else (30, 40, 52, 175)
+            border = (170, 202, 232) if active else (86, 108, 132)
+            arcade.draw_lbwh_rectangle_filled(x, y, width, height, fill)
+            arcade.draw_lbwh_rectangle_outline(x, y, width, height, border, 1)
+            self.draw_ui_text(label, x + 10, y + height / 2, (230, 238, 246), 12, anchor_y="center")
+
+        rows = snapshot["rows"]
+        table_x = panel_x + 18
+        table_y = panel_y + panel_height - 254
+        headers = [
+            ("Ресурс", 0),
+            ("Склад", 118),
+            ("Баланс", 180),
+            ("Цена", 244),
+            ("Изм.", 332),
+            ("Спрос/пр.", 378),
+            ("Контракт", 466),
+        ]
+        for text, offset in headers:
+            self.draw_ui_text(text, table_x + offset, table_y, (150, 166, 184), 10)
+
+        row_height = 28
+        y = table_y - 28
+        max_rows = max(6, int((y - (panel_y + 28)) / row_height))
+        max_scroll = max(0, len(rows) - max_rows)
+        self.trade_scroll_index = max(0, min(self.trade_scroll_index, max_scroll))
+        visible_rows = rows[self.trade_scroll_index:self.trade_scroll_index + max_rows]
+        for index, row in enumerate(visible_rows):
+            row_y = y - index * row_height
+            row_number = self.trade_scroll_index + index
+            fill = (24, 32, 42, 118) if row_number % 2 == 0 else (30, 38, 48, 118)
+            arcade.draw_lbwh_rectangle_filled(table_x, row_y - 4, panel_width - 36, row_height, fill)
+            for value, color, offset in row["display_values"]:
+                self.draw_ui_text(value, table_x + offset, row_y + 9, color, 10, anchor_y="center")
+
+            button_specs = [
+                ("-", "buy", -TRADE_CONTRACT_STEP, table_x + panel_width - 156),
+                ("+", "buy", TRADE_CONTRACT_STEP, table_x + panel_width - 128),
+                ("-", "sell", -TRADE_CONTRACT_STEP, table_x + panel_width - 82),
+                ("+", "sell", TRADE_CONTRACT_STEP, table_x + panel_width - 54),
+            ]
+            for label, mode, delta, button_x in button_specs:
+                rect = (button_x, row_y - 1, 24, 20)
+                self.trade_action_rects.append((rect, row["key"], mode, delta))
+                fill = (42, 62, 82, 210)
+                if mode == "buy":
+                    border = (124, 178, 232)
+                else:
+                    border = (180, 210, 128)
+                arcade.draw_lbwh_rectangle_filled(*rect, fill)
+                arcade.draw_lbwh_rectangle_outline(*rect, border, 1)
+                self.draw_ui_text(label, rect[0] + rect[2] / 2, rect[1] + rect[3] / 2,
+                                  arcade.color.WHITE, 12, anchor_x="center", anchor_y="center")
+
+        if len(rows) > max_rows:
+            track_x = panel_x + panel_width - 18
+            track_y = panel_y + 46
+            track_height = max(40, table_y - 48 - track_y)
+            arcade.draw_lbwh_rectangle_filled(track_x, track_y, 4, track_height, (42, 52, 64, 180))
+            thumb_height = max(24, track_height * max_rows / len(rows))
+            thumb_y = track_y + (track_height - thumb_height) * (1 - self.trade_scroll_index / max(1, max_scroll))
+            arcade.draw_lbwh_rectangle_filled(track_x - 2, thumb_y, 8, thumb_height, (130, 154, 184, 220))
+
+        legend_y = panel_y + 20
+        self.draw_ui_text("Цена: покупка/продажа. Лимит зависит от портов, складов, логистики и снабжения.",
+                          panel_x + 18, legend_y, (160, 176, 192), 10)
+
+    def handle_trade_panel_click(self, x, y, modifiers=0):
+        if self.active_top_panel_key != "trade":
+            return False
+        for index, (category_key, _label) in enumerate(RESOURCE_PANEL_CATEGORIES):
+            if index < len(self.trade_category_rects) and self.point_in_rect(x, y, self.trade_category_rects[index]):
+                self.trade_panel_category = category_key
+                self.trade_scroll_index = 0
+                self.trade_panel_cache = None
+                return True
+        for rect, resource_key, mode, delta in self.trade_action_rects:
+            if self.point_in_rect(x, y, rect):
+                step = TRADE_CONTRACT_SHIFT_STEP if self.shift_modifier_active(modifiers) else TRADE_CONTRACT_STEP
+                adjusted_delta = step if delta > 0 else -step
+                self.adjust_trade_contract(self.human_player, resource_key, mode, adjusted_delta)
+                self.trade_panel_cache = None
+                self.recalculate_resource_balance_breakdown(self.human_player)
+                return True
+        return True
+
     def construction_queue_rows(self):
         if not self.human_player:
             return []
@@ -5904,6 +7950,66 @@ class Game(arcade.View):
         target_coverage = last_cost.get("target_coverage", from_coverage)
         return f"{from_coverage:.0%}->{target_coverage:.0%}"
 
+    def format_resource_amount_pairs(self, amounts, limit=3):
+        items = [
+            (key, amount)
+            for key, amount in sorted((amounts or {}).items(), key=lambda item: item[1], reverse=True)
+            if amount > 0
+        ]
+        if not items:
+            return "--"
+        parts = [
+            f"{self.resource_display_name(key)} {self.format_resource_amount(amount)}"
+            for key, amount in items[:limit]
+        ]
+        if len(items) > limit:
+            parts.append(f"еще {len(items) - limit}")
+        return ", ".join(parts)
+
+    def active_construction_detail_lines(self, player):
+        if not player or not player.construction_queue:
+            return []
+        project = player.construction_queue[0]
+        status_info = self.evaluate_construction_project_status(
+            player,
+            project,
+            month_fraction=CONSTRUCTION_STATUS_CHECK_MONTH_FRACTION,
+        )
+        status = status_info["status"]
+        lines = [
+            f"Статус: {self.construction_project_status_label(status)}",
+            f"Осталось: {self.format_build_duration(status_info['remaining_months'])}",
+        ]
+        if status == "waiting_money":
+            lines.append(f"Не хватает: {self.format_money(status_info['missing_money'])}")
+        elif status == "waiting_resources":
+            lines.append(f"Не хватает: {self.format_resource_amount_pairs(status_info['missing_resources'])}")
+        elif status == "waiting_power":
+            lines.append("Нет строительной мощности")
+        elif status == "paused":
+            lines.append("Стройка остановлена вручную")
+        elif status == "building":
+            monthly_delta = self.construction_project_progress_delta(player, project, month_fraction=1.0)
+            monthly_needs = self.construction_project_resource_needs(project, monthly_delta)
+            consumption = self.format_resource_amount_pairs(monthly_needs, limit=2)
+            if consumption != "--":
+                lines.append(f"Расход/мес: {consumption}")
+        return lines
+
+    def toggle_active_construction_pause(self, player):
+        if not player or not player.construction_queue:
+            return False
+        project = player.construction_queue[0]
+        project["paused"] = not project.get("paused", False)
+        status = "paused" if project["paused"] else "queued"
+        self.set_construction_project_status(
+            project,
+            status,
+            ["остановлено игроком"] if project["paused"] else None,
+        )
+        self.mark_player_resource_balance_dirty(player)
+        return True
+
     def construction_queue_item_rects(self, rows):
         groups = self.construction_queue_groups(rows)
         panel_x, panel_y, panel_width, panel_height = self.side_panel_rect()
@@ -5928,11 +8034,14 @@ class Game(arcade.View):
                 queue_bottom -= 24
         else:
             queue_bottom = panel_y + panel_height - 112
-        speed_y = queue_bottom - 42
+        detail_y = queue_bottom - 20 if rows else None
+        detail_height = 58 if rows else 0
+        speed_y = queue_bottom - 42 - detail_height
         options_top = min(speed_y - 78, panel_y + panel_height - 310)
         options_bottom_limit = panel_y + 76
         return {
             "queue_rects": queue_rects,
+            "detail_y": detail_y,
             "speed_y": speed_y,
             "options_top": max(options_bottom_limit + 30, options_top),
         }
@@ -5955,6 +8064,10 @@ class Game(arcade.View):
         panel_x, panel_y, panel_width, _panel_height = self.side_panel_rect()
         return panel_x + 18, panel_y + 24, panel_width - 36, 36
 
+    def construction_pause_rect(self):
+        panel_x, panel_y, panel_width, panel_height = self.side_panel_rect()
+        return panel_x + panel_width - 150, panel_y + panel_height - 80, 132, 26
+
     def draw_construction_panel_content(self, panel_x, panel_y, panel_width, panel_height):
         if not self.human_player:
             return
@@ -5963,10 +8076,35 @@ class Game(arcade.View):
         self.construction_queue_priority_rects = []
         self.construction_building_rects = self.construction_building_option_rects()
         self.construction_start_button_rect = self.construction_start_rect()
+        self.construction_pause_button_rect = None
         rows = self.construction_queue_rows()
+        if rows:
+            self.evaluate_construction_project_status(
+                self.human_player,
+                rows[0],
+                month_fraction=CONSTRUCTION_STATUS_CHECK_MONTH_FRACTION,
+            )
         groups = self.construction_queue_groups(rows)
         queue_y = panel_y + panel_height - 70
         self.draw_ui_text("Очередь строительства", panel_x + 18, queue_y, arcade.color.WHITE, 14)
+        if rows:
+            self.construction_pause_button_rect = self.construction_pause_rect()
+            pause_x, pause_y, pause_width, pause_height = self.construction_pause_button_rect
+            paused = rows[0].get("paused", False)
+            pause_fill = (80, 98, 56, 220) if paused else (52, 62, 78, 220)
+            pause_border = (190, 216, 132, 230) if paused else (120, 146, 174, 220)
+            pause_label = "Продолжить" if paused else "Пауза стройки"
+            arcade.draw_lbwh_rectangle_filled(pause_x, pause_y, pause_width, pause_height, pause_fill)
+            arcade.draw_lbwh_rectangle_outline(pause_x, pause_y, pause_width, pause_height, pause_border, 1)
+            self.draw_ui_text(
+                pause_label,
+                pause_x + pause_width / 2,
+                pause_y + pause_height / 2,
+                arcade.color.WHITE,
+                10,
+                anchor_x="center",
+                anchor_y="center",
+            )
         layout = self.construction_content_layout(rows)
         queue_rects = layout["queue_rects"]
         visible_count = len(queue_rects)
@@ -5978,10 +8116,7 @@ class Game(arcade.View):
                 fill = (46, 70, 58, 190) if active else (30, 40, 52, 160)
                 arcade.draw_lbwh_rectangle_filled(x, y, width, height, fill)
                 arcade.draw_lbwh_rectangle_outline(x, y, width, height, (82, 108, 132), 1)
-                if active and not project.get("money_paid", False):
-                    prefix = "Ждет денег"
-                else:
-                    prefix = "Строится" if active else "Ждет"
+                prefix = self.construction_project_status_label(project.get("status", "queued")) if active else "Ждет"
                 self.draw_ui_text(
                     f"{prefix}: {self.construction_group_label(group)}",
                     x + 8,
@@ -6027,6 +8162,23 @@ class Game(arcade.View):
         else:
             self.draw_ui_text("Пока пусто", panel_x + 28, queue_y - 28, (180, 192, 205), 11)
 
+        if rows and layout["detail_y"] is not None:
+            detail_y = layout["detail_y"]
+            detail_lines = self.active_construction_detail_lines(self.human_player)
+            for line_index, line in enumerate(detail_lines[:4]):
+                color = (210, 222, 234)
+                if line.startswith("Не хватает") or line.startswith("Нет "):
+                    color = (236, 178, 154)
+                elif line.startswith("Статус: Строится"):
+                    color = (190, 230, 174)
+                self.draw_ui_text(
+                    line,
+                    panel_x + 28,
+                    detail_y - line_index * 15,
+                    color,
+                    10,
+                )
+
         speed_y = layout["speed_y"]
         speed = self.build_power(self.human_player)
         self.draw_ui_text("Скорость строительства", panel_x + 18, speed_y, arcade.color.WHITE, 14)
@@ -6067,6 +8219,10 @@ class Game(arcade.View):
     def handle_construction_panel_click(self, x, y):
         if self.active_top_panel_key != "construction":
             return False
+
+        if self.construction_pause_button_rect and self.point_in_rect(x, y, self.construction_pause_button_rect):
+            self.toggle_active_construction_pause(self.human_player)
+            return True
 
         for rect, start_index, end_index, direction in self.construction_queue_priority_rects:
             if self.point_in_rect(x, y, rect):
@@ -6128,6 +8284,8 @@ class Game(arcade.View):
 
         if self.active_top_panel_key == "resources":
             self.draw_resources_panel_content(panel_x, panel_y, panel_width, panel_height)
+        elif self.active_top_panel_key == "trade":
+            self.draw_trade_panel_content(panel_x, panel_y, panel_width, panel_height)
         elif self.active_top_panel_key == "construction":
             self.draw_construction_panel_content(panel_x, panel_y, panel_width, panel_height)
         else:
@@ -6398,11 +8556,13 @@ class Game(arcade.View):
             mixed_label="Разная",
         )
         passability = self.average_tile_value(tiles, "passability", 0.0)
+        supply_score = self.average_tile_value(tiles, "supply_score", 0.0)
         info_rows = [
             ("Владелец", owner_name),
             ("Население", self.format_population(population)),
             ("Местность", terrain_name),
             ("Проходимость", self.format_percent(passability)),
+            ("Снабжение", self.format_percent(supply_score)),
         ]
         for label, value in info_rows:
             panel_text(label, panel_x + 16, y, (150, 166, 184), 11)
@@ -6442,6 +8602,24 @@ class Game(arcade.View):
         else:
             panel_text("Нет доступных залежей и запасов", panel_x + 16, y, (180, 192, 205), 11)
             y -= 18
+
+        y -= 8
+        y = panel_section("Емкость", y)
+        tile_capacity, tile_used = self.storage_summary_for_tiles(tiles)
+        for category_key in STORAGE_CATEGORIES:
+            capacity = tile_capacity.get(category_key, 0.0)
+            used = tile_used.get(category_key, 0.0)
+            if capacity <= 0 and used <= 0:
+                continue
+            panel_text(
+                f"{STORAGE_CATEGORY_LABELS[category_key]}: "
+                f"{self.format_resource_amount(used)}/{self.format_resource_amount(capacity)}",
+                panel_x + 16,
+                y,
+                (206, 218, 230),
+                11,
+            )
+            y -= 16
 
         y -= 8
         y = panel_section("Строения", y)
@@ -6901,12 +9079,10 @@ class Game(arcade.View):
         self.fullscreen = self.pending_fullscreen
         self.resolution_index = self.pending_resolution_index
         width, height = RESOLUTIONS[self.resolution_index]
-        self.window.set_fullscreen(self.fullscreen)
-        if not self.fullscreen:
-            self.window.set_size(width, height)
+        self.fullscreen, error = apply_window_settings_safely(self.window, width, height, self.fullscreen)
         save_settings(self.sound_volume, self.music_volume, self.fullscreen, self.resolution_index, RESOLUTIONS)
         self.sync_cameras_to_window()
-        self.pause_message = "Настройки применены."
+        self.pause_message = "Полный экран не применен, включен оконный режим." if error else "Настройки применены."
         self.rebuild_pause_menu()
         self.rebuild_time_hud()
         self.refresh_visible_tiles()
@@ -7004,10 +9180,14 @@ class Game(arcade.View):
         tick_delta = max(0, snapshot.tick_count - previous_tick_count)
         if tick_delta > 0:
             elapsed_hours = snapshot.hours_per_tick * tick_delta
+            market_ticks = self.simulation_server.consume_market_ticks()
+            for _market_index in range(market_ticks):
+                self.run_weekly_market_tick()
             for player in self.players:
+                self.run_economy_tick(player, elapsed_hours)
                 self.run_production_tick(player, elapsed_hours)
                 self.run_construction_tick(player, elapsed_hours)
-                self.run_economy_tick(player, elapsed_hours)
+                self.run_population_tick(player, elapsed_hours)
             self.last_production_tick_count = snapshot.tick_count
 
         self.handle_camera_keys(delta_time)
@@ -7086,6 +9266,8 @@ class Game(arcade.View):
                 if self.point_in_rect(x, y, self.side_panel_rect()):
                     if self.active_top_panel_key == "resources":
                         self.handle_resources_panel_click(x, y)
+                    elif self.active_top_panel_key == "trade":
+                        self.handle_trade_panel_click(x, y, modifiers)
                     elif self.active_top_panel_key == "construction":
                         self.handle_construction_panel_click(x, y)
                     return
@@ -7115,8 +9297,13 @@ class Game(arcade.View):
 
             warning_key = self.warning_icon_at(x, y)
             if warning_key:
-                if warning_key == "resources":
+                if warning_key in ("resources", "storage"):
                     self.open_top_panel("resources")
+                elif warning_key == "supply":
+                    self.set_map_layer("supply")
+                    self.open_top_panel("resources")
+                elif warning_key == "trade":
+                    self.open_top_panel("trade")
                 elif warning_key == "construction":
                     self.open_top_panel("construction")
                 return
@@ -7209,6 +9396,7 @@ class Game(arcade.View):
             self.hovered_hex_panel_close = False
             self.hovered_hex_build_button = False
             self.hovered_hex_specialization_button = False
+            self.hovered_budget_summary = False
             self.hovered_resource_summary = False
             if self.pause_screen == "settings" and self.open_pause_dropdown:
                 for dropdown in self.pause_dropdowns:
@@ -7224,6 +9412,10 @@ class Game(arcade.View):
                     break
             return
 
+        self.hovered_budget_summary = (
+            self.budget_summary_rect is not None
+            and self.point_in_rect(x, y, self.budget_summary_rect)
+        )
         self.hovered_resource_summary = (
             self.resource_summary_rect is not None
             and self.point_in_rect(x, y, self.resource_summary_rect)
@@ -7320,6 +9512,11 @@ class Game(arcade.View):
                 self.scroll_resource_rows(-scroll_y)
                 return
             if over_resource_panel:
+                return
+
+        if self.active_top_panel_key == "trade" and self.side_panel_progress > 0:
+            if self.point_in_rect(x, y, self.side_panel_rect()):
+                self.scroll_trade_rows(-scroll_y)
                 return
 
         old_zoom = self.world_camera.zoom

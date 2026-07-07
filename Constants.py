@@ -51,6 +51,7 @@ MAP_LAYERS = [
     ("height", "Высотная", True),
     ("climate", "Климат", True),
     ("resources", "Ресурсы", True),
+    ("supply", "Снабжение", True),
     ("weather", "Погодная", False),
 ]
 

@@ -68,15 +68,39 @@ def _close_window_safely(window):
         pass
 
 
-def _window_has_attached_canvas(window):
+def _window_has_attached_canvas(arcade_module, window):
     context = getattr(window, "context", None)
     if context is None or getattr(context, "canvas", None) is None:
         return False
     try:
         window.switch_to()
+        arcade_module.set_window(window)
     except Exception:
         return False
     return getattr(context, "canvas", None) is not None
+
+
+def apply_window_settings_safely(window, width, height, fullscreen):
+    width = int(width)
+    height = int(height)
+    if fullscreen:
+        try:
+            window.set_fullscreen(True)
+            window.switch_to()
+            return True, None
+        except Exception as exc:
+            print(f"Fullscreen switch failed, falling back to {width}x{height}: {exc}")
+
+    try:
+        window.set_fullscreen(False)
+    except Exception as exc:
+        print(f"Windowed mode reset failed: {exc}")
+    try:
+        window.set_size(width, height)
+        window.switch_to()
+    except Exception as exc:
+        return False, exc
+    return False, None
 
 
 def create_window_with_fallback(arcade_module, title, settings, resolutions):
@@ -85,8 +109,11 @@ def create_window_with_fallback(arcade_module, title, settings, resolutions):
     except Exception:
         pyglet = None
 
+    desired_fullscreen = bool(settings["fullscreen"])
+    # Fullscreen is intentionally not used as a startup fallback on Windows:
+    # pyglet can leave Arcade without an active window after a failed switch.
     attempts = [
-        (settings["resolution_index"], settings["fullscreen"]),
+        (settings["resolution_index"], False),
         (DEFAULT_SETTINGS["resolution_index"], False),
         (0, False),
     ]
@@ -105,15 +132,19 @@ def create_window_with_fallback(arcade_module, title, settings, resolutions):
         existing_windows = set(getattr(pyglet.app, "windows", [])) if pyglet else set()
         try:
             window = arcade_module.Window(int(width), int(height), title)
-            if fullscreen:
-                window.set_fullscreen(True)
-            if not _window_has_attached_canvas(window):
+            if not _window_has_attached_canvas(arcade_module, window):
                 raise RuntimeError("Window canvas has not been attached")
-            if attempt_key != (settings["resolution_index"], settings["fullscreen"]):
+            if desired_fullscreen:
+                applied_fullscreen, error = apply_window_settings_safely(window, width, height, True)
+                if error is not None:
+                    print(f"Startup fullscreen failed, keeping windowed startup: {error}")
+                elif applied_fullscreen:
+                    arcade_module.set_window(window)
+            if resolution_index != settings["resolution_index"]:
                 save_settings(
                     settings["sound_volume"],
                     settings["music_volume"],
-                    bool(fullscreen),
+                    desired_fullscreen,
                     resolution_index,
                     resolutions,
                 )
