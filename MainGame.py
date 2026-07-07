@@ -349,62 +349,6 @@ SUPPLY_RELAY_BUILDING_WEIGHTS = {
 }
 SUPPLY_DECAY_PER_HEX = 0.78
 SUPPLY_SOURCE_RADIUS = 7
-TRADE_CONTRACT_STEP = 1_000.0
-TRADE_CONTRACT_SHIFT_STEP = 10_000.0
-TRADE_BASE_CAPACITY = 8_000.0
-TRADE_BASE_MAX_CAPACITY = 160_000.0
-TRADE_SELL_LIMIT_MULTIPLIER = 2.0
-TRADE_PORT_CAPACITY_PER_COVERAGE = 90_000.0
-TRADE_WAREHOUSE_CAPACITY_PER_COVERAGE = 22_000.0
-TRADE_SUPPLY_DEPOT_CAPACITY_PER_COVERAGE = 12_000.0
-TRADE_SETTLEMENT_CAPACITY_PER_COVERAGE = 8_000.0
-TRADE_BUY_PRICE_MARKUP = 1.08
-TRADE_SELL_PRICE_MARKDOWN = 0.92
-TRADE_WEEKLY_FRACTION = 7 / 30
-MARKET_SHOCK_FACTOR = 2.0
-MARKET_SHOCK_DECAY = 0.55
-MARKET_PRICE_SMOOTHING = 0.42
-MARKET_LINKED_PRICE_SMOOTHING = 0.35
-MARKET_MAX_WEEKLY_PRICE_MOVE = 0.35
-MARKET_HISTORY_LIMIT = 16
-TRADE_BASE_PRICES = {
-    "coal": 34,
-    "oil": 72,
-    "natural_gas": 48,
-    "peat": 16,
-    "uranium": 420,
-    "iron_ore": 38,
-    "copper_ore": 96,
-    "bauxite": 62,
-    "lead": 58,
-    "zinc": 54,
-    "nickel": 118,
-    "gold": 1_800,
-    "silver": 620,
-    "rare_earth_metals": 980,
-    "alloying_additives": 180,
-    "potash": 44,
-    "phosphorite": 40,
-    "apatite": 42,
-    "sulfur": 58,
-    "rubber": 120,
-    "graphite": 160,
-    "mica": 110,
-    "quartz": 92,
-    "steel": 135,
-    "refined_fuel": 118,
-    "chemicals": 145,
-    "food": 22,
-    "fertilizer": 105,
-    "copper_wire": 210,
-    "consumer_goods": 260,
-    "machinery": 620,
-    "vehicles": 850,
-    "electronics": 1_250,
-    "construction_goods": 170,
-    "weapons": 1_100,
-    "ships": 4_200,
-}
 REFINERY_RESOURCE_WEIGHTS = {
     "oil": 1.0,
     "natural_gas": 0.75,
@@ -474,75 +418,6 @@ FINISHED_RESOURCE_NAMES = [
     "weapons",
     "ships",
 ]
-MARKET_RESOURCE_RARITY = {
-    "coal": 1.05,
-    "oil": 0.85,
-    "natural_gas": 0.80,
-    "peat": 0.90,
-    "uranium": 0.18,
-    "iron_ore": 1.00,
-    "copper_ore": 0.62,
-    "bauxite": 0.55,
-    "lead": 0.72,
-    "zinc": 0.72,
-    "nickel": 0.36,
-    "gold": 0.50,
-    "silver": 0.58,
-    "rare_earth_metals": 0.10,
-    "alloying_additives": 0.25,
-    "potash": 0.42,
-    "phosphorite": 0.50,
-    "apatite": 0.46,
-    "sulfur": 0.48,
-    "rubber": 0.30,
-    "graphite": 0.25,
-    "mica": 0.28,
-    "quartz": 0.42,
-    "steel": 0.85,
-    "refined_fuel": 0.78,
-    "chemicals": 0.64,
-    "food": 1.20,
-    "fertilizer": 0.52,
-    "copper_wire": 0.44,
-    "consumer_goods": 0.78,
-    "machinery": 0.46,
-    "vehicles": 0.36,
-    "electronics": 0.22,
-    "construction_goods": 0.95,
-    "weapons": 0.26,
-    "ships": 0.14,
-}
-MARKET_RESOURCE_VOLATILITY = {
-    "rare_earth_metals": 1.80,
-    "uranium": 1.55,
-    "gold": 1.20,
-    "silver": 1.15,
-    "electronics": 1.35,
-    "ships": 1.45,
-    "weapons": 1.30,
-    "oil": 1.25,
-    "natural_gas": 1.20,
-    "rubber": 1.25,
-    "food": 0.75,
-    "construction_goods": 0.82,
-    "iron_ore": 0.85,
-    "coal": 0.80,
-    "steel": 0.92,
-}
-MARKET_LINKED_PRICE_EFFECTS = {
-    "refined_fuel": {"oil": 0.80, "natural_gas": 0.20, "coal": 0.12, "peat": 0.06},
-    "fertilizer": {"natural_gas": 0.34, "potash": 0.24, "phosphorite": 0.18, "apatite": 0.16, "chemicals": 0.22},
-    "chemicals": {"natural_gas": 0.22, "oil": 0.16, "sulfur": 0.18},
-    "steel": {"iron_ore": 0.45, "coal": 0.26, "alloying_additives": 0.12},
-    "copper_wire": {"copper_ore": 0.62, "refined_fuel": 0.08},
-    "machinery": {"steel": 0.34, "copper_wire": 0.18, "chemicals": 0.08},
-    "vehicles": {"steel": 0.28, "rubber": 0.20, "refined_fuel": 0.12, "machinery": 0.24},
-    "electronics": {"rare_earth_metals": 0.34, "copper_wire": 0.22, "chemicals": 0.10},
-    "consumer_goods": {"chemicals": 0.12, "food": 0.08, "refined_fuel": 0.06},
-    "construction_goods": {"steel": 0.12, "refined_fuel": 0.06, "machinery": 0.05},
-    "weapons": {"steel": 0.26, "machinery": 0.22, "electronics": 0.12},
-    "ships": {"steel": 0.38, "machinery": 0.20, "electronics": 0.08, "refined_fuel": 0.08},
-}
 PRODUCTION_STAGES = ["raw", "semi_finished", "agriculture", "finished", "upkeep"]
 PRODUCTION_MONTH_HOURS = 24 * 30
 FARM_FOOD_BASE_RATE = 30_000
