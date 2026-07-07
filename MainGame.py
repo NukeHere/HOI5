@@ -7783,15 +7783,26 @@ class Game(arcade.View):
             11,
         )
         self.draw_ui_text(
-            "Логистика/рынок: "
-            f"пок. {self.format_resource_amount(trade_flows['buy_logistics_capacity_limit'])}/"
-            f"{self.format_resource_amount(trade_flows['buy_max_capacity_limit'])}; "
-            f"прод. {self.format_resource_amount(trade_flows['sell_logistics_capacity_limit'])}/"
-            f"{self.format_resource_amount(trade_flows['sell_max_capacity_limit'])}",
+            "Лимиты: "
+            f"покупка {self.format_resource_amount(trade_flows['buy_logistics_capacity_limit'])} лог. / "
+            f"{self.format_resource_amount(trade_flows['buy_max_capacity_limit'])} рынок; "
+            f"продажа {self.format_resource_amount(trade_flows['sell_logistics_capacity_limit'])} лог. / "
+            f"{self.format_resource_amount(trade_flows['sell_max_capacity_limit'])} рынок",
             panel_x + 18,
             panel_y + panel_height - 130,
             (170, 188, 204),
             10,
+        )
+        market_limit_total = trade_flows["buy_max_capacity_limit"] + trade_flows["sell_max_capacity_limit"]
+        actual_limit_total = trade_flows["buy_capacity_limit"] + trade_flows["sell_capacity_limit"]
+        trade_efficiency = actual_limit_total / market_limit_total if market_limit_total > 0 else 1.0
+        self.draw_ui_text(
+            f"Эфф. торговли: {trade_efficiency:.0%}",
+            panel_x + panel_width - 18,
+            panel_y + panel_height - 130,
+            (190, 214, 232),
+            10,
+            anchor_x="right",
         )
         next_execution = self.simulation_server.next_market_execution_time
         next_execution_text = (
