@@ -6,7 +6,6 @@ import time
 import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from pathlib import Path
 from perlin_noise import PerlinNoise
 from PIL import Image, ImageDraw
 from pyglet.graphics import Batch
@@ -15,800 +14,6 @@ from Constants import *
 from HexTile import HexTile
 from MapData import MapTileData
 from Settings import apply_window_settings_safely, create_window_with_fallback, load_settings, save_settings
-
-RESOURCE_MAP_GROUPS = [
-    (
-        "fuel",
-        "Топливо",
-        ["coal", "oil", "natural_gas", "peat", "uranium"],
-        (222, 92, 54),
-        1_200_000,
-    ),
-    (
-        "metals",
-        "Сырьевые металлы",
-        [
-            "iron_ore", "copper_ore", "bauxite", "lead", "zinc", "nickel",
-            "gold", "silver", "rare_earth_metals", "alloying_additives",
-        ],
-        (214, 176, 82),
-        350_000,
-    ),
-    (
-        "chemistry",
-        "Химсырье",
-        ["sulfur", "potash", "phosphorite", "apatite", "rubber"],
-        (112, 184, 132),
-        250_000,
-    ),
-    (
-        "gems",
-        "Редкие минералы",
-        ["gold", "silver", "rare_earth_metals", "uranium", "graphite", "mica", "quartz"],
-        (156, 124, 218),
-        80_000,
-    ),
-]
-RAW_RESOURCE_NAMES = list(
-    dict.fromkeys(
-        resource
-        for _key, _label, resources, _color, _scale in RESOURCE_MAP_GROUPS
-        for resource in resources
-    )
-)
-STARTING_STOCK_RANGES = {
-    "raw": (20_000, 70_000),
-    "semi_finished": (5_000, 18_000),
-    "finished": (1_500, 8_000),
-}
-STARTING_STOCK_MULTIPLIERS = {
-    "gold": 0.08,
-    "silver": 0.18,
-    "rare_earth_metals": 0.12,
-    "uranium": 0.16,
-    "oil": 1.7,
-    "natural_gas": 1.7,
-    "coal": 1.35,
-    "food": 15.0,
-    "fertilizer": 2.2,
-    "consumer_goods": 12.0,
-    "weapons": 0.55,
-    "ships": 0.25,
-    "electronics": 0.65,
-    "construction_goods": 12.0,
-    "refined_fuel": 6,
-}
-BUILDING_TYPES = [
-    ("city", "Город"),
-    ("village", "Село"),
-    ("warehouse", "Склад"),
-    ("supply_depot", "Пункт снабжения"),
-    ("fuel_storage", "Топливохранилище"),
-    ("refinery", "НПЗ"),
-    ("oil_gas_rig", "Нефтегазовая вышка"),
-    ("industry", "Промзона"),
-    ("farms", "Поля/фермы"),
-    ("mine", "Шахта"),
-    ("port", "Порт"),
-]
-TERRAIN_DISPLAY_NAMES = {
-    "deep_ocean": "Глубокий океан",
-    "ocean": "Океан",
-    "shallow_water": "Мелководье",
-    "lake": "Озеро",
-    "river": "Река",
-    "swamp": "Болото",
-    "bog": "Торфяник",
-    "mangrove": "Мангры",
-    "mountains": "Горы",
-    "snowy_mountains": "Снежные горы",
-    "hills": "Холмы",
-    "desert": "Пустыня",
-    "plains": "Равнины",
-    "tundra": "Тундра",
-    "taiga": "Тайга",
-    "temperate_forest": "Умеренный лес",
-    "jungle": "Джунгли",
-    "tropical_rainforest": "Тропический лес",
-    "savanna": "Саванна",
-    "forest": "Лес",
-    "grassland": "Степь",
-}
-BUILDING_DISPLAY_NAMES = dict(BUILDING_TYPES)
-STARTING_POPULATION = 21_000_000
-STARTING_BUDGET = 250_000_000.0
-CITY_POPULATION_PER_FULL_COVERAGE = 10_000_000
-STARTING_REFERENCE_LAND_TILES = 90
-STARTING_REFERENCE_MAP_SIZE = 40
-STARTING_MIN_SCALE = 0.45
-STARTING_MAX_SCALE = 2.40
-STARTING_URBAN_POPULATION_SHARE = 0.72
-RURAL_POPULATION_WEIGHTS = {
-    "village": 3.8,
-    "farms": 0.30,
-    "mine": 0.16,
-    "oil_gas_rig": 0.12,
-    "warehouse": 0.12,
-    "fuel_storage": 0.08,
-    "refinery": 0.10,
-    "industry": 0.10,
-    "port": 0.08,
-}
-STARTING_INFRASTRUCTURE_BUDGET = {
-    "village": 1.20,
-    "farms": 5.20,
-    "mine": 1.20,
-    "oil_gas_rig": 0.85,
-    "industry": 3.50,
-    "port": 0.45,
-    "warehouse": 0.35,
-    "fuel_storage": 1.10,
-    "refinery": 1.00,
-}
-INFRASTRUCTURE_COVERAGE_COSTS = {
-    "village": 0.85,
-    "farms": 1.00,
-    "mine": 1.15,
-    "oil_gas_rig": 1.25,
-    "industry": 1.35,
-    "port": 1.20,
-    "warehouse": 0.90,
-    "fuel_storage": 0.95,
-    "refinery": 1.45,
-}
-INFRASTRUCTURE_COVERAGE_LIMITS = {
-    "city": (0.08, 0.72),
-    "village": (0.06, 0.30),
-    "farms": (0.08, 0.42),
-    "mine": (0.06, 0.34),
-    "oil_gas_rig": (0.05, 0.28),
-    "industry": (0.06, 0.32),
-    "port": (0.08, 0.30),
-    "warehouse": (0.05, 0.26),
-    "supply_depot": (0.04, 0.24),
-    "fuel_storage": (0.06, 0.34),
-    "refinery": (0.05, 0.22),
-}
-CONSTRUCTION_LEVEL_MULTIPLIER = 1.10
-CONSTRUCTION_STEP = 0.05
-CONSTRUCTION_STATUS_CHECK_MONTH_FRACTION = 1 / 30
-BASE_BUILD_POWER_PER_MONTH = 100.0
-BUILDING_CONSTRUCTION_BASE = {
-    "city": {
-        "work": 520.0,
-        "money": 17_500_000,
-        "resources": {
-            "construction_goods": 36_000,
-            "steel": 9_000,
-            "machinery": 1_200,
-            "refined_fuel": 650,
-        },
-    },
-    "village": {
-        "work": 160.0,
-        "money": 3_000_000,
-        "resources": {
-            "construction_goods": 7_000,
-            "steel": 1_000,
-            "machinery": 180,
-            "refined_fuel": 120,
-        },
-    },
-    "farms": {
-        "work": 110.0,
-        "money": 1_500_000,
-        "resources": {
-            "construction_goods": 4_500,
-            "machinery": 160,
-            "refined_fuel": 140,
-        },
-    },
-    "mine": {
-        "work": 240.0,
-        "money": 5_000_000,
-        "resources": {
-            "construction_goods": 11_000,
-            "steel": 3_500,
-            "machinery": 750,
-            "refined_fuel": 420,
-        },
-    },
-    "oil_gas_rig": {
-        "work": 260.0,
-        "money": 6_500_000,
-        "resources": {
-            "construction_goods": 13_000,
-            "steel": 4_600,
-            "machinery": 900,
-            "refined_fuel": 500,
-        },
-    },
-    "industry": {
-        "work": 340.0,
-        "money": 8_000_000,
-        "resources": {
-            "construction_goods": 22_000,
-            "steel": 8_000,
-            "machinery": 1_800,
-            "refined_fuel": 520,
-        },
-    },
-    "port": {
-        "work": 420.0,
-        "money": 10_000_000,
-        "resources": {
-            "construction_goods": 20_000,
-            "steel": 8_500,
-            "machinery": 1_250,
-            "refined_fuel": 850,
-        },
-    },
-    "warehouse": {
-        "work": 140.0,
-        "money": 2_500_000,
-        "resources": {
-            "construction_goods": 8_000,
-            "steel": 1_800,
-            "machinery": 220,
-            "refined_fuel": 120,
-        },
-    },
-    "supply_depot": {
-        "work": 120.0,
-        "money": 2_200_000,
-        "resources": {
-            "construction_goods": 6_500,
-            "steel": 1_200,
-            "machinery": 240,
-            "refined_fuel": 110,
-        },
-    },
-    "fuel_storage": {
-        "work": 190.0,
-        "money": 4_000_000,
-        "resources": {
-            "construction_goods": 12_000,
-            "steel": 4_800,
-            "machinery": 650,
-            "refined_fuel": 260,
-        },
-    },
-    "refinery": {
-        "work": 460.0,
-        "money": 12_000_000,
-        "resources": {
-            "construction_goods": 28_000,
-            "steel": 11_000,
-            "machinery": 2_600,
-            "refined_fuel": 900,
-        },
-    },
-}
-STORAGE_CATEGORIES = ["raw", "semi_finished", "finished", "fuel"]
-STORAGE_CATEGORY_LABELS = {
-    "raw": "Сырье",
-    "semi_finished": "Полуфабрикаты",
-    "finished": "Готовая продукция",
-    "fuel": "Топливо",
-}
-STORAGE_CAPACITY_BY_COVERAGE = {
-    "raw": {
-        "city": 520_000,
-        "village": 180_000,
-        "warehouse": 1_050_000,
-        "supply_depot": 240_000,
-        "port": 280_000,
-    },
-    "semi_finished": {
-        "city": 470_000,
-        "village": 140_000,
-        "warehouse": 820_000,
-        "supply_depot": 210_000,
-        "port": 240_000,
-    },
-    "finished": {
-        "city": 560_000,
-        "village": 200_000,
-        "warehouse": 760_000,
-        "supply_depot": 190_000,
-        "port": 220_000,
-    },
-}
-FUEL_STORAGE_CAPACITY_BY_COVERAGE = {
-    "city": 180_000,
-    "village": 35_000,
-    "port": 220_000,
-    "supply_depot": 120_000,
-    "fuel_storage": 3_200_000,
-    "refinery": 850_000,
-    "oil_gas_rig": 420_000,
-}
-FUEL_STORAGE_RESOURCE_KEYS = {
-    "coal",
-    "oil",
-    "natural_gas",
-    "peat",
-    "uranium",
-    "refined_fuel",
-}
-SUPPLY_SOURCE_WEIGHTS = {
-    "city": 1.00,
-    "village": 0.48,
-    "warehouse": 0.50,
-    "supply_depot": 0.92,
-    "port": 0.46,
-    "fuel_storage": 0.22,
-    "refinery": 0.30,
-    "oil_gas_rig": 0.18,
-    "industry": 0.18,
-}
-SUPPLY_RELAY_BUILDING_WEIGHTS = {
-    "warehouse": 0.28,
-    "supply_depot": 0.72,
-    "port": 0.22,
-}
-SUPPLY_DECAY_PER_HEX = 0.78
-SUPPLY_SOURCE_RADIUS = 7
-REFINERY_RESOURCE_WEIGHTS = {
-    "oil": 1.0,
-    "natural_gas": 0.75,
-    "coal": 0.20,
-}
-STARTING_MINE_RESOURCE_WEIGHTS = {
-    "coal": 1.00,
-    "oil": 1.00,
-    "natural_gas": 0.95,
-    "peat": 0.55,
-    "iron_ore": 1.00,
-    "copper_ore": 0.82,
-    "bauxite": 0.64,
-    "sulfur": 0.42,
-    "phosphorite": 0.40,
-    "apatite": 0.36,
-}
-OIL_GAS_RESOURCE_KEYS = {"oil", "natural_gas"}
-STARTING_OIL_GAS_RIG_RESOURCE_WEIGHTS = {
-    "oil": 1.0,
-    "natural_gas": 0.95,
-}
-STARTING_SOLID_MINE_RESOURCE_WEIGHTS = {
-    key: value
-    for key, value in STARTING_MINE_RESOURCE_WEIGHTS.items()
-    if key not in OIL_GAS_RESOURCE_KEYS
-}
-STARTING_RESOURCE_COMPENSATION_GROUPS = [
-    {
-        "resources": ["coal", "oil", "natural_gas", "peat"],
-        "target": 650_000,
-        "stock": [("raw", "coal", 55_000, 180)],
-        "budget": 14_000_000,
-    },
-    {
-        "resources": ["iron_ore", "copper_ore", "bauxite"],
-        "target": 450_000,
-        "stock": [("raw", "iron_ore", 45_000, 280), ("raw", "copper_ore", 20_000, 420)],
-        "budget": 18_000_000,
-    },
-]
-STARTING_AGRICULTURE_COMPENSATION = {
-    "stock": [("semi_finished", "food", 90_000, 260), ("semi_finished", "fertilizer", 22_000, 320)],
-    "budget": 10_000_000,
-}
-INFRASTRUCTURE_MISSING_BUDGET_VALUE = 30_000_000
-INFRASTRUCTURE_COMPENSATION_BUDGET_CAP = 120_000_000
-RESOURCE_PANEL_CATEGORIES = [
-    ("raw", "Сырье"),
-    ("semi_finished", "Полуфабрикаты"),
-    ("finished", "Готовая продукция"),
-]
-SEMI_FINISHED_RESOURCE_NAMES = [
-    "steel",
-    "refined_fuel",
-    "chemicals",
-    "food",
-    "fertilizer",
-    "copper_wire",
-]
-FINISHED_RESOURCE_NAMES = [
-    "consumer_goods",
-    "machinery",
-    "vehicles",
-    "electronics",
-    "construction_goods",
-    "weapons",
-    "ships",
-]
-PRODUCTION_STAGES = ["raw", "semi_finished", "agriculture", "finished", "upkeep"]
-PRODUCTION_MONTH_HOURS = 24 * 30
-FARM_FOOD_BASE_RATE = 30_000
-FERTILIZER_FOOD_BONUS = 0.30
-FERTILIZER_CONSUMPTION_PER_FARM_COVERAGE = 950
-STARTING_CONSUMER_GOODS_INDUSTRY_SHARE = 0.30
-STARTING_CONSUMER_GOODS_TILE_SHARE = 0.45
-POPULATION_INCOME_PER_MILLION = {
-    "rural": 150_000,
-    "city": 700_000,
-    "village": 300_000,
-    "farms": 220_000,
-    "mine": 360_000,
-    "oil_gas_rig": 420_000,
-    "industry": 460_000,
-    "port": 390_000,
-    "warehouse": 240_000,
-    "supply_depot": 210_000,
-    "fuel_storage": 230_000,
-    "refinery": 480_000,
-}
-POPULATION_INCOME_TYPE_WEIGHTS = {
-    "city": 5.0,
-    "village": 3.0,
-    "farms": 1.6,
-    "mine": 1.8,
-    "oil_gas_rig": 1.7,
-    "industry": 2.3,
-    "port": 1.9,
-    "warehouse": 1.2,
-    "supply_depot": 1.1,
-    "fuel_storage": 1.1,
-    "refinery": 2.2,
-}
-COMPANY_INCOME_PER_COVERAGE = {
-    "farms": 90_000,
-    "mine": 135_000,
-    "oil_gas_rig": 165_000,
-    "industry": 240_000,
-    "port": 160_000,
-    "warehouse": 45_000,
-    "supply_depot": 52_000,
-    "fuel_storage": 65_000,
-    "refinery": 220_000,
-}
-POPULATION_CAPACITY_BASE_LAND = 55_000
-POPULATION_CAPACITY_BASE_WATER = 0
-POPULATION_CAPACITY_PER_COVERAGE = {
-    "city": 10_000_000,
-    "village": 2_200_000,
-    "farms": 180_000,
-    "mine": 130_000,
-    "oil_gas_rig": 110_000,
-    "industry": 520_000,
-    "port": 320_000,
-    "warehouse": 90_000,
-    "supply_depot": 80_000,
-    "fuel_storage": 70_000,
-    "refinery": 180_000,
-}
-POPULATION_MAX_OVERCAPACITY = 1.20
-POPULATION_BASE_ANNUAL_GROWTH = 0.012
-CITY_NATURAL_ANNUAL_GROWTH = 0.015
-VILLAGE_NATURAL_ANNUAL_GROWTH = 0.025
-MONEY_GOVERNMENT_BASE_EXPENSE = 450_000
-MONEY_GOVERNMENT_PER_MILLION = 48_000
-MONEY_GOVERNMENT_PER_TILE = 3_500
-MONEY_SOCIAL_BASE_PER_MILLION = 62_000
-MONEY_SOCIAL_CITY_BONUS = 70_000
-MONEY_SOCIAL_VILLAGE_BONUS = 28_000
-MONEY_ARMY_BASE_EXPENSE = 0
-INFRASTRUCTURE_UPKEEP_PER_COVERAGE = {
-    "city": 145_000,
-    "village": 42_000,
-    "farms": 18_000,
-    "mine": 50_000,
-    "oil_gas_rig": 62_000,
-    "industry": 92_000,
-    "port": 75_000,
-    "warehouse": 18_000,
-    "supply_depot": 24_000,
-    "fuel_storage": 28_000,
-    "refinery": 115_000,
-}
-INDUSTRY_SECTOR_RESOURCE_WEIGHTS = {
-    "metallurgy": {
-        "iron_ore": 1.0,
-        "coal": 0.8,
-        "alloying_additives": 0.35,
-    },
-    "construction_materials": {},
-    "chemicals": {
-        "natural_gas": 0.9,
-        "sulfur": 0.85,
-        "phosphorite": 0.35,
-        "apatite": 0.35,
-        "potash": 0.35,
-    },
-    "machinery": {
-        "iron_ore": 0.6,
-        "copper_ore": 0.35,
-        "coal": 0.25,
-    },
-    "vehicles": {
-        "iron_ore": 0.45,
-        "oil": 0.30,
-        "rubber": 0.30,
-        "bauxite": 0.20,
-    },
-    "electronics": {
-        "copper_ore": 0.85,
-        "rare_earth_metals": 0.75,
-        "quartz": 0.35,
-    },
-    "shipbuilding": {
-        "iron_ore": 0.45,
-        "oil": 0.25,
-    },
-    "weapons": {
-        "iron_ore": 0.55,
-        "copper_ore": 0.25,
-        "sulfur": 0.25,
-    },
-}
-INDUSTRY_SECTOR_LABELS = {
-    "metallurgy": "Металлургия",
-    "construction_materials": "Стройматериалы",
-    "chemicals": "Химия",
-    "machinery": "Машиностроение",
-    "vehicles": "Транспорт",
-    "consumer_goods": "Товары",
-    "electronics": "Электроника",
-    "shipbuilding": "Судостроение",
-    "weapons": "Оружие",
-}
-LIFE_SUPPORT_CONSUMPTION_PER_MILLION = {
-    "food": 8100,
-    "consumer_goods": 150,
-    "construction_goods": 100,
-    "refined_fuel": 260,
-    "chemicals": 95,
-    "vehicles": 10,
-    "electronics": 2,
-}
-SETTLEMENT_UPKEEP_PER_COVERAGE = {
-    "city": {
-        "construction_goods": 2370,
-        "machinery": 120,
-        "refined_fuel": 260,
-    },
-    "village": {
-        "construction_goods": 700,
-        "machinery": 45,
-        "refined_fuel": 80,
-    },
-}
-PRODUCTION_RECIPES = {
-    "semi_finished": {
-        "steel": {
-            "building": "industry",
-            "sector": "metallurgy",
-            "base_rate": 5200,
-            "inputs": {"iron_ore": 2.0, "coal": 0.8},
-            "outputs": {"steel": 1.0},
-        },
-        "oil_refining": {
-            "building": "refinery",
-            "sector": "refining",
-            "base_rate": 6200,
-            "inputs": {"oil": 1.0},
-            "outputs": {"refined_fuel": 0.72, "chemicals": 0.22},
-        },
-        "chemicals": {
-            "building": "industry",
-            "sector": "chemicals",
-            "base_rate": 3600,
-            "inputs": {"natural_gas": 0.7, "sulfur": 0.25},
-            "outputs": {"chemicals": 1.0},
-        },
-        "fertilizer": {
-            "building": "industry",
-            "sector": "chemicals",
-            "base_rate": 2600,
-            "inputs": {"chemicals": 0.5, "phosphorite": 0.4, "potash": 0.3},
-            "outputs": {"fertilizer": 1.0},
-        },
-        "copper_wire": {
-            "building": "industry",
-            "sector": "electronics",
-            "base_rate": 2600,
-            "inputs": {"copper_ore": 1.2},
-            "outputs": {"copper_wire": 1.0},
-        },
-    },
-    "finished": {
-        "consumer_goods": {
-            "building": "industry",
-            "sector": "consumer_goods",
-            "base_rate": 3400,
-            "inputs": {"food": 0.4, "chemicals": 0.25, "steel": 0.15},
-            "outputs": {"consumer_goods": 1.0},
-        },
-        "machinery": {
-            "building": "industry",
-            "sector": "machinery",
-            "base_rate": 2800,
-            "inputs": {"steel": 0.9, "copper_wire": 0.25, "chemicals": 0.2},
-            "outputs": {"machinery": 1.0},
-        },
-        "vehicles": {
-            "building": "industry",
-            "sector": "vehicles",
-            "base_rate": 1700,
-            "inputs": {"steel": 0.8, "machinery": 0.45, "refined_fuel": 0.2},
-            "outputs": {"vehicles": 1.0},
-        },
-        "electronics": {
-            "building": "industry",
-            "sector": "electronics",
-            "base_rate": 1600,
-            "inputs": {"copper_wire": 0.65, "rare_earth_metals": 0.12, "chemicals": 0.25},
-            "outputs": {"electronics": 1.0},
-        },
-        "construction_goods": {
-            "building": "industry",
-            "sector": "construction_materials",
-            "base_rate": 4400,
-            "inputs": {},
-            "outputs": {"construction_goods": 1.0},
-        },
-        "weapons": {
-            "building": "industry",
-            "sector": "weapons",
-            "base_rate": 1200,
-            "inputs": {"steel": 0.8, "machinery": 0.35, "chemicals": 0.25},
-            "outputs": {"weapons": 1.0},
-        },
-        "ships": {
-            "building": "industry",
-            "sector": "shipbuilding",
-            "base_rate": 800,
-            "inputs": {"steel": 1.4, "machinery": 0.65, "refined_fuel": 0.25},
-            "outputs": {"ships": 1.0},
-        },
-    },
-}
-RESOURCE_DISPLAY_NAMES = {
-    "coal": "Уголь",
-    "peat": "Торф",
-    "oil": "Нефть",
-    "natural_gas": "Газ",
-    "uranium": "Уран",
-    "iron_ore": "Железная руда",
-    "alloying_additives": "Легир. добавки",
-    "bauxite": "Бокситы",
-    "copper_ore": "Медная руда",
-    "lead": "Свинец",
-    "nickel": "Никель",
-    "zinc": "Цинк",
-    "gold": "Золото",
-    "silver": "Серебро",
-    "rare_earth_metals": "Редкоземы",
-    "potash": "Калийные соли",
-    "phosphorite": "Фосфориты",
-    "apatite": "Апатиты",
-    "sulfur": "Сера",
-    "rubber": "Каучук",
-    "graphite": "Графит",
-    "mica": "Слюда",
-    "quartz": "Кварц",
-    "steel": "Сталь",
-    "refined_fuel": "Топливо",
-    "chemicals": "Химикаты",
-    "food": "Еда",
-    "fertilizer": "Удобрения",
-    "copper_wire": "Медная проволока",
-    "consumer_goods": "Потреб. товары",
-    "machinery": "Оборудование",
-    "vehicles": "Транспорт",
-    "electronics": "Электроника",
-    "construction_goods": "Стройтовары",
-    "weapons": "Оружие",
-    "ships": "Корабли",
-}
-RESOURCE_USAGE_DESCRIPTIONS = {
-    "coal": "Топливо для электростанций, металлургии и тяжелой промышленности.",
-    "peat": "Местное топливо и сырье для химии, удобрений и сельского хозяйства.",
-    "oil": "Основа топлива, пластмасс, химикатов и военного снабжения.",
-    "natural_gas": "Топливо для энергетики, отопления и химической промышленности.",
-    "uranium": "Сырье для атомной энергетики, исследований и стратегических программ.",
-    "iron_ore": "База для стали, строительства, машин, транспорта и вооружений.",
-    "alloying_additives": "Добавки для прочных сплавов, станков, двигателей и оружия.",
-    "bauxite": "Сырье для алюминия, авиации, транспорта и электрооборудования.",
-    "copper_ore": "Нужна для проводов, электроники, энергетики и промышленного оборудования.",
-    "lead": "Используется в аккумуляторах, боеприпасах, защите и химической промышленности.",
-    "nickel": "Нужен для нержавеющей стали, сплавов, батарей и военной техники.",
-    "zinc": "Защита стали от коррозии, сплавы, химия и строительные материалы.",
-    "gold": "Драгоценный металл для бюджета, электроники, резервов и торговли.",
-    "silver": "Используется в электронике, химии, медицине и торговых товарах.",
-    "rare_earth_metals": "Критичны для электроники, датчиков, батарей и высоких технологий.",
-    "potash": "Основа удобрений и аграрного производства.",
-    "phosphorite": "Сырье для удобрений и роста сельского хозяйства.",
-    "apatite": "Источник фосфатов для удобрений и химической промышленности.",
-    "sulfur": "Химикаты, удобрения, взрывчатка и переработка нефти.",
-    "rubber": "Шины, техника, военное снабжение и потребительские товары.",
-    "graphite": "Электроды, батареи, металлургия и высокотехнологичная промышленность.",
-    "mica": "Изоляция, электроника, оптика и специальные материалы.",
-    "quartz": "Стекло, электроника, оптика и точная промышленность.",
-    "steel": "Главный материал для строительства, машин, транспорта и армии.",
-    "refined_fuel": "Горючее для транспорта, армии, авиации и промышленности.",
-    "chemicals": "Промежуточный ресурс для удобрений, пластмасс, медицины и боеприпасов.",
-    "food": "Снабжение населения и армии, основа стабильности страны.",
-    "fertilizer": "Повышает выпуск сельского хозяйства и продовольствия.",
-    "copper_wire": "Электросети, техника, электроника и промышленное оборудование.",
-    "consumer_goods": "Товары для населения, влияющие на довольство и экономику.",
-    "machinery": "Станки и оборудование для фабрик, шахт и строительства.",
-    "vehicles": "Гражданский и военный транспорт, логистика и торговля.",
-    "electronics": "Исследования, связь, автоматизация, армия и высокие технологии.",
-    "construction_goods": "Готовые материалы для ускоренного строительства.",
-    "weapons": "Оснащение армии, мобилизация и военное производство.",
-    "ships": "Флот, морская торговля, перевозки и контроль побережья.",
-}
-TILE_VISUAL_ASSETS = {
-    "forest": "forest.png",
-    "grassland": "grassland.png",
-    "desert": "desert.png",
-    "mountains": "mountains.png",
-    "snowfield": "snowfield.png",
-    "water": "water.png",
-    "city": "city.png",
-    "village": "village.png",
-    "warehouse": "warehouse.png",
-    "supply_depot": "warehouse.png",
-    "fuel_storage": "fuel_storage.png",
-    "refinery": "refinery.png",
-    "oil_gas_rig": "refinery.png",
-    "industry": "industry.png",
-    "farms": "farms.png",
-    "mine": "mine.png",
-    "port": "port.png",
-}
-VISUAL_FACTOR_WEIGHTS = {
-    "city": 1.45,
-    "port": 1.4,
-    "industry": 1.3,
-    "farms": 1.22,
-    "mine": 1.2,
-    "warehouse": 1.16,
-    "supply_depot": 1.18,
-    "refinery": 1.15,
-    "oil_gas_rig": 1.13,
-    "fuel_storage": 1.14,
-    "village": 1.08,
-    "water": 1.18,
-    "mountains": 1.12,
-    "forest": 1.05,
-    "desert": 1.02,
-    "snowfield": 1.02,
-    "grassland": 0.92,
-}
-VISUAL_MIN_COVERAGE = 0.03
-VISUAL_SYSTEM_MIN_ZOOM = 0.38
-VISUAL_EDGE_MIN_ZOOM = 0.62
-VISUAL_DENSE_TILE_LIMIT = 650
-ASSET_DIR = Path(__file__).resolve().parent / "assets"
-LAYER_ICON_PATH = ASSET_DIR / "layers_icon.png"
-TILE_VISUAL_DIR = ASSET_DIR / "tile_visuals"
-UI_ICON_DIR = ASSET_DIR / "ui_icons"
-TOP_STATUS_BAR_HEIGHT = 36
-TOP_NAV_BAR_HEIGHT = 46
-TOP_UI_HEIGHT = TOP_STATUS_BAR_HEIGHT + TOP_NAV_BAR_HEIGHT
-SIDE_PANEL_WIDTH = 420
-SIDE_PANEL_MARGIN = 12
-TOP_NAV_TABS = [
-    ("politics", "Внутренняя политика", "politics.png"),
-    ("economy", "Экономика", "economy.png"),
-    ("resources", "Ресурсы", "resources.png"),
-    ("trade", "Торговля", "economy.png"),
-    ("construction", "Строительство", "construction.png"),
-    ("research", "Исследования", "research.png"),
-    ("diplomacy", "Дипломатия", "diplomacy.png"),
-    ("military", "Армия", "military.png"),
-]
-SIMULATION_START_TIME = datetime(2000, 1, 1, 0)
-SIMULATION_REAL_SECONDS_PER_TICK = 0.25
-SIMULATION_HOURS_PER_TICK = [1, 2, 4, 8, 24]
-MONTH_NAMES = [
-    "янв", "фев", "мар", "апр", "май", "июн",
-    "июл", "авг", "сен", "окт", "ноя", "дек",
-]
-
 
 class PauseButton:
     def __init__(self, label, x, y, width, height, action):
@@ -1066,6 +271,9 @@ class StatePlayer:
     construction_queue: list = None
     monthly_income_breakdown: dict = None
     monthly_expenses_breakdown: dict = None
+    economy_month_key: tuple | None = None
+    economy_current_snapshot: dict = None
+    economy_previous_snapshot: dict = None
     population: float | None = None
     budget: float = 250_000_000.0
     monthly_balance: float = 0.0
@@ -1073,6 +281,7 @@ class StatePlayer:
     population_month_accumulator: float = 0.0
     stability: float = 0.72
     legitimacy: float = 0.61
+    war_support: float = 0.50
 
     def __post_init__(self):
         if self.tiles is None:
@@ -1148,9 +357,18 @@ class StatePlayer:
                 "army": 0.0,
                 "government": 0.0,
                 "social": 0.0,
+                "social_breakdown": {
+                    "pensions": 0.0,
+                    "children": 0.0,
+                    "disability": 0.0,
+                    "local_services": 0.0,
+                    "total": 0.0,
+                },
                 "infrastructure": 0.0,
                 "total": 0.0,
             }
+        if self.economy_current_snapshot is None:
+            self.economy_current_snapshot = {}
 
 
 class LocalSimulationServer:
@@ -1524,6 +742,7 @@ class Game(arcade.View):
         self.selection_border = None
         self.selection_border_sprite_list = arcade.SpriteList()
         self.batch = Batch()
+        self.tooltip_batch = Batch()
         self.debug_text = arcade.Text(
             "",
             0,
@@ -1544,6 +763,9 @@ class Game(arcade.View):
         self.ui_text_pool = []
         self.ui_text_pool_cursor = 0
         self.ui_text_pool_max_used = 0
+        self.tooltip_text_pool = []
+        self.tooltip_text_pool_cursor = 0
+        self.tooltip_text_pool_max_used = 0
         self.map_layer = "terrain"
         self.map_layer_menu_open = False
         self.map_layer_menu_progress = 0.0
@@ -1571,6 +793,8 @@ class Game(arcade.View):
         self.resource_rows_cache = None
         self.budget_summary_rect = None
         self.hovered_budget_summary = False
+        self.population_summary_rect = None
+        self.hovered_population_summary = False
         self.resource_summary_rect = None
         self.hovered_resource_summary = False
         self.resource_warning_rects = []
@@ -1591,6 +815,8 @@ class Game(arcade.View):
         self.construction_placement_text_cache = {}
         self.construction_placement_label_rects = []
         self.construction_placement_label_shapes = arcade.shape_list.ShapeElementList()
+        self.construction_hover_tooltip_cache_key = None
+        self.construction_hover_tooltip_cache_data = None
         self.construction_queue_toggle_rect = None
         self.construction_queue_priority_rects = []
         self.construction_building_rects = []
@@ -4105,8 +3331,11 @@ class Game(arcade.View):
             + land_tiles * MONEY_GOVERNMENT_PER_TILE
         )
 
-    def monthly_social_expenses(self, player):
-        expenses = 0.0
+    def monthly_social_expenses_breakdown(self, player):
+        pensions = 0.0
+        children = 0.0
+        disability = 0.0
+        local_services = 0.0
         for tile in player.tiles:
             population = self.estimated_tile_population(tile) or 0.0
             if population <= 0:
@@ -4114,13 +3343,32 @@ class Game(arcade.View):
             coverage = getattr(tile, "building_coverage", {}) or {}
             city_share = self.clamp01(coverage.get("city", 0.0))
             village_share = self.clamp01(coverage.get("village", 0.0))
-            rate = (
-                MONEY_SOCIAL_BASE_PER_MILLION
-                + MONEY_SOCIAL_CITY_BONUS * city_share
-                + MONEY_SOCIAL_VILLAGE_BONUS * village_share
+            population_millions = population / 1_000_000
+            pensions += (
+                population_millions
+                * DEMOGRAPHIC_AGE_SHARES.get("elderly", 0.0)
+                * MONEY_SOCIAL_PENSION_PER_ELDERLY_MILLION
             )
-            expenses += population / 1_000_000 * rate
-        return expenses
+            children += (
+                population_millions
+                * DEMOGRAPHIC_AGE_SHARES.get("children", 0.0)
+                * MONEY_SOCIAL_CHILD_SERVICES_PER_CHILD_MILLION
+            )
+            disability += population_millions * MONEY_SOCIAL_DISABILITY_PER_MILLION
+            local_services += population_millions * (
+                MONEY_SOCIAL_CITY_SERVICES_PER_MILLION * city_share
+                + MONEY_SOCIAL_VILLAGE_SERVICES_PER_MILLION * village_share
+            )
+        return {
+            "pensions": pensions,
+            "children": children,
+            "disability": disability,
+            "local_services": local_services,
+            "total": pensions + children + disability + local_services,
+        }
+
+    def monthly_social_expenses(self, player):
+        return self.monthly_social_expenses_breakdown(player)["total"]
 
     @staticmethod
     def monthly_infrastructure_expenses(player):
@@ -4137,12 +3385,14 @@ class Game(arcade.View):
     def monthly_expenses(self, player):
         army = self.monthly_army_expenses(player)
         government = self.monthly_government_expenses(player)
-        social = self.monthly_social_expenses(player)
+        social_breakdown = self.monthly_social_expenses_breakdown(player)
+        social = social_breakdown["total"]
         infrastructure = self.monthly_infrastructure_expenses(player)
         return {
             "army": army,
             "government": government,
             "social": social,
+            "social_breakdown": social_breakdown,
             "infrastructure": infrastructure,
             "total": army + government + social + infrastructure,
         }
@@ -4169,6 +3419,41 @@ class Game(arcade.View):
     def recalculate_all_monthly_balances(self):
         for player in self.players:
             self.recalculate_monthly_balance(player)
+
+    def economy_snapshot(self, player):
+        income = player.monthly_income_breakdown or {}
+        expenses = player.monthly_expenses_breakdown or self.monthly_expenses(player)
+        return {
+            "budget": player.budget,
+            "population": player.population or 0.0,
+            "balance": player.monthly_balance,
+            "income": {
+                "population": income.get("population", 0.0),
+                "companies": income.get("companies", 0.0),
+                "trade": income.get("trade", player.monthly_trade_balance),
+                "total": income.get("total", 0.0),
+            },
+            "expenses": {
+                "army": expenses.get("army", 0.0),
+                "government": expenses.get("government", 0.0),
+                "social": expenses.get("social", 0.0),
+                "social_breakdown": dict(expenses.get("social_breakdown", {}) or {}),
+                "infrastructure": expenses.get("infrastructure", 0.0),
+                "total": expenses.get("total", 0.0),
+            },
+        }
+
+    def update_economy_month_history(self, current_time):
+        month_key = (current_time.year, current_time.month)
+        for player in self.players:
+            if player.economy_month_key is None:
+                player.economy_month_key = month_key
+                player.economy_current_snapshot = self.economy_snapshot(player)
+                continue
+            if player.economy_month_key != month_key:
+                player.economy_previous_snapshot = player.economy_current_snapshot or self.economy_snapshot(player)
+                player.economy_month_key = month_key
+            player.economy_current_snapshot = self.economy_snapshot(player)
 
     def run_economy_tick(self, player, elapsed_hours=None):
         month_fraction = max(0.0, (elapsed_hours or 0.0) / PRODUCTION_MONTH_HOURS)
@@ -4372,6 +3657,13 @@ class Game(arcade.View):
         return Game.format_money(amount)
 
     @staticmethod
+    def format_population_delta(amount):
+        if amount is None:
+            return "--"
+        sign = "+" if amount > 0 else "-" if amount < 0 else ""
+        return f"{sign}{Game.format_population(abs(amount))}"
+
+    @staticmethod
     def format_population(population):
         if population is None:
             return "--"
@@ -4492,6 +3784,35 @@ class Game(arcade.View):
     @staticmethod
     def tile_population(tile):
         return max(0.0, getattr(tile, "population", 0.0) or 0.0)
+
+    def population_demographic_summary(self, player):
+        population = max(0.0, player.population or self.sync_player_population_from_tiles(player))
+        age = {
+            key: population * share
+            for key, share in DEMOGRAPHIC_AGE_SHARES.items()
+        }
+        gender = {
+            key: population * share
+            for key, share in DEMOGRAPHIC_GENDER_SHARES.items()
+        }
+        working_age = age.get("working_age", 0.0)
+        obligated = working_age * MILITARY_OBLIGATION_WORKING_AGE_SHARE
+        willingness = self.clamp01(
+            MOBILIZATION_VOLUNTEER_BASE_SHARE
+            + player.war_support * MOBILIZATION_WAR_SUPPORT_WEIGHT
+            + player.stability * MOBILIZATION_STABILITY_WEIGHT
+            + player.legitimacy * MOBILIZATION_LEGITIMACY_WEIGHT
+        )
+        willingness = min(MOBILIZATION_VOLUNTEER_MAX_SHARE, willingness)
+        volunteers = obligated * willingness
+        return {
+            "population": population,
+            "age": age,
+            "gender": gender,
+            "military_obligated": obligated,
+            "volunteer_share": willingness,
+            "mobilization_available": volunteers,
+        }
 
     def sync_player_population_from_tiles(self, player):
         total = sum(self.tile_population(tile) for tile in player.tiles)
@@ -5973,6 +5294,7 @@ class Game(arcade.View):
             self.recalculate_resource_balance_breakdown(player)
         self.rebuild_state_borders()
         self.recalculate_all_monthly_balances()
+        self.update_economy_month_history(self.simulation_client.snapshot.current_time)
 
         print(
             f"Created {len(self.players)} states, "
@@ -6335,26 +5657,41 @@ class Game(arcade.View):
         building_key = self.selected_construction_building_key()
         if not building_key:
             return None
+        cache_key = (
+            tile.q,
+            tile.r,
+            building_key,
+            self.construction_queue_signature(self.human_player),
+            round(getattr(self.human_player, "budget", 0.0), -2),
+        )
+        if cache_key == self.construction_hover_tooltip_cache_key:
+            return self.construction_hover_tooltip_cache_data
 
         building_name = BUILDING_DISPLAY_NAMES.get(building_key, building_key)
         reason = self.construction_tile_block_reason(self.human_player, tile, building_key)
         if reason:
-            return {
+            data = {
                 "tile": tile,
                 "title": f"{building_name} {tile.q}:{tile.r}",
                 "lines": [reason],
                 "level": "blocked",
             }
+            self.construction_hover_tooltip_cache_key = cache_key
+            self.construction_hover_tooltip_cache_data = data
+            return data
 
         current_coverage = self.queued_target_coverage(self.human_player, tile, building_key)
         cost = self.construction_cost(self.human_player, tile, building_key, current_coverage)
         if not cost:
-            return {
+            data = {
                 "tile": tile,
                 "title": f"{building_name} {tile.q}:{tile.r}",
                 "lines": ["Уже максимум"],
                 "level": "blocked",
             }
+            self.construction_hover_tooltip_cache_key = cache_key
+            self.construction_hover_tooltip_cache_data = data
+            return data
 
         speed = self.build_power(self.human_player)
         work_required = max(0.0, cost.get("work_required", 0.0))
@@ -6406,12 +5743,15 @@ class Game(arcade.View):
                     f"{self.resource_display_name(key)}: {self.format_resource_amount(amount)} | {monthly_text}"
                 )
 
-        return {
+        data = {
             "tile": tile,
             "title": f"{building_name} {tile.q}:{tile.r}",
             "lines": lines,
             "level": "ok",
         }
+        self.construction_hover_tooltip_cache_key = cache_key
+        self.construction_hover_tooltip_cache_data = data
+        return data
 
     def world_to_screen(self, world_x, world_y):
         camera_x, camera_y = self.world_camera.position
@@ -6420,8 +5760,9 @@ class Game(arcade.View):
         screen_y = (world_y - camera_y) * zoom + self.window.height / 2
         return screen_x, screen_y
 
-    def draw_construction_hover_tooltip(self):
-        data = self.construction_hover_tooltip_data()
+    def draw_construction_hover_tooltip(self, data=None):
+        if data is None:
+            data = self.construction_hover_tooltip_data()
         if not data:
             return
 
@@ -6441,7 +5782,7 @@ class Game(arcade.View):
         arcade.draw_lbwh_rectangle_outline(tooltip_x, tooltip_y, tooltip_width, tooltip_height, border, 1)
 
         line_y = tooltip_y + tooltip_height - 20
-        self.draw_ui_text(data["title"], tooltip_x + 12, line_y, arcade.color.WHITE, 12)
+        self.draw_tooltip_text(data["title"], tooltip_x + 12, line_y, arcade.color.WHITE, 12)
         line_y -= 18
         for line in lines[:16]:
             color = (232, 252, 144)
@@ -6449,7 +5790,7 @@ class Game(arcade.View):
                 color = (244, 176, 164)
             elif line.startswith("Ресурсы:") or line == "В земле:":
                 color = (160, 190, 210)
-            self.draw_ui_text(line, tooltip_x + 16, line_y, color, 11)
+            self.draw_tooltip_text(line, tooltip_x + 16, line_y, color, 11)
             line_y -= line_height
 
     def resource_color(self, tile):
@@ -6697,9 +6038,21 @@ class Game(arcade.View):
         self.draw_map_layer_control()
         if self.paused:
             self.draw_pause_menu()
-        self.draw_construction_hover_tooltip()
-        self.draw_top_hover_tooltips()
-        self.draw_ui_text_batch()
+        construction_tooltip_data = self.construction_hover_tooltip_data()
+        top_tooltip_active = (
+            self.hovered_population_summary
+            or self.hovered_budget_summary
+            or self.hovered_resource_summary
+            or self.hovered_warning_key
+        )
+        if construction_tooltip_data or top_tooltip_active:
+            self.draw_ui_text_batch()
+            self.begin_tooltip_text_frame()
+            self.draw_construction_hover_tooltip(construction_tooltip_data)
+            self.draw_top_hover_tooltips()
+            self.draw_tooltip_text_batch()
+        else:
+            self.draw_ui_text_batch()
         self.debug_text.text = f"FPS: {self.fps:.0f}"
         self.debug_text.x = self.window.width - 12
         self.debug_text.y = self.window.height - 8
@@ -6779,6 +6132,58 @@ class Game(arcade.View):
         label.x = x
         label.y = y
 
+    def begin_tooltip_text_frame(self):
+        self.tooltip_text_pool_cursor = 0
+
+    def draw_tooltip_text_batch(self):
+        for index in range(self.tooltip_text_pool_cursor, self.tooltip_text_pool_max_used):
+            if index < len(self.tooltip_text_pool) and self.tooltip_text_pool[index].text:
+                self.tooltip_text_pool[index].text = ""
+        self.tooltip_text_pool_max_used = max(self.tooltip_text_pool_max_used, self.tooltip_text_pool_cursor)
+        self.tooltip_batch.draw()
+
+    def draw_tooltip_text(
+        self,
+        text,
+        x,
+        y,
+        color=arcade.color.WHITE,
+        font_size=12,
+        anchor_x="left",
+        anchor_y="baseline",
+    ):
+        index = self.tooltip_text_pool_cursor
+        self.tooltip_text_pool_cursor += 1
+
+        if index >= len(self.tooltip_text_pool):
+            self.tooltip_text_pool.append(
+                arcade.Text(
+                    "",
+                    0,
+                    0,
+                    color,
+                    font_size,
+                    anchor_x=anchor_x,
+                    anchor_y=anchor_y,
+                    batch=self.tooltip_batch,
+                )
+            )
+
+        label = self.tooltip_text_pool[index]
+        new_text = str(text)
+        if label.text != new_text:
+            label.text = new_text
+        if label.font_size != font_size:
+            label.font_size = font_size
+        if label.anchor_x != anchor_x:
+            label.anchor_x = anchor_x
+        if label.anchor_y != anchor_y:
+            label.anchor_y = anchor_y
+        if label.color != color:
+            label.color = color
+        label.x = x
+        label.y = y
+
     def draw_top_status_bar(self):
         if not self.human_player:
             return
@@ -6793,6 +6198,7 @@ class Game(arcade.View):
         arcade.draw_line(0, y, self.window.width, y, (88, 106, 128), 2)
 
         self.budget_summary_rect = None
+        self.population_summary_rect = None
         budget_text = f"{self.format_money(player.budget)}  {self.format_money_delta(player.monthly_balance)}/мес"
         resource_text = (
             f"Металлы {self.format_resource_amount(metals)}  "
@@ -6805,12 +6211,17 @@ class Game(arcade.View):
             budget_text,
             f"Стаб: {player.stability:.0%}",
             f"Легит: {player.legitimacy:.0%}",
-            "Наука: --",
+            f"Подд. войны: {player.war_support:.0%}",
         ]
 
         x = 10
         for index, text in enumerate(items[:3]):
             item_width = max(88, len(text) * 7 + 22)
+            if index == 1:
+                self.population_summary_rect = (x - 6, y + 5, item_width - 8, TOP_STATUS_BAR_HEIGHT - 10)
+                if self.hovered_population_summary:
+                    arcade.draw_lbwh_rectangle_filled(*self.population_summary_rect, (36, 48, 62, 210))
+                    arcade.draw_lbwh_rectangle_outline(*self.population_summary_rect, (118, 146, 176, 180), 1)
             if index == 2:
                 self.budget_summary_rect = (x - 6, y + 5, item_width - 8, TOP_STATUS_BAR_HEIGHT - 10)
                 if self.hovered_budget_summary:
@@ -6859,15 +6270,15 @@ class Game(arcade.View):
         arcade.draw_lbwh_rectangle_filled(tooltip_x, tooltip_y, tooltip_width, tooltip_height, (18, 24, 31, 245))
         arcade.draw_lbwh_rectangle_outline(tooltip_x, tooltip_y, tooltip_width, tooltip_height, (140, 160, 184), 1)
         line_y = tooltip_y + tooltip_height - 20
-        self.draw_ui_text("Проблемы ресурсов", tooltip_x + 12, line_y, arcade.color.WHITE, 12)
+        self.draw_tooltip_text("Проблемы ресурсов", tooltip_x + 12, line_y, arcade.color.WHITE, 12)
         line_y -= 18
         for label, items, color in [("Красные", red_items, (240, 108, 98)), ("Желтые", yellow_items, (238, 198, 90))]:
             if not items:
                 continue
-            self.draw_ui_text(f"{label}:", tooltip_x + 12, line_y, color, 11)
+            self.draw_tooltip_text(f"{label}:", tooltip_x + 12, line_y, color, 11)
             line_y -= 16
             for item in items[:5]:
-                self.draw_ui_text(f"- {self.resource_display_name(item)}", tooltip_x + 22, line_y, (220, 230, 240), 11)
+                self.draw_tooltip_text(f"- {self.resource_display_name(item)}", tooltip_x + 22, line_y, (220, 230, 240), 11)
                 line_y -= 15
 
     def draw_budget_summary_tooltip(self, player):
@@ -6876,6 +6287,7 @@ class Game(arcade.View):
 
         income = player.monthly_income_breakdown or {}
         expenses = player.monthly_expenses_breakdown or self.monthly_expenses(player)
+        social_parts = expenses.get("social_breakdown", {}) or {}
         trade_value = income.get("trade", player.monthly_trade_balance)
         rows = [
             ("Бюджет", self.format_money(player.budget), arcade.color.WHITE, 12),
@@ -6900,6 +6312,10 @@ class Game(arcade.View):
             ("Армия", f"-{self.format_money(expenses.get('army', 0.0))}", (236, 168, 154), 11),
             ("Правительство", f"-{self.format_money(expenses.get('government', 0.0))}", (236, 168, 154), 11),
             ("Соц. обеспечение", f"-{self.format_money(expenses.get('social', 0.0))}", (236, 168, 154), 11),
+            ("  Пенсии", f"-{self.format_money(social_parts.get('pensions', 0.0))}", (206, 178, 168), 10),
+            ("  Дети/школы", f"-{self.format_money(social_parts.get('children', 0.0))}", (206, 178, 168), 10),
+            ("  Инвалиды", f"-{self.format_money(social_parts.get('disability', 0.0))}", (206, 178, 168), 10),
+            ("  Соцслужбы", f"-{self.format_money(social_parts.get('local_services', 0.0))}", (206, 178, 168), 10),
             ("Инфраструктура", f"-{self.format_money(expenses.get('infrastructure', 0.0))}", (236, 168, 154), 11),
         ]
         text_width = 0
@@ -6923,10 +6339,10 @@ class Game(arcade.View):
         def line(label, value=None, color=(220, 230, 240), size=11):
             nonlocal line_y
             if value is None:
-                self.draw_ui_text(label, tooltip_x + 14, line_y, color, size)
+                self.draw_tooltip_text(label, tooltip_x + 14, line_y, color, size)
             else:
-                self.draw_ui_text(label, tooltip_x + 14, line_y, color, size)
-                self.draw_ui_text(value, tooltip_x + tooltip_width - 14, line_y, color, size, anchor_x="right")
+                self.draw_tooltip_text(label, tooltip_x + 14, line_y, color, size)
+                self.draw_tooltip_text(value, tooltip_x + tooltip_width - 14, line_y, color, size, anchor_x="right")
             line_y -= 17
 
         for row in rows:
@@ -6934,6 +6350,66 @@ class Game(arcade.View):
                 line_y -= 7
                 continue
             line(*row)
+
+    def draw_population_summary_tooltip(self, player):
+        if not self.hovered_population_summary or not self.population_summary_rect:
+            return
+
+        summary = self.population_demographic_summary(player)
+        age = summary["age"]
+        gender = summary["gender"]
+        rows = [
+            ("Население", self.format_population(summary["population"]), arcade.color.WHITE, 12),
+            None,
+            ("Возраст:", None, arcade.color.WHITE, 12),
+            ("Дети", self.format_population(age.get("children", 0.0)), (220, 230, 240), 11),
+            ("Рабочий возраст", self.format_population(age.get("working_age", 0.0)), (220, 230, 240), 11),
+            ("Старики", self.format_population(age.get("elderly", 0.0)), (220, 230, 240), 11),
+            None,
+            ("Пол:", None, arcade.color.WHITE, 12),
+            ("Мужчины", self.format_population(gender.get("male", 0.0)), (220, 230, 240), 11),
+            ("Женщины", self.format_population(gender.get("female", 0.0)), (220, 230, 240), 11),
+            None,
+            ("Военный ресурс:", None, arcade.color.WHITE, 12),
+            ("Военнообязанные", self.format_population(summary["military_obligated"]), (220, 230, 240), 11),
+            (
+                "Добровольцы",
+                self.format_population(summary["mobilization_available"]),
+                (190, 226, 174),
+                11,
+            ),
+            (
+                "Готовность",
+                f"{summary['volunteer_share']:.0%}",
+                (190, 226, 174),
+                11,
+            ),
+            None,
+            ("Стабильность", f"{player.stability:.0%}", (210, 222, 234), 11),
+            ("Легитимность", f"{player.legitimacy:.0%}", (210, 222, 234), 11),
+            ("Поддержка войны", f"{player.war_support:.0%}", (210, 222, 234), 11),
+        ]
+
+        tooltip_width = 330
+        tooltip_height = 28 + sum(7 if row is None else 17 for row in rows)
+        x, y, _width, _height = self.population_summary_rect
+        tooltip_x = max(12, min(x, self.window.width - tooltip_width - 12))
+        tooltip_y = max(8, y - tooltip_height - 8)
+        arcade.draw_lbwh_rectangle_filled(tooltip_x, tooltip_y, tooltip_width, tooltip_height, (18, 24, 31, 247))
+        arcade.draw_lbwh_rectangle_outline(tooltip_x, tooltip_y, tooltip_width, tooltip_height, (140, 160, 184), 1)
+
+        line_y = tooltip_y + tooltip_height - 20
+        for row in rows:
+            if row is None:
+                line_y -= 7
+                continue
+            label, value, color, size = row
+            if value is None:
+                self.draw_tooltip_text(label, tooltip_x + 14, line_y, color, size)
+            else:
+                self.draw_tooltip_text(label, tooltip_x + 14, line_y, color, size)
+                self.draw_tooltip_text(value, tooltip_x + tooltip_width - 14, line_y, color, size, anchor_x="right")
+            line_y -= 17
 
     def top_warning_items(self, player):
         items = []
@@ -7064,14 +6540,15 @@ class Game(arcade.View):
         arcade.draw_lbwh_rectangle_filled(tooltip_x, tooltip_y, tooltip_width, tooltip_height, (18, 24, 31, 246))
         arcade.draw_lbwh_rectangle_outline(tooltip_x, tooltip_y, tooltip_width, tooltip_height, (150, 170, 194), 1)
         line_y = tooltip_y + tooltip_height - 20
-        self.draw_ui_text(item["title"], tooltip_x + 12, line_y, arcade.color.WHITE, 12)
+        self.draw_tooltip_text(item["title"], tooltip_x + 12, line_y, arcade.color.WHITE, 12)
         line_y -= 18
         for line in lines[:6]:
-            self.draw_ui_text(line, tooltip_x + 18, line_y, (220, 230, 240), 11)
+            self.draw_tooltip_text(line, tooltip_x + 18, line_y, (220, 230, 240), 11)
             line_y -= 16
 
     def draw_top_hover_tooltips(self):
         if self.human_player:
+            self.draw_population_summary_tooltip(self.human_player)
             self.draw_budget_summary_tooltip(self.human_player)
             self.draw_resource_summary_tooltip(self.human_player)
             self.draw_top_warning_tooltip(self.top_warning_items(self.human_player))
@@ -7144,6 +6621,8 @@ class Game(arcade.View):
         height = top - SIDE_PANEL_MARGIN
         if self.active_top_panel_key == "resources":
             width = 760
+        elif self.active_top_panel_key == "economy":
+            width = 620
         elif self.active_top_panel_key == "trade":
             width = 760
         elif self.active_top_panel_key == "construction":
@@ -7230,6 +6709,153 @@ class Game(arcade.View):
             ]
         self.resource_rows_cache = {"key": cache_key, "rows": rows}
         return rows
+
+    def draw_economy_panel_content(self, panel_x, panel_y, panel_width, panel_height):
+        player = self.human_player
+        if not player:
+            return
+
+        self.recalculate_monthly_balance(player)
+        current = self.economy_snapshot(player)
+        player.economy_current_snapshot = current
+        previous = player.economy_previous_snapshot or {}
+        has_previous = bool(previous)
+
+        content_x = panel_x + 18
+        content_width = panel_width - 36
+        top_y = panel_y + panel_height - 68
+        forecast_1m = current["budget"] + current["balance"]
+        forecast_3m = current["budget"] + current["balance"] * 3
+        balance_color = (178, 226, 158) if current["balance"] >= 0 else (238, 150, 132)
+
+        card_gap = 10
+        card_width = (content_width - card_gap) / 2
+        card_height = 82
+        cards = [
+            ("Бюджет", self.format_money(current["budget"]), f"{self.format_money_delta(current['balance'])}/мес", balance_color),
+            ("Прогноз", f"1 мес: {self.format_money(forecast_1m)}", f"3 мес: {self.format_money(forecast_3m)}", (210, 222, 236)),
+        ]
+        for index, (title, value, subvalue, subcolor) in enumerate(cards):
+            x = content_x + index * (card_width + card_gap)
+            y = top_y - card_height
+            arcade.draw_lbwh_rectangle_filled(x, y, card_width, card_height, (28, 40, 52, 220))
+            arcade.draw_lbwh_rectangle_outline(x, y, card_width, card_height, (86, 112, 138), 1)
+            self.draw_ui_text(title, x + 12, y + card_height - 22, (164, 180, 198), 10)
+            self.draw_ui_text(value, x + 12, y + card_height - 46, arcade.color.WHITE, 15)
+            self.draw_ui_text(subvalue, x + 12, y + 16, subcolor, 11)
+
+        y = top_y - card_height - 28
+        value_x = panel_x + panel_width - 178
+        delta_x = panel_x + panel_width - 18
+
+        def previous_value(section, key, default=0.0):
+            if not has_previous:
+                return None
+            if section is None:
+                return previous.get(key, default)
+            return (previous.get(section, {}) or {}).get(key, default)
+
+        def delta_text(current_value, previous_value_):
+            if previous_value_ is None:
+                return "--"
+            return self.format_money_delta(current_value - previous_value_)
+
+        def delta_color(current_value, previous_value_, positive_good=True):
+            if previous_value_ is None:
+                return (150, 164, 180)
+            delta = current_value - previous_value_
+            if abs(delta) < 1:
+                return (170, 184, 198)
+            good = delta >= 0 if positive_good else delta <= 0
+            return (178, 226, 158) if good else (238, 150, 132)
+
+        def section_title(title, y_pos):
+            self.draw_ui_text(title, content_x, y_pos, arcade.color.WHITE, 14)
+            arcade.draw_line(content_x, y_pos - 7, panel_x + panel_width - 18, y_pos - 7, (72, 92, 112, 180), 1)
+            self.draw_ui_text("Сейчас", value_x, y_pos, (150, 166, 184), 10, anchor_x="right")
+            self.draw_ui_text("К прошл. мес.", delta_x, y_pos, (150, 166, 184), 10, anchor_x="right")
+            return y_pos - 24
+
+        def money_row(label, value, prev_value, y_pos, positive_good=True, force_minus=False):
+            value_color = (210, 222, 234)
+            if value > 0 and not force_minus:
+                value_color = (190, 226, 174)
+            elif value < 0 or force_minus:
+                value_color = (236, 168, 154)
+            shown_value = f"-{self.format_money(value)}" if force_minus else self.format_money_delta(value)
+            self.draw_ui_text(label, content_x + 8, y_pos, (214, 224, 234), 11)
+            self.draw_ui_text(shown_value, value_x, y_pos, value_color, 11, anchor_x="right")
+            self.draw_ui_text(
+                delta_text(value, prev_value),
+                delta_x,
+                y_pos,
+                delta_color(value, prev_value, positive_good=positive_good),
+                11,
+                anchor_x="right",
+            )
+            return y_pos - 18
+
+        y = section_title("Доходы", y)
+        income = current["income"]
+        y = money_row("Налоги населения", income["population"], previous_value("income", "population"), y)
+        y = money_row("Компании", income["companies"], previous_value("income", "companies"), y)
+        y = money_row("Торговля", income["trade"], previous_value("income", "trade"), y)
+        y = money_row("Всего доходов", income["total"], previous_value("income", "total"), y)
+
+        y -= 8
+        y = section_title("Расходы", y)
+        expenses = current["expenses"]
+        social_parts = expenses.get("social_breakdown", {}) or {}
+        previous_social_parts = (previous.get("expenses", {}) or {}).get("social_breakdown", {}) if has_previous else {}
+        y = money_row("Армия", expenses["army"], previous_value("expenses", "army"), y, positive_good=False, force_minus=True)
+        y = money_row("Правительство", expenses["government"], previous_value("expenses", "government"), y, positive_good=False, force_minus=True)
+        y = money_row("Соц. обеспечение", expenses["social"], previous_value("expenses", "social"), y, positive_good=False, force_minus=True)
+        y = money_row("  Пенсии", social_parts.get("pensions", 0.0), previous_social_parts.get("pensions") if has_previous else None, y, positive_good=False, force_minus=True)
+        y = money_row("  Дети/школы", social_parts.get("children", 0.0), previous_social_parts.get("children") if has_previous else None, y, positive_good=False, force_minus=True)
+        y = money_row("  Инвалиды", social_parts.get("disability", 0.0), previous_social_parts.get("disability") if has_previous else None, y, positive_good=False, force_minus=True)
+        y = money_row("  Соцслужбы", social_parts.get("local_services", 0.0), previous_social_parts.get("local_services") if has_previous else None, y, positive_good=False, force_minus=True)
+        y = money_row("Инфраструктура", expenses["infrastructure"], previous_value("expenses", "infrastructure"), y, positive_good=False, force_minus=True)
+        y = money_row("Всего расходов", expenses["total"], previous_value("expenses", "total"), y, positive_good=False, force_minus=True)
+
+        y -= 8
+        y = section_title("Итог и показатели", y)
+        y = money_row("Месячный баланс", current["balance"], previous_value(None, "balance"), y)
+
+        population_previous = previous_value(None, "population")
+        population_delta = None if population_previous is None else current["population"] - population_previous
+        self.draw_ui_text("Население", content_x + 8, y, (214, 224, 234), 11)
+        self.draw_ui_text(self.format_population(current["population"]), value_x, y, (210, 222, 234), 11, anchor_x="right")
+        self.draw_ui_text(
+            self.format_population_delta(population_delta),
+            delta_x,
+            y,
+            (178, 226, 158) if (population_delta or 0) >= 0 else (238, 150, 132),
+            11,
+            anchor_x="right",
+        )
+        y -= 18
+
+        land_tiles = sum(1 for tile in player.tiles if not self.is_water_tile(tile))
+        population_millions = max(0.001, current["population"] / 1_000_000)
+        net_company_after_upkeep = income["companies"] - expenses["infrastructure"]
+        indicators = [
+            ("Территория", f"{land_tiles} клеток"),
+            ("Налогов на 1M жителей", self.format_money(income["population"] / population_millions)),
+            ("Компании - инфраструктура", self.format_money_delta(net_company_after_upkeep)),
+        ]
+        for label, value in indicators:
+            self.draw_ui_text(label, content_x + 8, y, (214, 224, 234), 11)
+            self.draw_ui_text(value, value_x, y, (210, 222, 234), 11, anchor_x="right")
+            y -= 18
+
+        if not has_previous:
+            self.draw_ui_text(
+                "Сравнение появится после перехода на следующий календарный месяц.",
+                content_x + 8,
+                panel_y + 18,
+                (160, 174, 190),
+                10,
+            )
 
     def resource_row_rects(self, rows):
         panel_x, panel_y, _panel_width, panel_height = self.side_panel_rect()
@@ -8170,6 +7796,8 @@ class Game(arcade.View):
 
         if self.active_top_panel_key == "resources":
             self.draw_resources_panel_content(panel_x, panel_y, panel_width, panel_height)
+        elif self.active_top_panel_key == "economy":
+            self.draw_economy_panel_content(panel_x, panel_y, panel_width, panel_height)
         elif self.active_top_panel_key == "trade":
             self.draw_trade_panel_content(panel_x, panel_y, panel_width, panel_height)
         elif self.active_top_panel_key == "construction":
@@ -8406,8 +8034,8 @@ class Game(arcade.View):
         self.hex_specialization_row_rects = []
         self.hex_resources_toggle_rect = None
 
-        def visible_y(draw_y, margin=24):
-            return content_bottom - margin <= draw_y <= content_top + margin
+        def visible_y(draw_y, top_margin=24):
+            return content_bottom <= draw_y <= content_top + top_margin
 
         def panel_text(text, x, draw_y, color=arcade.color.WHITE, font_size=12, **kwargs):
             if visible_y(draw_y):
@@ -9074,6 +8702,7 @@ class Game(arcade.View):
                 self.run_production_tick(player, elapsed_hours)
                 self.run_construction_tick(player, elapsed_hours)
                 self.run_population_tick(player, elapsed_hours)
+            self.update_economy_month_history(snapshot.current_time)
             self.last_production_tick_count = snapshot.tick_count
 
         self.handle_camera_keys(delta_time)
@@ -9282,6 +8911,7 @@ class Game(arcade.View):
             self.hovered_hex_panel_close = False
             self.hovered_hex_build_button = False
             self.hovered_hex_specialization_button = False
+            self.hovered_population_summary = False
             self.hovered_budget_summary = False
             self.hovered_resource_summary = False
             if self.pause_screen == "settings" and self.open_pause_dropdown:
@@ -9301,6 +8931,10 @@ class Game(arcade.View):
         self.hovered_budget_summary = (
             self.budget_summary_rect is not None
             and self.point_in_rect(x, y, self.budget_summary_rect)
+        )
+        self.hovered_population_summary = (
+            self.population_summary_rect is not None
+            and self.point_in_rect(x, y, self.population_summary_rect)
         )
         self.hovered_resource_summary = (
             self.resource_summary_rect is not None
