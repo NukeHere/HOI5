@@ -19,6 +19,36 @@ RESOLUTIONS = [(1024, 768), (1200, 800), (1366, 768), (1600, 900), (1920, 1080)]
 MAX_BOTS = 11
 OVERVIEW_LOD_ZOOM = 0.2
 OVERVIEW_TEXTURE_MAX_SIZE = 1024
+STARTING_DIVISIONS_PER_STATE = 10
+ARMY_DIVISION_CAPACITY = 20
+DIVISION_TEMPLATE_BASE = {
+    "basic_infantry": {
+        "name": "Пехотная дивизия",
+        "icon": "infantry",
+        "manpower": 10_000,
+        "organization": 100.0,
+        "speed": 1.35,
+    },
+    "tank": {"name": "Танковая дивизия", "icon": "tank", "manpower": 8_000, "organization": 100.0, "speed": 1.7},
+    "motorized": {"name": "Моторизованная дивизия", "icon": "motorized", "manpower": 9_000, "organization": 100.0, "speed": 1.9},
+    "anti_tank": {"name": "ПТ/ПТУР дивизия", "icon": "anti_tank", "manpower": 7_000, "organization": 100.0, "speed": 1.25},
+    "anti_air": {"name": "ПВО дивизия", "icon": "anti_air", "manpower": 7_000, "organization": 100.0, "speed": 1.25},
+}
+DIVISION_ICON_SIZE = 30
+DIVISION_TILE_SIDE_OFFSET_X = 34
+DIVISION_TILE_SIDE_OFFSET_Y = -22
+DIVISION_LOD_ZOOM = 0.45
+DIVISION_LOD_CELL_SIZE = 72
+DIVISION_DOUBLE_CLICK_SECONDS = 0.35
+DIVISION_SELECTION_DRAG_THRESHOLD = 6
+DIVISION_ORG_MOVE_COST_PER_TILE = 1.4
+DIVISION_ORG_RECOVERY_PER_DAY = 8.0
+DIVISION_LOW_ORG_SPEED_FLOOR = 0.35
+DIVISION_ROUTE_COLORS = {
+    "move": ((120, 94, 28), (238, 196, 74)),
+    "attack": ((132, 42, 42), (238, 92, 82)),
+    "retreat": ((36, 76, 132), (92, 164, 244)),
+}
 STATE_COLORS = [
     (235, 65, 56),
     (255, 184, 0),
@@ -842,7 +872,9 @@ VISUAL_FACTOR_WEIGHTS = {
 VISUAL_MIN_COVERAGE = 0.03
 VISUAL_SYSTEM_MIN_ZOOM = 0.38
 VISUAL_EDGE_MIN_ZOOM = 0.62
-VISUAL_DENSE_TILE_LIMIT = 650
+VISUAL_EDGE_TILE_LIMIT = 90
+VISUAL_DENSE_TILE_LIMIT = 180
+VISUAL_DENSE_SPRITE_LIMIT = 260
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 LAYER_ICON_PATH = ASSET_DIR / "layers_icon.png"
 TILE_VISUAL_DIR = ASSET_DIR / "tile_visuals"

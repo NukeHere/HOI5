@@ -86,8 +86,9 @@ def apply_window_settings_safely(window, width, height, fullscreen):
     if fullscreen:
         try:
             window.set_fullscreen(True)
-            window.switch_to()
-            return True, None
+            if _window_has_attached_canvas(__import__("arcade"), window):
+                return True, None
+            raise RuntimeError("Fullscreen canvas has not been attached")
         except Exception as exc:
             print(f"Fullscreen switch failed, falling back to {width}x{height}: {exc}")
 
@@ -110,9 +111,8 @@ def create_window_with_fallback(arcade_module, title, settings, resolutions):
         pyglet = None
 
     desired_fullscreen = bool(settings["fullscreen"])
-    # Fullscreen is intentionally not used as a startup fallback on Windows:
-    # pyglet can leave Arcade without an active window after a failed switch.
     attempts = [
+        (settings["resolution_index"], desired_fullscreen),
         (settings["resolution_index"], False),
         (DEFAULT_SETTINGS["resolution_index"], False),
         (0, False),
@@ -134,17 +134,21 @@ def create_window_with_fallback(arcade_module, title, settings, resolutions):
             window = arcade_module.Window(int(width), int(height), title)
             if not _window_has_attached_canvas(arcade_module, window):
                 raise RuntimeError("Window canvas has not been attached")
-            if desired_fullscreen:
-                applied_fullscreen, error = apply_window_settings_safely(window, width, height, True)
-                if error is not None:
-                    print(f"Startup fullscreen failed, keeping windowed startup: {error}")
-                elif applied_fullscreen:
-                    arcade_module.set_window(window)
-            if resolution_index != settings["resolution_index"]:
+
+            if fullscreen:
+                try:
+                    window.set_fullscreen(True)
+                    if not _window_has_attached_canvas(arcade_module, window):
+                        raise RuntimeError("Fullscreen canvas has not been attached")
+                except Exception:
+                    _close_window_safely(window)
+                    raise
+
+            if resolution_index != settings["resolution_index"] or bool(fullscreen) != desired_fullscreen:
                 save_settings(
                     settings["sound_volume"],
                     settings["music_volume"],
-                    desired_fullscreen,
+                    bool(fullscreen),
                     resolution_index,
                     resolutions,
                 )

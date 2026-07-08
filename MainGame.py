@@ -4,6 +4,7 @@ import math
 import struct
 import time
 import textwrap
+import heapq
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from perlin_noise import PerlinNoise
@@ -269,6 +270,8 @@ class StatePlayer:
     trade_modifiers: dict = None
     construction_modifiers: dict = None
     construction_queue: list = None
+    divisions: list = None
+    armies: list = None
     monthly_income_breakdown: dict = None
     monthly_expenses_breakdown: dict = None
     economy_month_key: tuple | None = None
@@ -344,6 +347,10 @@ class StatePlayer:
             }
         if self.construction_queue is None:
             self.construction_queue = []
+        if not hasattr(self, "divisions") or self.divisions is None:
+            self.divisions = []
+        if not hasattr(self, "armies") or self.armies is None:
+            self.armies = []
         if self.monthly_income_breakdown is None:
             self.monthly_income_breakdown = {
                 "population": 0.0,
@@ -369,6 +376,41 @@ class StatePlayer:
             }
         if self.economy_current_snapshot is None:
             self.economy_current_snapshot = {}
+
+
+@dataclass
+class Division:
+    id: int
+    owner: StatePlayer
+    template_key: str
+    tile: object
+    target_tile: object | None = None
+    path: list = field(default_factory=list)
+    route_mode: str = "move"
+    route_tiles: list = field(default_factory=list)
+    manpower: int = 10_000
+    organization: float = 100.0
+    max_organization: float = 100.0
+    speed: float = 1.35
+    selected: bool = False
+    x: float = 0.0
+    y: float = 0.0
+    movement_progress: float = 0.0
+    army_id: int | None = None
+
+    def __post_init__(self):
+        if self.tile is not None and self.x == 0.0 and self.y == 0.0:
+            self.x = self.tile.center_x
+            self.y = self.tile.center_y
+
+
+@dataclass
+class Army:
+    id: int
+    owner: StatePlayer
+    name: str
+    division_ids: list = field(default_factory=list)
+    selected: bool = False
 
 
 class LocalSimulationServer:
@@ -741,6 +783,31 @@ class Game(arcade.View):
         self.world_seed = random.randint(0, 999999)
         self.selection_border = None
         self.selection_border_sprite_list = arcade.SpriteList()
+        self.divisions = []
+        self.next_division_id = 1
+        self.next_army_id = 1
+        self.selected_division_ids = set()
+        self.division_shape_list = arcade.shape_list.ShapeElementList()
+        self.division_route_shape_list = arcade.shape_list.ShapeElementList()
+        self.division_group_shape_list = arcade.shape_list.ShapeElementList()
+        self.division_list_icon_shape_list = arcade.shape_list.ShapeElementList()
+        self.division_group_texts = []
+        self.division_tile_stack_texts = []
+        self.division_render_cache_key = None
+        self.division_groups_cache_key = None
+        self.division_groups = []
+        self.division_selection_drag_active = False
+        self.division_selection_drag_started = False
+        self.division_selection_start = (0, 0)
+        self.division_selection_current = (0, 0)
+        self.pending_map_click = None
+        self.last_division_click_time = 0.0
+        self.last_division_click_id = None
+        self.division_list_scroll_index = 0
+        self.division_list_row_rects = []
+        self.division_list_panel_rect = None
+        self.army_command_card_rects = []
+        self.army_command_add_rect = None
         self.batch = Batch()
         self.tooltip_batch = Batch()
         self.debug_text = arcade.Text(
@@ -4425,27 +4492,45 @@ class Game(arcade.View):
         if self.map_layer != "terrain" or zoom < VISUAL_SYSTEM_MIN_ZOOM:
             return None
 
-        dense_view = len(self.visible_tiles) > VISUAL_DENSE_TILE_LIMIT
-        if dense_view:
+        visible_count = len(self.visible_tiles)
+        if visible_count > VISUAL_DENSE_TILE_LIMIT:
             return "dense"
-        if zoom >= VISUAL_EDGE_MIN_ZOOM:
+        if zoom >= VISUAL_EDGE_MIN_ZOOM and visible_count <= VISUAL_EDGE_TILE_LIMIT:
             return "edges"
         return "center"
+
+    def rebuild_dense_tile_visual_sprites(self):
+        candidates = []
+        for tile in self.visible_tiles:
+            if self.is_water_tile(tile):
+                continue
+            human_factors = self.ranked_visual_factors(tile, include_natural=False, include_human=True)
+            if not human_factors:
+                continue
+            key, coverage = human_factors[0]
+            score = coverage * VISUAL_FACTOR_WEIGHTS.get(key, 1.0)
+            candidates.append((score, tile, key, coverage))
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        for _score, tile, key, coverage in candidates[:VISUAL_DENSE_SPRITE_LIMIT]:
+            size = self.visual_factor_size(coverage, HEX_SIZE * 0.22, HEX_SIZE * 0.32, HEX_SIZE * 0.58)
+            self.append_visual_factor_sprite(key, tile.center_x, tile.center_y, size, alpha=225)
 
     def rebuild_tile_visual_sprites(self, mode):
         self.tile_visual_sprite_list.clear()
         if mode is None:
             return
+        if mode == "dense":
+            self.rebuild_dense_tile_visual_sprites()
+            return
 
         draw_edges = mode == "edges"
-        draw_natural = mode != "dense"
+        draw_natural = True
         for tile in self.visible_tiles:
             if self.is_water_tile(tile):
                 continue
 
             human_factors = self.ranked_visual_factors(tile, include_natural=False, include_human=True)
-            if mode == "dense" and not human_factors:
-                continue
 
             natural_factors = self.ranked_visual_factors(tile, include_natural=True, include_human=False)
             center_natural_key, center_natural_coverage = natural_factors[0] if natural_factors else (None, 0.0)
@@ -4607,6 +4692,111 @@ class Game(arcade.View):
                 if other and other.owner == player:
                     tiles.append(other)
         return tiles
+
+    def division_can_enter_tile(self, division, tile):
+        if not tile or self.is_water_tile(tile):
+            return False
+        return tile.owner == division.owner
+
+    def find_division_path(self, division, target_tile, max_expansions=500):
+        start_tile = division.tile
+        if not start_tile or not target_tile or start_tile == target_tile:
+            return []
+        if not self.division_can_enter_tile(division, target_tile):
+            return []
+
+        frontier = []
+        counter = 0
+        heapq.heappush(frontier, (0.0, counter, start_tile))
+        start_key = self.tile_key(start_tile)
+        target_key = self.tile_key(target_tile)
+        came_from = {start_key: None}
+        tile_lookup = {start_key: start_tile}
+        cost_so_far = {start_key: 0.0}
+        expansions = 0
+
+        while frontier and expansions < max_expansions:
+            _priority, _counter, current = heapq.heappop(frontier)
+            expansions += 1
+            if current == target_tile:
+                break
+            current_key = self.tile_key(current)
+            for neighbor in self.neighbor_tiles(current):
+                if not self.division_can_enter_tile(division, neighbor):
+                    continue
+                neighbor_key = self.tile_key(neighbor)
+                movement_cost = max(1.0, float(getattr(neighbor, "movement_cost", 1.0) or 1.0))
+                new_cost = cost_so_far[current_key] + movement_cost
+                if neighbor_key not in cost_so_far or new_cost < cost_so_far[neighbor_key]:
+                    cost_so_far[neighbor_key] = new_cost
+                    tile_lookup[neighbor_key] = neighbor
+                    heuristic = max(abs(neighbor.q - target_tile.q), abs(neighbor.r - target_tile.r))
+                    counter += 1
+                    heapq.heappush(frontier, (new_cost + heuristic, counter, neighbor))
+                    came_from[neighbor_key] = current_key
+
+        if target_key not in came_from:
+            return []
+
+        path = []
+        current_key = target_key
+        while current_key and current_key != start_key:
+            path.append(tile_lookup[current_key])
+            current_key = came_from.get(current_key)
+        path.reverse()
+        return path
+
+    def order_selected_divisions_to_tile(self, target_tile):
+        divisions = self.selected_divisions()
+        if not divisions or not target_tile:
+            return False
+        ordered = False
+        for division in divisions:
+            path = self.find_division_path(division, target_tile)
+            if not path:
+                continue
+            division.target_tile = target_tile
+            division.path = path
+            division.route_mode = "move"
+            division.route_tiles = [division.tile] + list(path)
+            division.movement_progress = 0.0
+            ordered = True
+        if ordered:
+            self.invalidate_division_render_cache()
+        return ordered
+
+    def update_divisions(self, elapsed_hours):
+        if elapsed_hours <= 0:
+            return
+        for division in self.divisions:
+            if division.path:
+                next_tile = division.path[0]
+                movement_cost = max(1.0, float(getattr(next_tile, "movement_cost", 1.0) or 1.0))
+                org_ratio = self.clamp01(division.organization / max(1.0, division.max_organization))
+                speed_factor = max(DIVISION_LOW_ORG_SPEED_FLOOR, 0.35 + org_ratio * 0.65)
+                progress = division.speed * speed_factor * elapsed_hours / 24.0 / movement_cost
+                division.movement_progress += progress
+                division.organization = max(
+                    0.0,
+                    division.organization - DIVISION_ORG_MOVE_COST_PER_TILE * progress,
+                )
+                while division.path and division.movement_progress >= 1.0:
+                    division.movement_progress -= 1.0
+                    division.tile = division.path.pop(0)
+                    division.x = division.tile.center_x
+                    division.y = division.tile.center_y
+                if not division.path:
+                    division.target_tile = None
+                    division.route_tiles = []
+                    division.movement_progress = 0.0
+            else:
+                supply = self.clamp01(getattr(division.tile, "supply_score", 0.75) if division.tile else 0.75)
+                recovery = DIVISION_ORG_RECOVERY_PER_DAY * supply * elapsed_hours / 24.0
+                division.organization = min(division.max_organization, division.organization + recovery)
+            if division.tile:
+                division.x = division.tile.center_x
+                division.y = division.tile.center_y
+        self.invalidate_division_render_cache()
 
     def is_coastal_land_tile(self, tile):
         if self.is_water_tile(tile):
@@ -5295,11 +5485,62 @@ class Game(arcade.View):
         self.rebuild_state_borders()
         self.recalculate_all_monthly_balances()
         self.update_economy_month_history(self.simulation_client.snapshot.current_time)
+        self.generate_starting_divisions_for_all_states()
 
         print(
             f"Created {len(self.players)} states, "
             f"start territory radius: {self.start_territory_radius}"
         )
+
+    def generate_starting_divisions_for_all_states(self):
+        self.divisions = []
+        self.next_division_id = 1
+        self.next_army_id = 1
+        self.selected_division_ids.clear()
+        for player in self.players:
+            player.divisions = []
+            player.armies = []
+            self.generate_starting_divisions(player)
+        self.invalidate_division_render_cache()
+
+    def generate_starting_divisions(self, player):
+        template = DIVISION_TEMPLATE_BASE["basic_infantry"]
+        land_tiles = [tile for tile in player.tiles if not self.is_water_tile(tile)]
+        if not land_tiles:
+            return
+        capital = player.capital_tile
+
+        def tile_score(tile):
+            coverage = getattr(tile, "building_coverage", {}) or {}
+            city = coverage.get("city", 0.0)
+            village = coverage.get("village", 0.0)
+            supply = getattr(tile, "supply_score", 0.65)
+            distance_penalty = 0.0
+            if capital:
+                distance_penalty = (abs(tile.q - capital.q) + abs(tile.r - capital.r)) * 0.015
+            return city * 1.6 + village * 0.8 + supply * 0.5 + self.owned_neighbor_count(player, tile) * 0.08 - distance_penalty
+
+        candidates = sorted(land_tiles, key=lambda tile: (-tile_score(tile), tile.q, tile.r))
+        if not candidates:
+            return
+
+        for index in range(STARTING_DIVISIONS_PER_STATE):
+            tile = candidates[index % len(candidates)]
+            division = Division(
+                id=self.next_division_id,
+                owner=player,
+                template_key="basic_infantry",
+                tile=tile,
+                target_tile=None,
+                path=[],
+                manpower=template["manpower"],
+                organization=template["organization"],
+                max_organization=template["organization"],
+                speed=template["speed"],
+            )
+            self.next_division_id += 1
+            player.divisions.append(division)
+            self.divisions.append(division)
 
     def calculate_start_territory_radius(self, total_players):
         radius = round(self.map_size / max(8, total_players * 2))
@@ -5643,6 +5884,342 @@ class Game(arcade.View):
         self.construction_placement_label_shapes.draw()
         for text in self.construction_placement_label_texts:
             text.draw()
+
+    def division_display_world_position(self, division):
+        tile = division.tile
+        if not tile:
+            return division.x, division.y
+        return division.x + DIVISION_TILE_SIDE_OFFSET_X, division.y + DIVISION_TILE_SIDE_OFFSET_Y
+
+    def division_screen_position(self, division):
+        x, y = self.division_display_world_position(division)
+        return self.world_to_screen(x, y)
+
+    def visible_divisions(self):
+        visible = []
+        for division in self.divisions:
+            screen_x, screen_y = self.division_screen_position(division)
+            margin = DIVISION_ICON_SIZE * 1.6
+            if -margin <= screen_x <= self.window.width + margin and -margin <= screen_y <= self.window.height + margin:
+                visible.append(division)
+        return visible
+
+    def division_render_signature(self):
+        return (
+            round(self.world_camera.zoom, 3),
+            round(self.world_camera.position[0], 1),
+            round(self.world_camera.position[1], 1),
+            tuple(
+                (
+                    division.id,
+                    division.tile.q if division.tile else None,
+                    division.tile.r if division.tile else None,
+                    round(division.x, 1),
+                    round(division.y, 1),
+                    round(division.organization, 1),
+                    division.selected,
+                )
+                for division in self.divisions
+            ),
+        )
+
+    def use_division_lod(self):
+        return self.world_camera.zoom < DIVISION_LOD_ZOOM
+
+    def append_division_template_icon(self, shapes, template_key, x, y, size, color):
+        icon_key = DIVISION_TEMPLATE_BASE.get(template_key, {}).get("icon", "infantry")
+        if icon_key == "infantry":
+            head = max(3, size * 0.10)
+            shapes.append(arcade.shape_list.create_ellipse_filled(x, y + size * 0.08, head * 2, head * 2, color))
+            shapes.append(arcade.shape_list.create_line(x, y - size * 0.02, x, y - size * 0.19, color, 3))
+            shapes.append(arcade.shape_list.create_line(x - size * 0.14, y - size * 0.07, x + size * 0.14, y - size * 0.07, color, 3))
+            shapes.append(arcade.shape_list.create_line(x, y - size * 0.19, x - size * 0.12, y - size * 0.30, color, 3))
+            shapes.append(arcade.shape_list.create_line(x, y - size * 0.19, x + size * 0.12, y - size * 0.30, color, 3))
+        elif icon_key == "tank":
+            shapes.append(arcade.shape_list.create_rectangle_filled(x, y - size * 0.05, size * 0.56, size * 0.20, color))
+            shapes.append(arcade.shape_list.create_rectangle_filled(x - size * 0.04, y + size * 0.08, size * 0.27, size * 0.16, color))
+            shapes.append(arcade.shape_list.create_line(x + size * 0.08, y + size * 0.09, x + size * 0.31, y + size * 0.13, color, 4))
+            shapes.append(arcade.shape_list.create_line(x - size * 0.24, y - size * 0.18, x + size * 0.24, y - size * 0.18, color, 3))
+        elif icon_key == "motorized":
+            wheel = max(2, size * 0.055)
+            shapes.append(arcade.shape_list.create_rectangle_filled(x, y - size * 0.03, size * 0.54, size * 0.20, color))
+            shapes.append(arcade.shape_list.create_rectangle_filled(x - size * 0.08, y + size * 0.08, size * 0.26, size * 0.16, color))
+            shapes.append(arcade.shape_list.create_ellipse_filled(x - size * 0.18, y - size * 0.19, wheel * 2, wheel * 2, color))
+            shapes.append(arcade.shape_list.create_ellipse_filled(x + size * 0.18, y - size * 0.19, wheel * 2, wheel * 2, color))
+        elif icon_key == "anti_tank":
+            shapes.append(arcade.shape_list.create_line(x - size * 0.28, y + size * 0.10, x + size * 0.24, y + size * 0.19, color, 4))
+            shapes.append(arcade.shape_list.create_line(x, y + size * 0.03, x, y - size * 0.26, color, 3))
+            shapes.append(arcade.shape_list.create_line(x, y - size * 0.08, x - size * 0.20, y - size * 0.30, color, 3))
+            shapes.append(arcade.shape_list.create_line(x, y - size * 0.08, x + size * 0.20, y - size * 0.30, color, 3))
+            shapes.append(arcade.shape_list.create_line(x - size * 0.10, y - size * 0.10, x + size * 0.10, y - size * 0.10, color, 3))
+        elif icon_key == "anti_air":
+            shapes.append(arcade.shape_list.create_line(x, y - size * 0.25, x, y + size * 0.15, color, 3))
+            shapes.append(arcade.shape_list.create_line(x - size * 0.22, y - size * 0.26, x, y - size * 0.05, color, 3))
+            shapes.append(arcade.shape_list.create_line(x + size * 0.22, y - size * 0.26, x, y - size * 0.05, color, 3))
+            shapes.append(arcade.shape_list.create_line(x - size * 0.22, y + size * 0.06, x + size * 0.22, y + size * 0.17, color, 4))
+            shapes.append(arcade.shape_list.create_line(x + size * 0.22, y + size * 0.17, x + size * 0.12, y + size * 0.28, color, 3))
+        else:
+            shapes.append(arcade.shape_list.create_line(x - size * 0.18, y - size * 0.18, x + size * 0.18, y + size * 0.18, color, 3))
+            shapes.append(arcade.shape_list.create_line(x - size * 0.18, y + size * 0.18, x + size * 0.18, y - size * 0.18, color, 3))
+
+    def visible_division_tile_stacks(self):
+        stacks = {}
+        for division in self.visible_divisions():
+            if not division.tile:
+                continue
+            key = (
+                division.owner.id if division.owner else None,
+                division.template_key,
+                division.tile.q,
+                division.tile.r,
+            )
+            stacks.setdefault(key, []).append(division)
+        result = []
+        for divisions in stacks.values():
+            divisions.sort(key=lambda item: item.id)
+            result.append(divisions)
+        result.sort(key=lambda stack: (stack[0].tile.r, stack[0].tile.q, stack[0].template_key, stack[0].owner.id))
+        return result
+
+    def rebuild_division_shapes(self):
+        cache_key = self.division_render_signature()
+        if cache_key == self.division_render_cache_key:
+            return
+        self.division_render_cache_key = cache_key
+        self.division_shape_list = arcade.shape_list.ShapeElementList()
+        for text in self.division_tile_stack_texts:
+            text.text = ""
+        if self.use_division_lod():
+            return
+
+        size = DIVISION_ICON_SIZE / max(0.35, min(1.0, self.world_camera.zoom ** 0.25))
+        text_index = 0
+        for stack in self.visible_division_tile_stacks():
+            division = stack[0]
+            x, y = self.division_display_world_position(division)
+            owner_color = division.owner.color if division.owner else (180, 180, 180)
+            fill = self.blend_colors(owner_color, (245, 245, 245), 0.18)
+            selected = any(item.selected for item in stack)
+            border = (255, 246, 132) if selected else (28, 32, 38)
+            org_ratio = 0.0
+            max_org = sum(max(1.0, item.max_organization) for item in stack)
+            if max_org > 0:
+                org_ratio = self.clamp01(sum(item.organization for item in stack) / max_org)
+            self.division_shape_list.append(
+                arcade.shape_list.create_rectangle_filled(x, y, size, size * 0.76, fill)
+            )
+            self.division_shape_list.append(
+                arcade.shape_list.create_rectangle_outline(x, y, size, size * 0.76, border, 3 if selected else 2)
+            )
+            self.append_division_template_icon(
+                self.division_shape_list,
+                division.template_key,
+                x,
+                y + size * 0.02,
+                size,
+                (18, 24, 31),
+            )
+            self.division_shape_list.append(
+                arcade.shape_list.create_rectangle_filled(
+                    x,
+                    y - size * 0.50,
+                    size,
+                    max(3, size * 0.10),
+                    (38, 46, 58),
+                )
+            )
+            self.division_shape_list.append(
+                arcade.shape_list.create_rectangle_filled(
+                    x - size * (1 - org_ratio) / 2,
+                    y - size * 0.50,
+                    size * org_ratio,
+                    max(3, size * 0.10),
+                    (110, 214, 126) if org_ratio >= 0.45 else (234, 186, 72),
+                )
+            )
+            if len(stack) > 1:
+                badge_width = max(14, size * 0.42)
+                badge_height = max(12, size * 0.34)
+                badge_x = x + size * 0.22
+                badge_y = y + size * 0.15
+                self.division_shape_list.append(
+                    arcade.shape_list.create_rectangle_filled(
+                        badge_x,
+                        badge_y,
+                        badge_width,
+                        badge_height,
+                        (18, 24, 31),
+                    )
+                )
+                self.division_shape_list.append(
+                    arcade.shape_list.create_rectangle_outline(
+                        badge_x,
+                        badge_y,
+                        badge_width,
+                        badge_height,
+                        (232, 238, 246),
+                        1,
+                    )
+                )
+                if text_index >= len(self.division_tile_stack_texts):
+                    self.division_tile_stack_texts.append(
+                        arcade.Text("", 0, 0, arcade.color.WHITE, 11, anchor_x="center", anchor_y="center")
+                    )
+                label = self.division_tile_stack_texts[text_index]
+                label.text = str(len(stack))
+                label.x = badge_x
+                label.y = badge_y
+                label.color = arcade.color.WHITE
+                text_index += 1
+        for index in range(text_index, len(self.division_tile_stack_texts)):
+            self.division_tile_stack_texts[index].text = ""
+
+    def division_group_signature(self):
+        return (
+            round(self.world_camera.zoom, 3),
+            round(self.world_camera.position[0], 1),
+            round(self.world_camera.position[1], 1),
+            tuple(
+                (
+                    division.id,
+                    division.tile.q if division.tile else None,
+                    division.tile.r if division.tile else None,
+                    division.selected,
+                )
+                for division in self.divisions
+            ),
+        )
+
+    def rebuild_division_groups(self):
+        cache_key = self.division_group_signature()
+        if cache_key == self.division_groups_cache_key:
+            return
+        self.division_groups_cache_key = cache_key
+        self.division_groups = []
+        self.division_group_shape_list = arcade.shape_list.ShapeElementList()
+        for text in self.division_group_texts:
+            text.text = ""
+
+        if not self.use_division_lod():
+            return
+
+        grouped = {}
+        for division in self.visible_divisions():
+            screen_x, screen_y = self.division_screen_position(division)
+            cell = (int(screen_x // DIVISION_LOD_CELL_SIZE), int(screen_y // DIVISION_LOD_CELL_SIZE))
+            grouped.setdefault(cell, []).append((division, screen_x, screen_y))
+
+        text_index = 0
+        for (_cell_x, _cell_y), entries in grouped.items():
+            divisions = [entry[0] for entry in entries]
+            center_x = sum(entry[1] for entry in entries) / len(entries)
+            center_y = sum(entry[2] for entry in entries) / len(entries)
+            selected = any(division.selected for division in divisions)
+            fill = (54, 76, 96, 238) if not selected else (88, 96, 54, 245)
+            border = (255, 246, 132) if selected else (170, 190, 210)
+            size = 34
+            rect = (center_x - size / 2, center_y - size / 2, size, size)
+            self.division_group_shape_list.append(
+                arcade.shape_list.create_rectangle_filled(center_x, center_y, size, size, fill)
+            )
+            self.division_group_shape_list.append(
+                arcade.shape_list.create_rectangle_outline(center_x, center_y, size, size, border, 2)
+            )
+            if text_index >= len(self.division_group_texts):
+                self.division_group_texts.append(
+                    arcade.Text("", 0, 0, arcade.color.WHITE, 13, anchor_x="center", anchor_y="center")
+                )
+            label = self.division_group_texts[text_index]
+            label.text = str(len(divisions))
+            label.x = center_x
+            label.y = center_y
+            label.color = arcade.color.WHITE
+            text_index += 1
+            self.division_groups.append({
+                "rect": rect,
+                "divisions": divisions,
+            })
+        for index in range(text_index, len(self.division_group_texts)):
+            self.division_group_texts[index].text = ""
+
+    def draw_divisions(self):
+        self.rebuild_division_route_shapes()
+        self.division_route_shape_list.draw()
+        self.rebuild_division_shapes()
+        if not self.use_division_lod():
+            self.division_shape_list.draw()
+            for text in self.division_tile_stack_texts:
+                if text.text:
+                    text.draw()
+
+    def route_point_for_tile(self, tile):
+        return tile.center_x, tile.center_y
+
+    def rebuild_division_route_shapes(self):
+        self.division_route_shape_list = arcade.shape_list.ShapeElementList()
+        if self.use_overview_lod():
+            return
+        for division in self.selected_divisions():
+            if not division.path:
+                continue
+            points = [self.division_display_world_position(division)]
+            points.extend(self.route_point_for_tile(tile) for tile in division.path)
+            if len(points) < 2:
+                continue
+            base_color, progress_color = DIVISION_ROUTE_COLORS.get(
+                division.route_mode,
+                DIVISION_ROUTE_COLORS["move"],
+            )
+            for index in range(len(points) - 1):
+                x1, y1 = points[index]
+                x2, y2 = points[index + 1]
+                self.division_route_shape_list.append(
+                    arcade.shape_list.create_line(x1, y1, x2, y2, (*base_color, 210), 5)
+                )
+            x1, y1 = points[0]
+            x2, y2 = points[1]
+            progress = self.clamp01(division.movement_progress)
+            self.division_route_shape_list.append(
+                arcade.shape_list.create_line(
+                    x1,
+                    y1,
+                    x1 + (x2 - x1) * progress,
+                    y1 + (y2 - y1) * progress,
+                    (*progress_color, 235),
+                    6,
+                )
+            )
+            arrow_x, arrow_y = points[-1]
+            prev_x, prev_y = points[-2]
+            angle = math.atan2(arrow_y - prev_y, arrow_x - prev_x)
+            wing = 16
+            for offset in (2.55, -2.55):
+                wx = arrow_x + math.cos(angle + offset) * wing
+                wy = arrow_y + math.sin(angle + offset) * wing
+                self.division_route_shape_list.append(
+                    arcade.shape_list.create_line(arrow_x, arrow_y, wx, wy, (*progress_color, 235), 5)
+                )
+
+    def draw_division_groups(self):
+        if not self.use_division_lod():
+            return
+        self.rebuild_division_groups()
+        self.division_group_shape_list.draw()
+        for text in self.division_group_texts:
+            if text.text:
+                text.draw()
+
+    def draw_division_selection_box(self):
+        if not self.division_selection_drag_started:
+            return
+        x1, y1 = self.division_selection_start
+        x2, y2 = self.division_selection_current
+        left = min(x1, x2)
+        bottom = min(y1, y2)
+        width = abs(x2 - x1)
+        height = abs(y2 - y1)
+        arcade.draw_lbwh_rectangle_filled(left, bottom, width, height, (90, 130, 190, 42))
+        arcade.draw_lbwh_rectangle_outline(left, bottom, width, height, (160, 205, 255, 210), 1)
 
     def construction_hover_tooltip_data(self):
         if (
@@ -6027,13 +6604,18 @@ class Game(arcade.View):
             self.draw_capital_markers()
         if self.selection_border.visible:
             self.selection_border_sprite_list.draw()
+        self.draw_divisions()
         self.draw_premium_shader_overlay()
         self.gui_camera.use()
+        self.draw_division_groups()
+        self.draw_division_selection_box()
+        self.draw_division_list_panel()
         self.draw_top_status_bar()
         self.draw_top_navigation_bar()
         self.draw_side_panel()
         self.draw_hex_info_panel()
         self.draw_gui()
+        self.draw_army_command_bar()
         self.draw_time_hud()
         self.draw_map_layer_control()
         if self.paused:
@@ -8293,6 +8875,457 @@ class Game(arcade.View):
         rect_x, rect_y, rect_width, rect_height = rect
         return rect_x <= x <= rect_x + rect_width and rect_y <= y <= rect_y + rect_height
 
+    def invalidate_division_render_cache(self):
+        self.division_render_cache_key = None
+        self.division_groups_cache_key = None
+
+    def set_selected_divisions(self, divisions, additive=False, toggle=False):
+        if not additive and not toggle:
+            for division in self.divisions:
+                division.selected = False
+            self.selected_division_ids.clear()
+
+        for division in divisions:
+            if not division or division.owner != self.human_player:
+                continue
+            if toggle and division.id in self.selected_division_ids:
+                division.selected = False
+                self.selected_division_ids.discard(division.id)
+            else:
+                division.selected = True
+                self.selected_division_ids.add(division.id)
+        if not self.selected_division_ids:
+            self.division_list_scroll_index = 0
+        self.invalidate_division_render_cache()
+
+    def selected_divisions(self):
+        return [
+            division
+            for division in self.divisions
+            if division.id in self.selected_division_ids
+        ]
+
+    def division_display_name(self, division):
+        template = DIVISION_TEMPLATE_BASE.get(division.template_key, {})
+        base_name = template.get("name", "Дивизия")
+        return f"{division.id}. {base_name}"
+
+    def division_ui_left_edge(self, preferred_width=355):
+        x = 10
+        if self.side_panel_progress > 0.01:
+            panel_x, _panel_y, panel_width, _panel_height = self.side_panel_rect()
+            panel_right = panel_x + panel_width
+            if panel_right > 0:
+                x = panel_right + 10
+        max_x = max(10, self.window.width - preferred_width - 10)
+        return min(x, max_x)
+
+    def army_command_bar_rect(self):
+        if not self.human_player:
+            return None
+        if not self.selected_division_ids and not (getattr(self.human_player, "armies", []) or []):
+            return None
+        x = self.division_ui_left_edge(360)
+        max_right = self.window.width - 78
+        width = min(360, max(250, max_right - x))
+        if x + width > max_right:
+            x = max(10, max_right - width)
+        return x, 14, width, 82
+
+    def army_command_items(self):
+        if not self.human_player:
+            return []
+        armies = list(getattr(self.human_player, "armies", []) or [])
+        armies.sort(key=lambda army: army.id)
+        return armies
+
+    def divisions_for_army(self, army):
+        ids = set(getattr(army, "division_ids", []) or [])
+        return [
+            division
+            for division in getattr(army.owner, "divisions", []) or []
+            if division.id in ids and division.army_id == army.id
+        ]
+
+    def selected_free_divisions(self):
+        return [
+            division
+            for division in self.selected_divisions()
+            if division.owner == self.human_player and division.army_id is None
+        ]
+
+    def division_list_rect(self):
+        selected_count = len(self.selected_division_ids)
+        if selected_count <= 0:
+            return None
+        preferred_width = 355
+        x = self.division_ui_left_edge(preferred_width)
+        width = min(preferred_width, max(280, self.window.width - x - 14))
+        top = self.window.height - TOP_UI_HEIGHT - 10
+        army_bar_rect = self.army_command_bar_rect()
+        bottom = 88 if not army_bar_rect else army_bar_rect[1] + army_bar_rect[3] + 10
+        height = min(520, max(260, top - bottom))
+        return x, top - height, width, height
+
+    def division_list_rows(self):
+        rows = self.selected_divisions()
+        rows.sort(key=lambda division: (division.template_key, division.id))
+        return rows
+
+    def draw_division_list_panel(self):
+        rows = self.division_list_rows()
+        rect = self.division_list_rect()
+        self.division_list_panel_rect = rect
+        self.division_list_row_rects = []
+        if not rows or not rect:
+            return
+
+        panel_x, panel_y, panel_width, panel_height = rect
+        arcade.draw_lbwh_rectangle_filled(panel_x, panel_y, panel_width, panel_height, (18, 24, 31, 238))
+        arcade.draw_lbwh_rectangle_outline(panel_x, panel_y, panel_width, panel_height, (92, 116, 142), 2)
+
+        header_h = 86
+        footer_h = 10
+        self.draw_ui_text("Армия 1", panel_x + 14, panel_y + panel_height - 24, arcade.color.WHITE, 15)
+        self.draw_ui_text(
+            f"{len(rows)} выбрано",
+            panel_x + panel_width - 14,
+            panel_y + panel_height - 24,
+            (216, 228, 240),
+            12,
+            anchor_x="right",
+        )
+        org_average = sum(division.organization for division in rows) / max(1, len(rows))
+        manpower = sum(division.manpower for division in rows)
+        self.draw_ui_text("Командир: нет", panel_x + 14, panel_y + panel_height - 48, (170, 184, 200), 11)
+        self.draw_ui_text(
+            f"Люди {self.format_resource_amount(manpower)}  Орг. {org_average:.0f}%",
+            panel_x + 14,
+            panel_y + panel_height - 68,
+            (206, 218, 230),
+            11,
+        )
+
+        list_top = panel_y + panel_height - header_h
+        list_bottom = panel_y + footer_h
+        row_h = 34
+        visible_count = max(1, int((list_top - list_bottom) / row_h))
+        max_scroll = max(0, len(rows) - visible_count)
+        self.division_list_scroll_index = max(0, min(self.division_list_scroll_index, max_scroll))
+        visible_rows = rows[self.division_list_scroll_index:self.division_list_scroll_index + visible_count]
+
+        self.division_list_icon_shape_list = arcade.shape_list.ShapeElementList()
+        for index, division in enumerate(visible_rows):
+            row_y = list_top - (index + 1) * row_h
+            row_rect = (panel_x + 8, row_y + 3, panel_width - 16, row_h - 5)
+            self.division_list_row_rects.append((row_rect, division))
+            selected = division.selected
+            fill = (54, 84, 58, 220) if selected else (35, 48, 60, 210)
+            arcade.draw_lbwh_rectangle_filled(*row_rect, fill)
+            arcade.draw_lbwh_rectangle_outline(*row_rect, (76, 98, 120), 1)
+            icon_x = row_rect[0] + 22
+            icon_y = row_rect[1] + row_rect[3] / 2
+            self.append_division_template_icon(
+                self.division_list_icon_shape_list,
+                division.template_key,
+                icon_x,
+                icon_y + 2,
+                24,
+                (210, 224, 232),
+            )
+            self.draw_ui_text(self.division_display_name(division), row_rect[0] + 44, icon_y + 3, arcade.color.WHITE, 11, anchor_y="center")
+            org_color = (154, 224, 142) if division.organization >= 45 else (236, 198, 90)
+            self.draw_ui_text(f"{division.organization:.0f}", row_rect[0] + row_rect[2] - 48, icon_y + 3, org_color, 10, anchor_x="right", anchor_y="center")
+            self.draw_ui_text("ORG", row_rect[0] + row_rect[2] - 12, icon_y + 3, (150, 166, 184), 8, anchor_x="right", anchor_y="center")
+
+        self.division_list_icon_shape_list.draw()
+
+        if max_scroll > 0:
+            track_x = panel_x + panel_width - 8
+            track_y = list_bottom
+            track_h = list_top - list_bottom
+            thumb_h = max(22, track_h * visible_count / len(rows))
+            thumb_y = track_y + (track_h - thumb_h) * (1 - self.division_list_scroll_index / max(1, max_scroll))
+            arcade.draw_lbwh_rectangle_filled(track_x, track_y, 4, track_h, (48, 62, 78, 190))
+            arcade.draw_lbwh_rectangle_filled(track_x, thumb_y, 4, thumb_h, (142, 166, 194, 230))
+
+    def draw_commander_portrait(self, x, y, size, variant=0):
+        palettes = [
+            ((116, 91, 68), (214, 182, 145), (36, 42, 34)),
+            ((64, 70, 74), (204, 166, 126), (82, 28, 28)),
+            ((70, 62, 54), (190, 148, 112), (44, 34, 28)),
+        ]
+        bg_color, skin_color, uniform_color = palettes[variant % len(palettes)]
+        arcade.draw_lbwh_rectangle_filled(x, y, size, size, bg_color)
+        arcade.draw_lbwh_rectangle_outline(x, y, size, size, (34, 42, 44), 1)
+        center_x = x + size * 0.5
+        arcade.draw_circle_filled(center_x, y + size * 0.62, size * 0.20, skin_color)
+        arcade.draw_lbwh_rectangle_filled(x + size * 0.28, y + size * 0.12, size * 0.44, size * 0.30, uniform_color)
+        arcade.draw_lbwh_rectangle_filled(x + size * 0.30, y + size * 0.74, size * 0.40, size * 0.10, uniform_color)
+        arcade.draw_line(center_x - size * 0.07, y + size * 0.64, center_x - size * 0.03, y + size * 0.64, (32, 30, 26), 1)
+        arcade.draw_line(center_x + size * 0.03, y + size * 0.64, center_x + size * 0.07, y + size * 0.64, (32, 30, 26), 1)
+        arcade.draw_line(center_x - size * 0.06, y + size * 0.54, center_x + size * 0.06, y + size * 0.54, (96, 54, 42), 1)
+
+    def draw_army_command_card(self, x, y, width, height, count_text, variant=0, active=False, is_add=False):
+        fill = (34, 45, 37, 238) if active else (24, 31, 38, 235)
+        border = (148, 138, 82) if active else (70, 88, 104)
+        arcade.draw_lbwh_rectangle_filled(x, y, width, height, fill)
+        arcade.draw_lbwh_rectangle_outline(x, y, width, height, border, 2 if active else 1)
+        top_h = 13
+        bottom_h = 15
+        arcade.draw_lbwh_rectangle_filled(x + 3, y + height - top_h - 3, width - 6, top_h, (18, 24, 27, 235))
+        status_colors = [(122, 54, 58), (56, 116, 68), (78, 110, 70)]
+        for index, color in enumerate(status_colors):
+            box_x = x + 7 + index * 16
+            arcade.draw_lbwh_rectangle_filled(box_x, y + height - top_h - 1, 12, 8, color)
+            arcade.draw_lbwh_rectangle_outline(box_x, y + height - top_h - 1, 12, 8, (24, 31, 34), 1)
+
+        portrait_x = x + 6
+        portrait_y = y + bottom_h + 5
+        portrait_size = min(width - 12, height - top_h - bottom_h - 12)
+        if is_add:
+            arcade.draw_lbwh_rectangle_filled(portrait_x, portrait_y, portrait_size, portrait_size, (34, 42, 48, 230))
+            arcade.draw_lbwh_rectangle_outline(portrait_x, portrait_y, portrait_size, portrait_size, (92, 108, 122), 1)
+            self.draw_ui_text("+", portrait_x + portrait_size / 2, portrait_y + portrait_size / 2 + 1,
+                              (210, 220, 226), 24, anchor_x="center", anchor_y="center")
+        else:
+            self.draw_commander_portrait(portrait_x, portrait_y, portrait_size, variant)
+
+        arcade.draw_lbwh_rectangle_filled(x + 5, y + 3, width - 10, bottom_h, (12, 17, 19, 235))
+        self.draw_ui_text(count_text, x + width / 2, y + bottom_h / 2 + 2,
+                          arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
+
+    def add_divisions_to_army(self, army, divisions):
+        if not army or not divisions:
+            return []
+        current_ids = list(getattr(army, "division_ids", []) or [])
+        current_ids = [division_id for division_id in current_ids if self.division_by_id(division_id)]
+        existing = set(current_ids)
+        added = []
+        free_slots = max(0, ARMY_DIVISION_CAPACITY - len(current_ids))
+        for division in divisions:
+            if free_slots <= 0:
+                break
+            if division.owner != army.owner or division.army_id is not None or division.id in existing:
+                continue
+            division.army_id = army.id
+            current_ids.append(division.id)
+            existing.add(division.id)
+            added.append(division)
+            free_slots -= 1
+        army.division_ids = current_ids
+        return added
+
+    def create_army_from_selected_divisions(self):
+        divisions = self.selected_free_divisions()
+        if not divisions or not self.human_player:
+            return None
+        if self.human_player.armies is None:
+            self.human_player.armies = []
+        army = Army(
+            id=self.next_army_id,
+            owner=self.human_player,
+            name=f"Армия {len(self.human_player.armies) + 1}",
+        )
+        self.next_army_id += 1
+        self.human_player.armies.append(army)
+        self.add_divisions_to_army(army, divisions)
+        return army
+
+    def division_by_id(self, division_id):
+        for division in self.divisions:
+            if division.id == division_id:
+                return division
+        return None
+
+    def draw_army_command_bar(self):
+        rows = self.division_list_rows()
+        rect = self.army_command_bar_rect()
+        self.army_command_card_rects = []
+        self.army_command_add_rect = None
+        if not rect:
+            return
+        armies = self.army_command_items()
+        has_free_selection = bool(self.selected_free_divisions())
+        if not rows and not armies:
+            return
+        bar_x, bar_y, bar_width, bar_height = rect
+        arcade.draw_lbwh_rectangle_filled(bar_x, bar_y, bar_width, bar_height, (14, 19, 22, 232))
+        arcade.draw_lbwh_rectangle_outline(bar_x, bar_y, bar_width, bar_height, (62, 80, 88), 2)
+
+        label_w = 42
+        arcade.draw_lbwh_rectangle_filled(bar_x + 5, bar_y + 6, label_w, bar_height - 12, (28, 38, 42, 238))
+        arcade.draw_lbwh_rectangle_outline(bar_x + 5, bar_y + 6, label_w, bar_height - 12, (74, 92, 98), 1)
+        self.draw_ui_text("ТВД", bar_x + 5 + label_w / 2, bar_y + bar_height - 22,
+                          (214, 226, 232), 9, anchor_x="center")
+        self.draw_ui_text("1", bar_x + 5 + label_w / 2, bar_y + 24,
+                          arcade.color.WHITE, 16, anchor_x="center", anchor_y="center")
+
+        card_x = bar_x + label_w + 11
+        card_w = 56
+        card_h = bar_height - 10
+        gap = 7
+        self.army_command_card_rects = []
+        current_x = card_x
+        for index, army in enumerate(armies):
+            if current_x + card_w > bar_x + bar_width - 6:
+                break
+            army_divisions = self.divisions_for_army(army)
+            active = any(division.id in self.selected_division_ids for division in army_divisions)
+            self.draw_army_command_card(
+                current_x,
+                bar_y + 5,
+                card_w,
+                card_h,
+                f"{len(army_divisions)}/{ARMY_DIVISION_CAPACITY}",
+                variant=index,
+                active=active,
+            )
+            self.army_command_card_rects.append(((current_x, bar_y + 5, card_w, card_h), army))
+            current_x += card_w + gap
+
+        add_x = current_x
+        if add_x + card_w <= bar_x + bar_width - 6:
+            self.draw_army_command_card(
+                add_x,
+                bar_y + 5,
+                card_w,
+                card_h,
+                "",
+                active=has_free_selection,
+                is_add=True,
+            )
+            self.army_command_add_rect = (add_x, bar_y + 5, card_w, card_h)
+        else:
+            self.army_command_add_rect = None
+
+    def handle_division_list_click(self, x, y, modifiers):
+        if not self.division_list_panel_rect or not self.point_in_rect(x, y, self.division_list_panel_rect):
+            return False
+        for rect, division in self.division_list_row_rects:
+            if self.point_in_rect(x, y, rect):
+                shift = self.shift_modifier_active(modifiers)
+                self.set_selected_divisions([division], additive=shift, toggle=shift)
+                return True
+        return True
+
+    def handle_army_command_bar_click(self, x, y):
+        rect = self.army_command_bar_rect()
+        if not rect or not self.point_in_rect(x, y, rect):
+            return False
+
+        if self.army_command_add_rect and self.point_in_rect(x, y, self.army_command_add_rect):
+            army = self.create_army_from_selected_divisions()
+            if army:
+                self.set_selected_divisions(self.divisions_for_army(army))
+            return True
+
+        for card_rect, army in self.army_command_card_rects:
+            if not self.point_in_rect(x, y, card_rect):
+                continue
+            free_divisions = self.selected_free_divisions()
+            if free_divisions:
+                self.add_divisions_to_army(army, free_divisions)
+            self.set_selected_divisions(self.divisions_for_army(army))
+            return True
+
+        return True
+
+    def scroll_division_list(self, amount):
+        rows = self.division_list_rows()
+        rect = self.division_list_rect()
+        if not rows or not rect:
+            return False
+        _panel_x, panel_y, _panel_width, panel_height = rect
+        visible_count = max(1, int((panel_y + panel_height - 86 - (panel_y + 10)) / 34))
+        max_scroll = max(0, len(rows) - visible_count)
+        old_index = self.division_list_scroll_index
+        self.division_list_scroll_index = max(0, min(max_scroll, self.division_list_scroll_index + int(amount)))
+        return self.division_list_scroll_index != old_index
+
+    def division_at_screen(self, x, y):
+        if self.use_division_lod():
+            self.rebuild_division_groups()
+            for group in reversed(self.division_groups):
+                if self.point_in_rect(x, y, group["rect"]):
+                    return group
+            return None
+
+        best = None
+        best_distance = float("inf")
+        radius = DIVISION_ICON_SIZE * 0.72
+        for stack in self.visible_division_tile_stacks():
+            division = stack[0]
+            if division.owner != self.human_player:
+                continue
+            screen_x, screen_y = self.division_screen_position(division)
+            distance = math.hypot(screen_x - x, screen_y - y)
+            if distance <= radius and distance < best_distance:
+                best = {"rect": (screen_x - radius, screen_y - radius, radius * 2, radius * 2), "divisions": stack} if len(stack) > 1 else division
+                best_distance = distance
+        return best
+
+    def handle_division_click(self, x, y, modifiers):
+        hit = self.division_at_screen(x, y)
+        if not hit:
+            return False
+
+        shift = self.shift_modifier_active(modifiers)
+        now = time.time()
+        if isinstance(hit, dict):
+            self.set_selected_divisions(hit["divisions"], additive=shift, toggle=shift)
+            self.close_hex_panel()
+            return True
+
+        is_double = (
+            self.last_division_click_id == hit.id
+            and now - self.last_division_click_time <= DIVISION_DOUBLE_CLICK_SECONDS
+        )
+        self.last_division_click_time = now
+        self.last_division_click_id = hit.id
+
+        if is_double and not shift:
+            template_key = hit.template_key
+            divisions = [
+                division
+                for division in self.visible_divisions()
+                if division.owner == self.human_player and division.template_key == template_key
+            ]
+            self.set_selected_divisions(divisions)
+        else:
+            self.set_selected_divisions([hit], additive=shift, toggle=shift)
+        self.close_hex_panel()
+        return True
+
+    def screen_rect_contains_point(self, rect, x, y):
+        left, bottom, right, top = rect
+        return left <= x <= right and bottom <= y <= top
+
+    def select_divisions_in_screen_rect(self, start, end, modifiers):
+        x1, y1 = start
+        x2, y2 = end
+        rect = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+        shift = self.shift_modifier_active(modifiers)
+        selected = []
+        if self.use_division_lod():
+            for group in self.division_groups:
+                gx, gy, gw, gh = group["rect"]
+                center_x = gx + gw / 2
+                center_y = gy + gh / 2
+                if self.screen_rect_contains_point(rect, center_x, center_y):
+                    selected.extend(group["divisions"])
+        else:
+            for division in self.visible_divisions():
+                if division.owner != self.human_player:
+                    continue
+                screen_x, screen_y = self.division_screen_position(division)
+                if self.screen_rect_contains_point(rect, screen_x, screen_y):
+                    selected.append(division)
+        self.set_selected_divisions(selected, additive=shift, toggle=shift)
+        if selected:
+            self.close_hex_panel()
+        return bool(selected)
+
     def map_layer_option_at(self, x, y):
         if self.map_layer_menu_progress < 0.8:
             return None
@@ -8702,6 +9735,7 @@ class Game(arcade.View):
                 self.run_production_tick(player, elapsed_hours)
                 self.run_construction_tick(player, elapsed_hours)
                 self.run_population_tick(player, elapsed_hours)
+            self.update_divisions(elapsed_hours)
             self.update_economy_month_history(snapshot.current_time)
             self.last_production_tick_count = snapshot.tick_count
 
@@ -8790,6 +9824,12 @@ class Game(arcade.View):
             if self.handle_map_layer_control_click(x, y):
                 return
 
+            if self.handle_division_list_click(x, y, modifiers):
+                return
+
+            if self.handle_army_command_bar_click(x, y):
+                return
+
             if self.selected_tile and self.point_in_rect(x, y, self.hex_panel_rect()):
                 if self.point_in_rect(x, y, self.hex_panel_close_rect()):
                     self.close_hex_panel()
@@ -8850,6 +9890,16 @@ class Game(arcade.View):
                     return
                 return
 
+            if self.handle_division_click(x, y, modifiers):
+                return
+
+            self.division_selection_drag_active = True
+            self.division_selection_drag_started = False
+            self.division_selection_start = (x, y)
+            self.division_selection_current = (x, y)
+            self.pending_map_click = (world_x, world_y, modifiers)
+            return
+
         if button in (arcade.MOUSE_BUTTON_RIGHT, arcade.MOUSE_BUTTON_MIDDLE):
             if (
                 button == arcade.MOUSE_BUTTON_RIGHT
@@ -8872,6 +9922,17 @@ class Game(arcade.View):
                     self.cancel_queued_construction(self.human_player, tile, building_key)
                     return
 
+            if button == arcade.MOUSE_BUTTON_RIGHT and self.selected_divisions():
+                if y >= self.window.height - TOP_UI_HEIGHT:
+                    return
+                if self.side_panel_progress > 0 and self.point_in_rect(x, y, self.side_panel_rect()):
+                    return
+                if self.selected_tile and self.point_in_rect(x, y, self.hex_panel_rect()):
+                    return
+                target_tile = self.get_tile_at(world_x, world_y)
+                if target_tile and self.order_selected_divisions_to_tile(target_tile):
+                    return
+
             self.is_dragging = True
             self.drag_start_x = x
             self.drag_start_y = y
@@ -8888,6 +9949,21 @@ class Game(arcade.View):
     def on_mouse_release(self, x, y, button, modifiers):
         if button == arcade.MOUSE_BUTTON_LEFT:
             self.active_pause_slider = None
+            if self.division_selection_drag_active:
+                if self.division_selection_drag_started:
+                    self.select_divisions_in_screen_rect(self.division_selection_start, (x, y), modifiers)
+                elif self.pending_map_click:
+                    world_x, world_y, click_modifiers = self.pending_map_click
+                    tile = self.get_tile_at(world_x, world_y)
+                    if self.shift_modifier_active(click_modifiers):
+                        self.toggle_tile_multi_selection(tile)
+                    elif tile:
+                        self.set_single_selected_tile(tile)
+                    else:
+                        self.close_hex_panel()
+                self.division_selection_drag_active = False
+                self.division_selection_drag_started = False
+                self.pending_map_click = None
         if button in (arcade.MOUSE_BUTTON_RIGHT, arcade.MOUSE_BUTTON_MIDDLE):
             self.is_dragging = False
 
@@ -8895,6 +9971,13 @@ class Game(arcade.View):
         if self.paused:
             if self.active_pause_slider and buttons & arcade.MOUSE_BUTTON_LEFT:
                 self.active_pause_slider.set_from_mouse(x)
+            return
+
+        if self.division_selection_drag_active and buttons & arcade.MOUSE_BUTTON_LEFT:
+            self.division_selection_current = (x, y)
+            start_x, start_y = self.division_selection_start
+            if math.hypot(x - start_x, y - start_y) >= DIVISION_SELECTION_DRAG_THRESHOLD:
+                self.division_selection_drag_started = True
             return
 
         if self.is_dragging and (
@@ -9018,6 +10101,11 @@ class Game(arcade.View):
                         dropdown.scroll(-scroll_y)
                         dropdown.hovered_index = dropdown.option_at(x, y)
                         return
+            return
+
+        division_list_rect = self.division_list_rect()
+        if division_list_rect and self.point_in_rect(x, y, division_list_rect):
+            self.scroll_division_list(-scroll_y)
             return
 
         if self.selected_tile and self.point_in_rect(x, y, self.hex_panel_rect()):
