@@ -10,7 +10,7 @@ HEX_WID = HEX_SIZE * math.sqrt(3)  # Ширина для вертикально�
 HEX_HGT = HEX_SIZE * 2  # Высота для вертикальной ориентации
 CAMERA_LERP = 0.3
 MOVE_SPEED = 5
-ZOOM_SPEED = 0.1
+ZOOM_SPEED = 0.05
 MIN_ZOOM = 0.05
 MAX_ZOOM = 2.5
 
@@ -21,29 +21,78 @@ OVERVIEW_LOD_ZOOM = 0.2
 OVERVIEW_TEXTURE_MAX_SIZE = 1024
 STARTING_DIVISIONS_PER_STATE = 10
 ARMY_DIVISION_CAPACITY = 20
-DIVISION_TEMPLATE_BASE = {
-    "basic_infantry": {
-        "name": "Пехотная дивизия",
-        "icon": "infantry",
-        "manpower": 10_000,
-        "organization": 100.0,
-        "speed": 1.35,
-    },
-    "tank": {"name": "Танковая дивизия", "icon": "tank", "manpower": 8_000, "organization": 100.0, "speed": 1.7},
-    "motorized": {"name": "Моторизованная дивизия", "icon": "motorized", "manpower": 9_000, "organization": 100.0, "speed": 1.9},
-    "anti_tank": {"name": "ПТ/ПТУР дивизия", "icon": "anti_tank", "manpower": 7_000, "organization": 100.0, "speed": 1.25},
-    "anti_air": {"name": "ПВО дивизия", "icon": "anti_air", "manpower": 7_000, "organization": 100.0, "speed": 1.25},
+DATA_DIR = Path(__file__).resolve().parent / "data"
+DIVISION_TEMPLATE_PATH = DATA_DIR / "division_templates.json"
+DIVISION_TEMPLATE_DEFAULTS = {
+    "name": "Дивизия",
+    "icon": "infantry",
+    "manpower": 10_000,
+    "organization": 100.0,
+    "speed": 1.35,
+    "strength": 100.0,
+    "organization_recovery": 8.0,
+    "initiative": 0.03,
+    "front_width": 20.0,
+    "reliability": 1.0,
+    "recon": 0.0,
+    "camouflage": 0.0,
+    "soft_attack": 18.0,
+    "defense": 26.0,
+    "breakthrough": 8.0,
+    "hard_front_attack": 3.0,
+    "hard_top_attack": 1.0,
+    "front_piercing": 4.0,
+    "top_piercing": 1.0,
+    "front_armor": 2.0,
+    "top_armor": 1.0,
+    "infantry_share": 0.92,
+    "vehicle_share": 0.08,
 }
+DIVISION_TEMPLATE_NUMERIC_FIELDS = (
+    "manpower",
+    "organization",
+    "speed",
+    "strength",
+    "organization_recovery",
+    "initiative",
+    "front_width",
+    "reliability",
+    "recon",
+    "camouflage",
+    "soft_attack",
+    "defense",
+    "breakthrough",
+    "hard_front_attack",
+    "hard_top_attack",
+    "front_piercing",
+    "top_piercing",
+    "front_armor",
+    "top_armor",
+    "infantry_share",
+    "vehicle_share",
+)
 DIVISION_ICON_SIZE = 30
 DIVISION_TILE_SIDE_OFFSET_X = 34
 DIVISION_TILE_SIDE_OFFSET_Y = -22
 DIVISION_LOD_ZOOM = 0.45
-DIVISION_LOD_CELL_SIZE = 72
+DIVISION_LOD_CELL_SIZE = 120
 DIVISION_DOUBLE_CLICK_SECONDS = 0.35
 DIVISION_SELECTION_DRAG_THRESHOLD = 6
 DIVISION_ORG_MOVE_COST_PER_TILE = 1.4
 DIVISION_ORG_RECOVERY_PER_DAY = 8.0
 DIVISION_LOW_ORG_SPEED_FLOOR = 0.35
+COMBAT_WIDTH_DEFAULT = 80.0
+COMBAT_WIDTH_EXTRA_DIRECTION = 40.0
+COMBAT_REINFORCE_BASE_CHANCE = 0.10
+COMBAT_REJOIN_ORG_RATIO = 0.25
+COMBAT_ORG_DAMAGE_MULT = 1.0
+COMBAT_STRENGTH_DAMAGE_MULT = 0.35
+COMBAT_ATTACK_PRESSURE_MULT = 0.10
+COMBAT_ATTACK_OVERMATCH_MULT = 0.40
+COMBAT_ARMOR_BLOCKED_DAMAGE_MULT = 0.10
+COMBAT_UNPIERCED_DAMAGE_BONUS = 1.40
+COMBAT_ADVANCE_PER_HOUR = 0.035
+COMBAT_ADVANCE_DECAY_PER_HOUR = 0.05
 DIVISION_ROUTE_COLORS = {
     "move": ((120, 94, 28), (238, 196, 74)),
     "attack": ((132, 42, 42), (238, 92, 82)),
@@ -872,9 +921,9 @@ VISUAL_FACTOR_WEIGHTS = {
 VISUAL_MIN_COVERAGE = 0.03
 VISUAL_SYSTEM_MIN_ZOOM = 0.38
 VISUAL_EDGE_MIN_ZOOM = 0.62
-VISUAL_EDGE_TILE_LIMIT = 90
-VISUAL_DENSE_TILE_LIMIT = 180
-VISUAL_DENSE_SPRITE_LIMIT = 260
+VISUAL_EDGE_TILE_LIMIT = 140
+VISUAL_DENSE_TILE_LIMIT = 260
+VISUAL_DENSE_SPRITE_LIMIT = 520
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 LAYER_ICON_PATH = ASSET_DIR / "layers_icon.png"
 TILE_VISUAL_DIR = ASSET_DIR / "tile_visuals"
@@ -888,7 +937,7 @@ TOP_NAV_TABS = [
     ("politics", "Внутренняя политика", "politics.png"),
     ("economy", "Экономика", "economy.png"),
     ("resources", "Ресурсы", "resources.png"),
-    ("trade", "Торговля", "economy.png"),
+    ("trade", "Торговля", "trade.png"),
     ("construction", "Строительство", "construction.png"),
     ("research", "Исследования", "research.png"),
     ("diplomacy", "Дипломатия", "diplomacy.png"),
