@@ -5254,7 +5254,12 @@ class Game(arcade.View):
 
         if battle.advance_progress >= 1.0:
             self.capture_battle_tile(battle)
-        elif defenders and not attackers and not self.battle_divisions(battle, "reserve_attackers"):
+        elif (
+            defenders
+            and not attackers
+            and not self.battle_divisions(battle, "reserve_attackers")
+            and not self.battle_divisions(battle, "recovering_attackers")
+        ):
             self.end_battle(battle)
         elif not attackers and not self.battle_divisions(battle, "reserve_attackers") and not self.battle_divisions(battle, "recovering_attackers"):
             self.end_battle(battle)
@@ -5315,8 +5320,13 @@ class Game(arcade.View):
             division.route_mode = "retreat"
             division.movement_progress = 0.0
             division.organization = 0.0
+        retreating_ids = {division.id for division, _retreat_tile in retreat_orders}
         for division in list(self.divisions):
-            if division.tile == battle_tile and division.owner != new_owner and division.route_mode != "retreat":
+            if (
+                division.tile == battle_tile
+                and division.owner != new_owner
+                and (division.id not in retreating_ids or division.route_mode != "retreat" or not division.path)
+            ):
                 self.destroy_division(division)
         self.invalidate_division_render_cache()
 
@@ -6550,14 +6560,25 @@ class Game(arcade.View):
         for text in self.construction_placement_label_texts:
             text.draw()
 
-    def division_display_world_position(self, division):
-        cached = self.division_display_positions.get(division.id)
-        if cached:
-            return cached
+    def division_base_world_position(self, division):
         tile = division.tile
         if not tile:
             return division.x, division.y
-        return division.x + DIVISION_TILE_SIDE_OFFSET_X, division.y + DIVISION_TILE_SIDE_OFFSET_Y
+        if division.path:
+            next_tile = division.path[0]
+            progress = self.clamp01(division.movement_progress)
+            return (
+                tile.center_x + (next_tile.center_x - tile.center_x) * progress,
+                tile.center_y + (next_tile.center_y - tile.center_y) * progress,
+            )
+        return tile.center_x, tile.center_y
+
+    def division_display_world_position(self, division):
+        cached = self.division_display_positions.get(division.id)
+        if cached and not self.use_division_lod():
+            return cached
+        base_x, base_y = self.division_base_world_position(division)
+        return base_x + DIVISION_TILE_SIDE_OFFSET_X, base_y + DIVISION_TILE_SIDE_OFFSET_Y
 
     def division_screen_position(self, division):
         x, y = self.division_display_world_position(division)
@@ -6586,6 +6607,7 @@ class Game(arcade.View):
                     division.tile.r if division.tile else None,
                     round(division.x, 1),
                     round(division.y, 1),
+                    round(division.movement_progress, 2),
                     round(division.organization, 1),
                     round(division.strength, 1),
                     division.selected,
@@ -6687,7 +6709,8 @@ class Game(arcade.View):
                     angle = extra * 0.95
                     offset_x = DIVISION_TILE_SIDE_OFFSET_X + math.cos(angle) * 74
                     offset_y = DIVISION_TILE_SIDE_OFFSET_Y + math.sin(angle) * 52
-                position = (tile.center_x + offset_x, tile.center_y + offset_y)
+                base_x, base_y = self.division_base_world_position(stack[0])
+                position = (base_x + offset_x, base_y + offset_y)
                 for division in stack:
                     self.division_display_positions[division.id] = position
 
@@ -6738,6 +6761,9 @@ class Game(arcade.View):
                     division.template_key,
                     division.tile.q if division.tile else None,
                     division.tile.r if division.tile else None,
+                    round(division.x, 1),
+                    round(division.y, 1),
+                    round(division.movement_progress, 2),
                     round(division.organization, 1),
                     round(division.max_organization, 1),
                     round(division.strength, 1),
