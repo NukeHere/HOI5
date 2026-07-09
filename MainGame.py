@@ -6,6 +6,7 @@ import struct
 import time
 import textwrap
 import heapq
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from perlin_noise import PerlinNoise
@@ -417,6 +418,7 @@ class Division:
     x: float = 0.0
     y: float = 0.0
     movement_progress: float = 0.0
+    visual_movement_progress: float = 0.0
     army_id: int | None = None
     battle_id: tuple | None = None
     battle_side: str | None = None
@@ -435,7 +437,22 @@ class Army:
     owner: StatePlayer
     name: str
     division_ids: list = field(default_factory=list)
+    battle_plans: list = field(default_factory=list)
+    executing_plan: bool = False
+    plan_update_accumulator: float = 0.0
+    active_front_plan_id: int | None = None
     selected: bool = False
+
+
+@dataclass
+class BattlePlan:
+    id: int
+    army_id: int
+    plan_type: str
+    line_tile_keys: list = field(default_factory=list)
+    target_owner_id: int | None = None
+    source_plan_id: int | None = None
+    active: bool = True
 
 
 @dataclass
@@ -800,6 +817,9 @@ class Game(arcade.View):
         self.tile_spatial_cell_size = max(HEX_WID, HEX_HGT * 0.75)
         self.hex_draw_list = arcade.shape_list.ShapeElementList()
         self.state_border_list = arcade.shape_list.ShapeElementList()
+        self.state_border_segments = {}
+        self.state_border_chunk_segments = {}
+        self.state_border_chunk_lists = {}
         self.selected_tile = None
         self.selected_tiles = []
         self.hovered_tile = None
@@ -824,6 +844,14 @@ class Game(arcade.View):
         self.map_bounds = (0, 0, 0, 0)
         self.map_overview_sprite = None
         self.map_overview_sprite_list = arcade.SpriteList()
+        self.map_overview_image = None
+        self.map_overview_params = None
+        self.map_overview_signature = None
+        self.map_overview_revision = 0
+        self.map_overview_dirty_tile_keys = set()
+        self.map_overview_last_partial_update = 0.0
+        self.ownership_dirty_tile_keys = set()
+        self.map_overview_dirty = False
         self.fps = 0
         self.fps_frame_count = 0
         self.fps_timer = 0
@@ -836,6 +864,7 @@ class Game(arcade.View):
         self.battles = {}
         self.next_division_id = 1
         self.next_army_id = 1
+        self.next_battle_plan_id = 1
         self.selected_division_ids = set()
         self.division_shape_list = arcade.shape_list.ShapeElementList()
         self.division_route_shape_list = arcade.shape_list.ShapeElementList()
@@ -871,6 +900,14 @@ class Game(arcade.View):
         self.hovered_division_detach_button = False
         self.army_command_card_rects = []
         self.army_command_add_rect = None
+        self.army_plan_button_rects = []
+        self.hovered_army_plan_button = None
+        self.army_plan_mode = None
+        self.army_plan_army_id = None
+        self.army_plan_drag_active = False
+        self.army_plan_start_tile = None
+        self.army_plan_preview_tiles = []
+        self.army_plan_preview_target_owner = None
         self.batch = Batch()
         self.tooltip_batch = Batch()
         self.debug_text = arcade.Text(
@@ -4869,7 +4906,15 @@ class Game(arcade.View):
             return self.division_can_capture_tile(division, tile)
         return False
 
-    def find_division_path(self, division, target_tile, max_expansions=500, start_tile=None):
+    def division_path_expansion_limit(self, start_tile, target_tile):
+        distance = self.hex_distance(start_tile, target_tile)
+        distance_limit = int(distance * DIVISION_PATH_EXPANSIONS_PER_HEX)
+        return min(
+            len(self.hex_grid),
+            max(DIVISION_PATH_MIN_EXPANSIONS, distance_limit),
+        )
+
+    def find_division_path(self, division, target_tile, max_expansions=None, start_tile=None):
         start_tile = start_tile or division.tile
         if not start_tile or not target_tile or start_tile == target_tile:
             return []
@@ -4878,6 +4923,9 @@ class Game(arcade.View):
             and not self.division_can_capture_tile(division, target_tile)
         ):
             return []
+
+        if max_expansions is None:
+            max_expansions = self.division_path_expansion_limit(start_tile, target_tile)
 
         frontier = []
         counter = 0
@@ -4946,6 +4994,7 @@ class Game(arcade.View):
             else:
                 division.path = path
                 division.movement_progress = 0.0
+                division.visual_movement_progress = 0.0
             division.route_mode = "attack" if target_tile.owner and target_tile.owner != division.owner else "move"
             division.route_tiles = [division.tile] + list(division.path)
             ordered = True
@@ -5035,6 +5084,7 @@ class Game(arcade.View):
         division.route_mode = "attack" if side == "attacker" else "move"
         division.target_tile = division.post_battle_path[-1] if division.post_battle_path else battle.tile
         division.movement_progress = 0.0
+        division.visual_movement_progress = 0.0
         attr = f"{status}_{side}s"
         getattr(battle, attr).append(division.id)
         self.update_battle_combat_width(battle)
@@ -5189,13 +5239,30 @@ class Game(arcade.View):
             + self.battle_divisions(battle, f"recovering_{side}s")
         )
 
+    def recover_division_organization(self, division, elapsed_hours, multiplier=1.0):
+        if elapsed_hours <= 0 or division.organization >= division.max_organization:
+            return 0.0
+        supply = self.clamp01(getattr(division.tile, "supply_score", 0.75) if division.tile else 0.75)
+        recovery = (
+            division.organization_recovery
+            * self.organization_recovery_factor(division)
+            * supply
+            * multiplier
+            * elapsed_hours
+            / 24.0
+        )
+        old_value = division.organization
+        division.organization = min(division.max_organization, division.organization + recovery)
+        return division.organization - old_value
+
     def update_battle_recovery_and_reinforce(self, battle, elapsed_hours):
         for side in ("attacker", "defender"):
             recovering_attr = f"recovering_{side}s"
             reserve_attr = f"reserve_{side}s"
+            for division in self.battle_divisions(battle, reserve_attr):
+                self.recover_division_organization(division, elapsed_hours, multiplier=0.25)
             for division in self.battle_divisions(battle, recovering_attr):
-                recovery = division.organization_recovery * 0.25 * self.organization_recovery_factor(division) * elapsed_hours / 24.0
-                division.organization = min(division.max_organization, division.organization + recovery)
+                self.recover_division_organization(division, elapsed_hours, multiplier=0.25)
                 if division.organization >= division.max_organization * COMBAT_REJOIN_ORG_RATIO:
                     self.remove_division_from_battle_lists(battle, division)
                     getattr(battle, reserve_attr).append(division.id)
@@ -5310,6 +5377,7 @@ class Game(arcade.View):
                 else "move"
             )
             division.movement_progress = 0.0
+            division.visual_movement_progress = 0.0
         for division, retreat_tile in retreat_orders:
             division.tile = battle_tile
             division.x = battle_tile.center_x
@@ -5319,6 +5387,7 @@ class Game(arcade.View):
             division.route_tiles = [battle_tile, retreat_tile]
             division.route_mode = "retreat"
             division.movement_progress = 0.0
+            division.visual_movement_progress = 0.0
             division.organization = 0.0
         retreating_ids = {division.id for division, _retreat_tile in retreat_orders}
         for division in list(self.divisions):
@@ -5364,9 +5433,9 @@ class Game(arcade.View):
             getattr(battle, attr)[:] = []
         self.battles.pop(battle.id, None)
 
-    def transfer_tile_owner(self, tile, new_owner):
+    def set_tile_owner_only(self, tile, new_owner):
         old_owner = tile.owner
-        if old_owner == new_owner:
+        if old_owner is new_owner:
             return False
         if old_owner and tile in old_owner.tiles:
             old_owner.tiles.remove(tile)
@@ -5374,10 +5443,82 @@ class Game(arcade.View):
         if new_owner and tile not in new_owner.tiles:
             new_owner.tiles.append(tile)
         tile.color = self.get_tile_map_color(tile)
-        self.rebuild_state_borders()
-        self.recalculate_all_supply_scores()
-        self.refresh_visible_tiles()
-        self.create_map_overview()
+        self.ownership_dirty_tile_keys.add((tile.q, tile.r))
+        self.map_overview_dirty_tile_keys.add((tile.q, tile.r))
+        self.map_overview_dirty = True
+        return True
+
+    def enclosed_water_owner(self, water_tile):
+        land_neighbors = [
+            neighbor for neighbor in self.neighbor_tiles(water_tile)
+            if not self.is_water_tile(neighbor)
+        ]
+        if land_neighbors:
+            first_owner = land_neighbors[0].owner
+            if all(neighbor.owner is first_owner for neighbor in land_neighbors):
+                return first_owner
+            return None
+
+        owner_counts = {}
+        for neighbor in self.neighbor_tiles(water_tile):
+            if not self.is_water_tile(neighbor) or not neighbor.owner:
+                continue
+            owner_key = neighbor.owner.id if hasattr(neighbor.owner, "id") else id(neighbor.owner)
+            owner_counts[owner_key] = (neighbor.owner, owner_counts.get(owner_key, (neighbor.owner, 0))[1] + 1)
+        if not owner_counts:
+            return None
+        ranked = sorted(owner_counts.values(), key=lambda item: item[1], reverse=True)
+        if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+            return None
+        return ranked[0][0]
+
+    def propagate_water_ownership_from_land(self, land_tile):
+        if self.is_water_tile(land_tile):
+            return False
+        queue = deque(
+            neighbor for neighbor in self.neighbor_tiles(land_tile)
+            if self.is_water_tile(neighbor)
+        )
+        changed = False
+        seen = set()
+        while queue:
+            water_tile = queue.popleft()
+            tile_key = (water_tile.q, water_tile.r)
+            if tile_key in seen:
+                continue
+            seen.add(tile_key)
+            new_owner = self.enclosed_water_owner(water_tile)
+            if not new_owner or water_tile.owner == new_owner:
+                continue
+            if self.set_tile_owner_only(water_tile, new_owner):
+                changed = True
+                for neighbor in self.neighbor_tiles(water_tile):
+                    if self.is_water_tile(neighbor):
+                        queue.append(neighbor)
+        return changed
+
+    def refresh_after_ownership_change(self):
+        if not self.ownership_dirty_tile_keys:
+            return
+        dirty_tiles = [
+            self.hex_lookup[tile_key]
+            for tile_key in self.ownership_dirty_tile_keys
+            if tile_key in self.hex_lookup
+        ]
+        self.refresh_state_borders_for_tiles(dirty_tiles)
+        if self.refresh_army_front_plans_for_ownership_change(dirty_tiles):
+            self.invalidate_division_render_cache()
+        self.ownership_dirty_tile_keys.clear()
+
+    def process_ownership_refresh(self):
+        self.refresh_after_ownership_change()
+
+    def transfer_tile_owner(self, tile, new_owner):
+        changed = self.set_tile_owner_only(tile, new_owner)
+        if not changed:
+            return False
+        self.propagate_water_ownership_from_land(tile)
+        self.refresh_after_ownership_change()
         return True
 
     def cancel_selected_division_orders_on_tile(self, tile):
@@ -5397,6 +5538,7 @@ class Game(arcade.View):
                 division.route_tiles = []
                 division.route_mode = "move"
                 division.movement_progress = 0.0
+                division.visual_movement_progress = 0.0
                 changed = True
         if changed:
             self.invalidate_division_render_cache()
@@ -5427,22 +5569,47 @@ class Game(arcade.View):
         self.destroy_division(division)
         return True
 
+    def destroy_invalid_retreating_division(self, division):
+        if division.route_mode != "retreat":
+            return False
+        if not division.path:
+            if division.tile and division.tile.owner == division.owner:
+                division.route_mode = "move"
+                division.target_tile = None
+                division.route_tiles = []
+                division.movement_progress = 0.0
+                division.visual_movement_progress = 0.0
+                return False
+            self.destroy_division(division)
+            return True
+        next_tile = division.path[0]
+        if self.is_water_tile(next_tile) or next_tile.owner != division.owner:
+            self.destroy_division(division)
+            return True
+        return False
+
     def update_divisions(self, elapsed_hours):
         if elapsed_hours <= 0:
             return
         for division in list(self.divisions):
+            if self.destroy_invalid_retreating_division(division):
+                continue
             if self.destroy_stranded_enemy_division(division):
                 continue
             if division.battle_id:
-                continue
+                if division.battle_id not in self.battles:
+                    division.battle_id = None
+                    division.battle_side = None
+                    division.battle_status = None
+                    division.width_efficiency = 1.0
+                else:
+                    continue
             if division.path:
                 if (
                     division.route_mode != "retreat"
                     and division.organization < division.max_organization * DIVISION_MIN_ORDER_ORG_RATIO
                 ):
-                    supply = self.clamp01(getattr(division.tile, "supply_score", 0.75) if division.tile else 0.75)
-                    recovery = DIVISION_ORG_RECOVERY_PER_DAY * self.organization_recovery_factor(division) * supply * elapsed_hours / 24.0
-                    division.organization = min(division.max_organization, division.organization + recovery)
+                    self.recover_division_organization(division, elapsed_hours)
                     continue
                 next_tile = division.path[0]
                 if next_tile.owner and next_tile.owner != division.owner and self.enemy_divisions_on_tile(next_tile, division.owner):
@@ -5460,6 +5627,7 @@ class Game(arcade.View):
                 )
                 while division.path and division.movement_progress >= 1.0:
                     division.movement_progress -= 1.0
+                    division.visual_movement_progress = self.clamp01(division.movement_progress)
                     division.tile = division.path.pop(0)
                     division.x = division.tile.center_x
                     division.y = division.tile.center_y
@@ -5476,14 +5644,29 @@ class Game(arcade.View):
                     division.route_tiles = []
                     division.route_mode = "move"
                     division.movement_progress = 0.0
+                    division.visual_movement_progress = 0.0
             else:
-                supply = self.clamp01(getattr(division.tile, "supply_score", 0.75) if division.tile else 0.75)
-                recovery = DIVISION_ORG_RECOVERY_PER_DAY * self.organization_recovery_factor(division) * supply * elapsed_hours / 24.0
-                division.organization = min(division.max_organization, division.organization + recovery)
+                self.recover_division_organization(division, elapsed_hours)
             if division.tile:
                 division.x = division.tile.center_x
                 division.y = division.tile.center_y
         self.invalidate_division_render_cache()
+
+    def update_division_visual_motion(self, delta_time):
+        if delta_time <= 0:
+            return
+        smoothing = min(1.0, delta_time * 12.0)
+        changed = False
+        for division in self.divisions:
+            target_progress = self.clamp01(division.movement_progress) if division.path else 0.0
+            old_progress = division.visual_movement_progress
+            division.visual_movement_progress += (target_progress - division.visual_movement_progress) * smoothing
+            if abs(division.visual_movement_progress - target_progress) < 0.002:
+                division.visual_movement_progress = target_progress
+            if abs(old_progress - division.visual_movement_progress) > 0.0005:
+                changed = True
+        if changed:
+            self.invalidate_division_render_cache()
 
     def is_coastal_land_tile(self, tile):
         if self.is_water_tile(tile):
@@ -6184,6 +6367,7 @@ class Game(arcade.View):
         self.battles = {}
         self.next_division_id = 1
         self.next_army_id = 1
+        self.next_battle_plan_id = 1
         self.selected_division_ids.clear()
         for player in self.players:
             player.divisions = []
@@ -6294,25 +6478,104 @@ class Game(arcade.View):
         return tile.q + dq, tile.r + dr
 
     def rebuild_state_borders(self):
-        self.state_border_list = arcade.shape_list.ShapeElementList()
+        self.state_border_segments = {}
+        self.state_border_chunk_segments = {}
+        self.state_border_chunk_lists = {}
         for tile in self.hex_grid:
-            if not tile.owner:
+            self.add_state_border_segments_for_tile(tile)
+        for chunk_key in list(self.state_border_chunk_segments):
+            self.rebuild_state_border_chunk_shape_list(chunk_key)
+
+    def state_border_edge_key(self, tile, edge_index):
+        return tile.q, tile.r, edge_index
+
+    def state_border_chunk_key_for_tile(self, tile):
+        return tile.q // STATE_BORDER_CHUNK_SIZE, tile.r // STATE_BORDER_CHUNK_SIZE
+
+    def state_border_chunk_key_for_edge_key(self, edge_key):
+        q, r, _edge_index = edge_key
+        return q // STATE_BORDER_CHUNK_SIZE, r // STATE_BORDER_CHUNK_SIZE
+
+    def store_state_border_segment(self, edge_key, segment):
+        self.state_border_segments[edge_key] = segment
+        chunk_key = self.state_border_chunk_key_for_edge_key(edge_key)
+        self.state_border_chunk_segments.setdefault(chunk_key, {})[edge_key] = segment
+
+    def remove_state_border_segment(self, edge_key):
+        self.state_border_segments.pop(edge_key, None)
+        chunk_key = self.state_border_chunk_key_for_edge_key(edge_key)
+        chunk_segments = self.state_border_chunk_segments.get(chunk_key)
+        if chunk_segments is not None:
+            chunk_segments.pop(edge_key, None)
+            if not chunk_segments:
+                self.state_border_chunk_segments.pop(chunk_key, None)
+
+    def add_state_border_segments_for_tile(self, tile):
+        if not tile.owner:
+            return
+        color = tile.owner.border_color
+        for edge_index in range(6):
+            neighbor = self.hex_lookup.get(self.get_neighbor_coords_for_edge(tile, edge_index))
+            if neighbor and neighbor.owner == tile.owner:
                 continue
 
-            color = tile.owner.border_color
-            for edge_index in range(6):
-                neighbor = self.hex_lookup.get(self.get_neighbor_coords_for_edge(tile, edge_index))
-                if neighbor and neighbor.owner == tile.owner:
-                    continue
+            x1, y1 = tile.corners[edge_index]
+            x2, y2 = tile.corners[(edge_index + 1) % 6]
+            edge_key = self.state_border_edge_key(tile, edge_index)
+            self.store_state_border_segment(edge_key, (x1, y1, x2, y2, color))
 
-                x1, y1 = tile.corners[edge_index]
-                x2, y2 = tile.corners[(edge_index + 1) % 6]
-                self.state_border_list.append(
-                    arcade.shape_list.create_line(x1, y1, x2, y2, (0, 0, 0), 11)
-                )
-                self.state_border_list.append(
-                    arcade.shape_list.create_line(x1, y1, x2, y2, color, 7)
-                )
+    def state_border_shape_list_from_segments(self, segments):
+        shape_list = arcade.shape_list.ShapeElementList()
+        for _edge_key, (x1, y1, x2, y2, color) in sorted(segments.items()):
+            shape_list.append(
+                arcade.shape_list.create_line(x1, y1, x2, y2, (0, 0, 0), 11)
+            )
+            shape_list.append(
+                arcade.shape_list.create_line(x1, y1, x2, y2, color, 7)
+            )
+        return shape_list
+
+    def rebuild_state_border_shape_list(self):
+        self.state_border_list = self.state_border_shape_list_from_segments(self.state_border_segments)
+
+    def rebuild_state_border_chunk_shape_list(self, chunk_key):
+        segments = self.state_border_chunk_segments.get(chunk_key)
+        if not segments:
+            self.state_border_chunk_lists.pop(chunk_key, None)
+            return
+        self.state_border_chunk_lists[chunk_key] = self.state_border_shape_list_from_segments(segments)
+
+    def draw_state_borders(self):
+        if self.state_border_chunk_lists:
+            for chunk_key in sorted(self.state_border_chunk_lists):
+                self.state_border_chunk_lists[chunk_key].draw()
+        else:
+            self.state_border_list.draw()
+
+    def refresh_state_borders_for_tiles(self, dirty_tiles):
+        affected = {}
+        for tile in dirty_tiles:
+            affected[(tile.q, tile.r)] = tile
+            for neighbor in self.neighbor_tiles(tile):
+                affected[(neighbor.q, neighbor.r)] = neighbor
+
+        dirty_chunks = set()
+        for tile in affected.values():
+            dirty_chunks.add(self.state_border_chunk_key_for_tile(tile))
+            for edge_index in range(6):
+                edge_key = self.state_border_edge_key(tile, edge_index)
+                dirty_chunks.add(self.state_border_chunk_key_for_edge_key(edge_key))
+                self.remove_state_border_segment(edge_key)
+
+        for tile in affected.values():
+            self.add_state_border_segments_for_tile(tile)
+            for edge_index in range(6):
+                edge_key = self.state_border_edge_key(tile, edge_index)
+                if edge_key in self.state_border_segments:
+                    dirty_chunks.add(self.state_border_chunk_key_for_edge_key(edge_key))
+
+        for chunk_key in dirty_chunks:
+            self.rebuild_state_border_chunk_shape_list(chunk_key)
 
     def update_map_bounds(self):
         min_x = min(tile.bounding_box[0] for tile in self.hex_grid)
@@ -6566,7 +6829,7 @@ class Game(arcade.View):
             return division.x, division.y
         if division.path:
             next_tile = division.path[0]
-            progress = self.clamp01(division.movement_progress)
+            progress = self.clamp01(division.visual_movement_progress)
             return (
                 tile.center_x + (next_tile.center_x - tile.center_x) * progress,
                 tile.center_y + (next_tile.center_y - tile.center_y) * progress,
@@ -6608,6 +6871,7 @@ class Game(arcade.View):
                     round(division.x, 1),
                     round(division.y, 1),
                     round(division.movement_progress, 2),
+                    round(division.visual_movement_progress, 2),
                     round(division.organization, 1),
                     round(division.strength, 1),
                     division.selected,
@@ -6764,6 +7028,7 @@ class Game(arcade.View):
                     round(division.x, 1),
                     round(division.y, 1),
                     round(division.movement_progress, 2),
+                    round(division.visual_movement_progress, 2),
                     round(division.organization, 1),
                     round(division.max_organization, 1),
                     round(division.strength, 1),
@@ -7196,6 +7461,7 @@ class Game(arcade.View):
                     round(division.y, 1),
                     division.route_mode,
                     round(division.movement_progress, 2),
+                    round(division.visual_movement_progress, 2),
                     tuple((tile.q, tile.r) for tile in division.path),
                     tuple((tile.q, tile.r) for tile in division.route_tiles),
                     tuple((tile.q, tile.r) for tile in division.post_battle_path),
@@ -7504,30 +7770,97 @@ class Game(arcade.View):
         draw = ImageDraw.Draw(image)
 
         for tile in self.hex_grid:
-            points = [
-                (
-                    int((corner_x - min_x) * scale),
-                    int((max_y - corner_y) * scale),
-                )
-                for corner_x, corner_y in tile.corners
-            ]
-            draw.polygon(points, fill=(*self.get_tile_map_color(tile), 255))
+            self.draw_tile_on_map_overview(draw, tile, min_x, max_y, scale)
 
+        self.map_overview_image = image
+        self.map_overview_params = {
+            "min_x": min_x,
+            "max_y": max_y,
+            "scale": scale,
+            "world_width": world_width,
+            "world_height": world_height,
+            "center_x": min_x + world_width / 2,
+            "center_y": min_y + world_height / 2,
+        }
+        self.map_overview_signature = self.current_map_overview_signature()
+        self.update_map_overview_sprite_from_image()
+        self.map_overview_dirty = False
+        self.map_overview_dirty_tile_keys.clear()
+
+    def current_map_overview_signature(self):
+        return (
+            self.world_seed,
+            self.grid_width,
+            self.grid_height,
+            self.map_layer,
+            self.resource_group_index,
+            self.selected_resource_key or "none",
+            self.construction_placement_mode,
+            self.selected_construction_building_key() or "none",
+        )
+
+    def draw_tile_on_map_overview(self, draw, tile, min_x, max_y, scale):
+        points = [
+            (
+                int((corner_x - min_x) * scale),
+                int((max_y - corner_y) * scale),
+            )
+            for corner_x, corner_y in tile.corners
+        ]
+        draw.polygon(points, fill=(*self.get_tile_map_color(tile), 255))
+
+    def update_map_overview_sprite_from_image(self):
+        if self.map_overview_image is None or not self.map_overview_params:
+            return
+        self.map_overview_revision += 1
         texture = arcade.Texture(
             name=(
                 f"map_overview_{self.world_seed}_{self.grid_width}x{self.grid_height}_"
                 f"{self.map_layer}_{self.resource_group_index}_{self.selected_resource_key or 'none'}_"
-                f"build_{self.construction_placement_mode}_{self.selected_construction_building_key() or 'none'}"
+                f"build_{self.construction_placement_mode}_{self.selected_construction_building_key() or 'none'}_"
+                f"rev_{self.map_overview_revision}"
             ),
-            image=image,
+            image=self.map_overview_image,
         )
         self.map_overview_sprite = arcade.Sprite(texture)
-        self.map_overview_sprite.center_x = min_x + world_width / 2
-        self.map_overview_sprite.center_y = min_y + world_height / 2
-        self.map_overview_sprite.width = world_width
-        self.map_overview_sprite.height = world_height
+        self.map_overview_sprite.center_x = self.map_overview_params["center_x"]
+        self.map_overview_sprite.center_y = self.map_overview_params["center_y"]
+        self.map_overview_sprite.width = self.map_overview_params["world_width"]
+        self.map_overview_sprite.height = self.map_overview_params["world_height"]
         self.map_overview_sprite_list.clear()
         self.map_overview_sprite_list.append(self.map_overview_sprite)
+
+    def refresh_dirty_map_overview_tiles(self):
+        if not self.map_overview_dirty:
+            return
+        if (
+            not self.map_overview_dirty_tile_keys
+            or self.map_overview_image is None
+            or not self.map_overview_params
+            or self.map_overview_signature != self.current_map_overview_signature()
+        ):
+            self.create_map_overview()
+            return
+
+        current_time = time.time()
+        if current_time - self.map_overview_last_partial_update < 0.08:
+            return
+        self.map_overview_last_partial_update = current_time
+
+        draw = ImageDraw.Draw(self.map_overview_image)
+        min_x = self.map_overview_params["min_x"]
+        max_y = self.map_overview_params["max_y"]
+        scale = self.map_overview_params["scale"]
+        dirty_tiles = [
+            self.hex_lookup[tile_key]
+            for tile_key in self.map_overview_dirty_tile_keys
+            if tile_key in self.hex_lookup
+        ]
+        for tile in dirty_tiles:
+            self.draw_tile_on_map_overview(draw, tile, min_x, max_y, scale)
+        self.update_map_overview_sprite_from_image()
+        self.map_overview_dirty_tile_keys.clear()
+        self.map_overview_dirty = False
 
     def clamp_camera_position(self, x, y):
         min_x, min_y, max_x, max_y = self.map_bounds
@@ -7663,6 +7996,8 @@ class Game(arcade.View):
         if not self.premium_shader_enabled and not self.premium_shader_attempted:
             self.setup_premium_shader()
         self.world_camera.use()
+        if self.map_overview_dirty and self.use_overview_lod():
+            self.refresh_dirty_map_overview_tiles()
         if self.use_overview_lod():
             self.map_overview_sprite_list.draw()
         else:
@@ -7670,11 +8005,12 @@ class Game(arcade.View):
             if not self.construction_placement_mode:
                 self.draw_tile_visual_system()
             self.draw_construction_placement_labels()
-        self.state_border_list.draw()
+        self.draw_state_borders()
         if self.map_layer == "political":
             self.draw_capital_markers()
         if self.selection_border.visible:
             self.selection_border_sprite_list.draw()
+        self.draw_army_plans()
         self.draw_divisions()
         self.draw_premium_shader_overlay()
         self.gui_camera.use()
@@ -7702,6 +8038,7 @@ class Game(arcade.View):
             or self.hovered_resource_summary
             or self.hovered_warning_key
             or self.hovered_division_detach_button
+            or self.hovered_army_plan_button
         )
         if construction_tooltip_data or top_tooltip_active:
             self.draw_ui_text_batch()
@@ -7709,6 +8046,7 @@ class Game(arcade.View):
             self.draw_construction_hover_tooltip(construction_tooltip_data)
             self.draw_top_hover_tooltips()
             self.draw_division_detach_tooltip()
+            self.draw_army_plan_tooltip()
             self.draw_tooltip_text_batch()
         else:
             self.draw_ui_text_batch()
@@ -10130,6 +10468,631 @@ class Game(arcade.View):
                 return army
         return None
 
+    @staticmethod
+    def owner_id(owner):
+        return owner.id if owner else None
+
+    def battle_plan_tiles(self, plan):
+        return [
+            self.hex_lookup[tile_key]
+            for tile_key in getattr(plan, "line_tile_keys", []) or []
+            if tile_key in self.hex_lookup
+        ]
+
+    def army_plan_button_definitions(self):
+        return [
+            ("front_auto", "Ф", "создать линию фронта"),
+            ("front_custom", "П", "создать линию фронта произвольной длинны"),
+            ("defensive_line", "О", "создать линию обороны"),
+            ("offensive_line", "Н", "создать линию наступления"),
+            ("execute", "▶", "начать выполнение плана"),
+            ("clear", "×", "очистить план"),
+        ]
+
+    def active_army_for_plan_controls(self):
+        if not self.human_player:
+            return None
+        active_key = self.active_division_list_army_id
+        if isinstance(active_key, int):
+            army = self.army_by_id(active_key)
+            if army:
+                return army
+        for army in self.army_command_items():
+            if any(division.id in self.selected_division_ids for division in self.divisions_for_army(army)):
+                return army
+        return None
+
+    def army_plan_button_at(self, x, y):
+        for rect, army, action, _label, tooltip in self.army_plan_button_rects:
+            if self.point_in_rect(x, y, rect):
+                return {
+                    "rect": rect,
+                    "army": army,
+                    "action": action,
+                    "tooltip": tooltip,
+                }
+        return None
+
+    def begin_army_plan_mode(self, army, mode):
+        if not army:
+            return False
+        self.army_plan_mode = mode
+        self.army_plan_army_id = army.id
+        self.army_plan_drag_active = False
+        self.army_plan_start_tile = None
+        self.army_plan_preview_tiles = []
+        self.army_plan_preview_target_owner = None
+        return True
+
+    def cancel_army_plan_mode(self):
+        self.army_plan_mode = None
+        self.army_plan_army_id = None
+        self.army_plan_drag_active = False
+        self.army_plan_start_tile = None
+        self.army_plan_preview_tiles = []
+        self.army_plan_preview_target_owner = None
+
+    def border_target_owner_ids(self, tile, owner):
+        if not tile or self.is_water_tile(tile) or tile.owner is not owner:
+            return set()
+        target_ids = set()
+        for neighbor in self.neighbor_tiles(tile):
+            if self.is_water_tile(neighbor) or neighbor.owner is owner:
+                continue
+            target_ids.add(self.owner_id(neighbor.owner))
+        return target_ids
+
+    def primary_border_target_owner_id(self, tile, owner):
+        target_ids = self.border_target_owner_ids(tile, owner)
+        if not target_ids:
+            return None
+        owned_targets = sorted(target_id for target_id in target_ids if target_id is not None)
+        return owned_targets[0] if owned_targets else None
+
+    def is_front_tile_for_target(self, tile, owner, target_owner_id):
+        return target_owner_id in self.border_target_owner_ids(tile, owner)
+
+    def collect_auto_front_line(self, army, clicked_tile):
+        if not army or not clicked_tile or clicked_tile.owner is not army.owner:
+            return [], None
+        target_owner_id = self.primary_border_target_owner_id(clicked_tile, army.owner)
+        if target_owner_id not in self.border_target_owner_ids(clicked_tile, army.owner):
+            return [], None
+        return self.collect_front_component_for_target(army, clicked_tile, target_owner_id), target_owner_id
+
+    def collect_front_component_for_target(self, army, seed_tile, target_owner_id):
+        if not army or not seed_tile or seed_tile.owner is not army.owner:
+            return []
+        if not self.is_front_tile_for_target(seed_tile, army.owner, target_owner_id):
+            return []
+        queue = deque([seed_tile])
+        seen = set()
+        tiles = []
+        while queue:
+            tile = queue.popleft()
+            tile_key = self.tile_key(tile)
+            if tile_key in seen:
+                continue
+            seen.add(tile_key)
+            if not self.is_front_tile_for_target(tile, army.owner, target_owner_id):
+                continue
+            tiles.append(tile)
+            for neighbor in self.neighbor_tiles(tile):
+                if neighbor.owner is army.owner and self.tile_key(neighbor) not in seen:
+                    queue.append(neighbor)
+        return self.order_tile_line(tiles, seed_tile)
+
+    def order_tile_line(self, tiles, preferred_start=None):
+        if not tiles:
+            return []
+        tile_by_key = {self.tile_key(tile): tile for tile in tiles}
+        tile_keys = set(tile_by_key)
+        graph = {}
+        for tile in tiles:
+            key = self.tile_key(tile)
+            graph[key] = [
+                self.tile_key(neighbor)
+                for neighbor in self.neighbor_tiles(tile)
+                if self.tile_key(neighbor) in tile_keys
+            ]
+        endpoints = [key for key, neighbors in graph.items() if len(neighbors) <= 1]
+        if endpoints:
+            if preferred_start:
+                start_key = min(endpoints, key=lambda key: self.hex_distance(tile_by_key[key], preferred_start))
+            else:
+                start_key = endpoints[0]
+        elif preferred_start and self.tile_key(preferred_start) in tile_keys:
+            start_key = self.tile_key(preferred_start)
+        else:
+            start_key = next(iter(tile_keys))
+
+        ordered = []
+        visited = set()
+        current_key = start_key
+        previous_key = None
+        while current_key and current_key not in visited:
+            ordered.append(tile_by_key[current_key])
+            visited.add(current_key)
+            candidates = [key for key in graph[current_key] if key != previous_key and key not in visited]
+            if candidates:
+                previous_key, current_key = current_key, candidates[0]
+                continue
+            remaining = [key for key in tile_keys if key not in visited]
+            if not remaining:
+                break
+            previous_key = None
+            current_key = min(remaining, key=lambda key: self.hex_distance(tile_by_key[key], tile_by_key[ordered and self.tile_key(ordered[-1]) or start_key]))
+        return ordered
+
+    def constrained_tile_path(self, start_tile, end_tile, valid_tile_fn):
+        if not start_tile or not end_tile or not valid_tile_fn(start_tile) or not valid_tile_fn(end_tile):
+            return []
+        if start_tile == end_tile:
+            return [start_tile]
+        queue = deque([start_tile])
+        start_key = self.tile_key(start_tile)
+        end_key = self.tile_key(end_tile)
+        came_from = {start_key: None}
+        tile_lookup = {start_key: start_tile}
+        max_expansions = min(len(self.hex_grid), max(2000, self.hex_distance(start_tile, end_tile) * 90))
+        expansions = 0
+        while queue and expansions < max_expansions:
+            current = queue.popleft()
+            expansions += 1
+            if current == end_tile:
+                break
+            for neighbor in self.neighbor_tiles(current):
+                if not valid_tile_fn(neighbor):
+                    continue
+                neighbor_key = self.tile_key(neighbor)
+                if neighbor_key in came_from:
+                    continue
+                came_from[neighbor_key] = self.tile_key(current)
+                tile_lookup[neighbor_key] = neighbor
+                queue.append(neighbor)
+        if end_key not in came_from:
+            return []
+        path = []
+        current_key = end_key
+        while current_key:
+            path.append(tile_lookup[current_key])
+            current_key = came_from[current_key]
+        path.reverse()
+        return path
+
+    def create_army_battle_plan(self, army, plan_type, tiles, target_owner_id=None, source_plan_id=None):
+        if not army or not tiles:
+            return None
+        ordered_tiles = self.order_tile_line(tiles, tiles[0])
+        plan = BattlePlan(
+            id=self.next_battle_plan_id,
+            army_id=army.id,
+            plan_type=plan_type,
+            line_tile_keys=[self.tile_key(tile) for tile in ordered_tiles],
+            target_owner_id=target_owner_id,
+            source_plan_id=source_plan_id,
+        )
+        self.next_battle_plan_id += 1
+        army.battle_plans.append(plan)
+        if plan_type in ("front", "front_custom", "defense"):
+            army.active_front_plan_id = plan.id
+        return plan
+
+    def latest_army_plan(self, army, plan_types):
+        for plan in reversed(getattr(army, "battle_plans", []) or []):
+            if plan.active and plan.plan_type in plan_types:
+                return plan
+        return None
+
+    def active_front_plan_for_army(self, army):
+        active_id = getattr(army, "active_front_plan_id", None)
+        for plan in getattr(army, "battle_plans", []) or []:
+            if plan.active and plan.id == active_id:
+                return plan
+        return self.latest_army_plan(army, ("front", "front_custom", "defense"))
+
+    def plan_is_near_dirty_tiles(self, plan_tiles, dirty_tiles, radius=3):
+        if not plan_tiles or not dirty_tiles:
+            return False
+        return any(
+            self.hex_distance(plan_tile, dirty_tile) <= radius
+            for plan_tile in plan_tiles
+            for dirty_tile in dirty_tiles
+        )
+
+    def front_refresh_seed_tiles(self, army, plan, dirty_tiles, old_tiles):
+        candidates = []
+        for tile in dirty_tiles + old_tiles:
+            if not tile:
+                continue
+            candidates.append(tile)
+            candidates.extend(self.neighbor_tiles(tile))
+        valid = [
+            tile for tile in candidates
+            if tile.owner is army.owner and self.is_front_tile_for_target(tile, army.owner, plan.target_owner_id)
+        ]
+        if not valid:
+            return []
+        old_reference = old_tiles[0] if old_tiles else valid[0]
+        valid.sort(key=lambda tile: (
+            min((self.hex_distance(tile, dirty_tile) for dirty_tile in dirty_tiles), default=999),
+            self.hex_distance(tile, old_reference),
+        ))
+        return valid
+
+    def refresh_front_custom_plan_tiles(self, army, plan, dirty_tiles, old_tiles):
+        old_keys = {self.tile_key(tile) for tile in old_tiles}
+        candidate_keys = set()
+        for tile in old_tiles:
+            if tile.owner is army.owner and self.is_front_tile_for_target(tile, army.owner, plan.target_owner_id):
+                candidate_keys.add(self.tile_key(tile))
+        for tile in dirty_tiles + old_tiles:
+            for candidate in [tile] + self.neighbor_tiles(tile):
+                if (
+                    candidate.owner is army.owner
+                    and self.is_front_tile_for_target(candidate, army.owner, plan.target_owner_id)
+                    and (
+                        not old_tiles
+                        or self.tile_key(candidate) in old_keys
+                        or min(self.hex_distance(candidate, old_tile) for old_tile in old_tiles) <= 2
+                    )
+                ):
+                    candidate_keys.add(self.tile_key(candidate))
+        if not candidate_keys:
+            return []
+        candidates = [
+            self.hex_lookup[tile_key]
+            for tile_key in candidate_keys
+            if tile_key in self.hex_lookup
+        ]
+        reference = old_tiles[0] if old_tiles else candidates[0]
+        return self.order_tile_line(candidates, reference)
+
+    def refresh_army_front_plans_for_ownership_change(self, dirty_tiles):
+        if not dirty_tiles:
+            return False
+        changed = False
+        for player in self.players:
+            for army in getattr(player, "armies", []) or []:
+                for plan in getattr(army, "battle_plans", []) or []:
+                    if not plan.active or plan.plan_type not in ("front", "front_custom"):
+                        continue
+                    old_tiles = self.battle_plan_tiles(plan)
+                    if old_tiles and not self.plan_is_near_dirty_tiles(old_tiles, dirty_tiles):
+                        continue
+                    seed_tiles = self.front_refresh_seed_tiles(army, plan, dirty_tiles, old_tiles)
+                    new_tiles = []
+                    if plan.plan_type == "front" and seed_tiles:
+                        new_tiles = self.collect_front_component_for_target(army, seed_tiles[0], plan.target_owner_id)
+                    elif plan.plan_type == "front_custom":
+                        new_tiles = self.refresh_front_custom_plan_tiles(army, plan, dirty_tiles, old_tiles)
+                    old_keys = list(getattr(plan, "line_tile_keys", []) or [])
+                    new_keys = [self.tile_key(tile) for tile in new_tiles]
+                    if new_keys and new_keys != old_keys:
+                        plan.line_tile_keys = new_keys
+                        army.plan_update_accumulator = ARMY_PLAN_UPDATE_INTERVAL_HOURS
+                        changed = True
+        return changed
+
+    def update_army_plan_preview(self, current_tile):
+        army = self.army_by_id(self.army_plan_army_id)
+        if not army or not self.army_plan_start_tile or not current_tile:
+            self.army_plan_preview_tiles = []
+            return
+        mode = self.army_plan_mode
+        start_tile = self.army_plan_start_tile
+        if mode == "front_custom":
+            target_owner_id = self.army_plan_preview_target_owner
+            valid = lambda tile: tile.owner is army.owner and self.is_front_tile_for_target(tile, army.owner, target_owner_id)
+        elif mode == "defensive_line":
+            valid = lambda tile: tile.owner is army.owner and not self.is_water_tile(tile)
+        elif mode == "offensive_line":
+            valid = lambda tile: tile.owner is not army.owner and not self.is_water_tile(tile)
+        else:
+            self.army_plan_preview_tiles = []
+            return
+        self.army_plan_preview_tiles = self.constrained_tile_path(start_tile, current_tile, valid)
+
+    def handle_army_plan_map_press(self, x, y):
+        if not self.army_plan_mode:
+            return False
+        army = self.army_by_id(self.army_plan_army_id)
+        if not army:
+            self.cancel_army_plan_mode()
+            return True
+        world_x, world_y = self.screen_to_world(x, y)
+        tile = self.get_tile_at(world_x, world_y)
+        if not tile or self.is_water_tile(tile):
+            return True
+
+        mode = self.army_plan_mode
+        if mode == "front_auto":
+            tiles, target_owner_id = self.collect_auto_front_line(army, tile)
+            if tiles:
+                self.create_army_battle_plan(army, "front", tiles, target_owner_id=target_owner_id)
+            self.cancel_army_plan_mode()
+            return True
+
+        if mode == "front_custom":
+            target_owner_id = self.primary_border_target_owner_id(tile, army.owner)
+            if target_owner_id not in self.border_target_owner_ids(tile, army.owner):
+                return True
+            self.army_plan_preview_target_owner = target_owner_id
+        elif mode == "defensive_line":
+            if tile.owner is not army.owner:
+                return True
+        elif mode == "offensive_line":
+            if tile.owner is army.owner:
+                return True
+        else:
+            return True
+
+        self.army_plan_start_tile = tile
+        self.army_plan_preview_tiles = [tile]
+        self.army_plan_drag_active = True
+        return True
+
+    def handle_army_plan_map_drag(self, x, y):
+        if not self.army_plan_drag_active:
+            return False
+        world_x, world_y = self.screen_to_world(x, y)
+        self.update_army_plan_preview(self.get_tile_at(world_x, world_y))
+        return True
+
+    def handle_army_plan_map_release(self, x, y):
+        if not self.army_plan_drag_active:
+            return False
+        army = self.army_by_id(self.army_plan_army_id)
+        tiles = list(self.army_plan_preview_tiles)
+        mode = self.army_plan_mode
+        if army and len(tiles) >= 1:
+            if mode == "front_custom":
+                self.create_army_battle_plan(
+                    army,
+                    "front_custom",
+                    tiles,
+                    target_owner_id=self.army_plan_preview_target_owner,
+                )
+            elif mode == "defensive_line":
+                self.create_army_battle_plan(army, "defense", tiles)
+            elif mode == "offensive_line":
+                source_plan = self.active_front_plan_for_army(army)
+                self.create_army_battle_plan(
+                    army,
+                    "offensive",
+                    tiles,
+                    source_plan_id=source_plan.id if source_plan else None,
+                )
+        self.cancel_army_plan_mode()
+        return True
+
+    def army_plan_color(self, plan_type, preview=False):
+        if preview:
+            return (246, 238, 142, 230)
+        if plan_type == "offensive":
+            return (226, 72, 62, 230)
+        if plan_type == "defense":
+            return (86, 188, 232, 225)
+        return (218, 184, 72, 230)
+
+    def draw_tile_line_world(self, tiles, color, width=5, node_radius=8):
+        if not tiles:
+            return
+        for index in range(len(tiles) - 1):
+            first = tiles[index]
+            second = tiles[index + 1]
+            arcade.draw_line(first.center_x, first.center_y, second.center_x, second.center_y, color, width)
+        for tile in tiles:
+            arcade.draw_circle_filled(tile.center_x, tile.center_y, node_radius, color)
+            arcade.draw_circle_outline(tile.center_x, tile.center_y, node_radius + 2, (18, 22, 26, 220), 2)
+
+    def draw_army_plans(self):
+        if not self.human_player:
+            return
+        active_army = self.active_army_for_plan_controls()
+        for army in getattr(self.human_player, "armies", []) or []:
+            active = active_army and active_army.id == army.id
+            for plan in getattr(army, "battle_plans", []) or []:
+                if not plan.active:
+                    continue
+                tiles = self.battle_plan_tiles(plan)
+                if not tiles:
+                    continue
+                color = self.army_plan_color(plan.plan_type)
+                width = 7 if active else 4
+                self.draw_tile_line_world(tiles, color, width=width, node_radius=7 if active else 5)
+        if self.army_plan_preview_tiles:
+            self.draw_tile_line_world(
+                self.army_plan_preview_tiles,
+                self.army_plan_color(self.army_plan_mode or "front", preview=True),
+                width=6,
+                node_radius=7,
+            )
+
+    def draw_army_plan_tooltip(self):
+        if not self.hovered_army_plan_button:
+            return
+        rect = self.hovered_army_plan_button["rect"]
+        text = self.hovered_army_plan_button["tooltip"]
+        tooltip_width = max(190, min(310, int(len(text) * 7.2 + 28)))
+        tooltip_height = 34
+        tooltip_x = max(12, min(rect[0] + rect[2] / 2 - tooltip_width / 2, self.window.width - tooltip_width - 12))
+        tooltip_y = max(8, rect[1] + rect[3] + 8)
+        arcade.draw_lbwh_rectangle_filled(tooltip_x, tooltip_y, tooltip_width, tooltip_height, (18, 24, 31, 247))
+        arcade.draw_lbwh_rectangle_outline(tooltip_x, tooltip_y, tooltip_width, tooltip_height, (150, 170, 194), 1)
+        self.draw_tooltip_text(
+            text,
+            tooltip_x + tooltip_width / 2,
+            tooltip_y + tooltip_height / 2 + 1,
+            arcade.color.WHITE,
+            11,
+            anchor_x="center",
+            anchor_y="center",
+        )
+
+    def division_busy_for_army_plan(self, division):
+        if division.route_mode == "retreat" or division.battle_id:
+            return True
+        if division.path or division.target_tile or division.route_tiles:
+            return True
+        if division.organization < division.max_organization * DIVISION_MIN_ORDER_ORG_RATIO:
+            return True
+        return False
+
+    def enemy_pressure_near_tile(self, tile, owner):
+        pressure = 0
+        check_tiles = [tile] + self.neighbor_tiles(tile)
+        for division in self.divisions:
+            if division.owner is owner or not division.tile:
+                continue
+            if division.tile in check_tiles:
+                pressure += 1
+        return pressure
+
+    def plan_target_slots(self, army, plan):
+        return self.battle_plan_tiles(plan)
+
+    def plan_target_weight(self, owner, tile):
+        pressure = self.enemy_pressure_near_tile(tile, owner)
+        return 1.0 + min(4, pressure) * 0.65
+
+    def nearest_line_tile(self, tile, line_tiles):
+        if not tile or not line_tiles:
+            return None
+        return min(line_tiles, key=lambda line_tile: self.hex_distance(tile, line_tile))
+
+    def line_distance(self, tile, line_tiles):
+        nearest = self.nearest_line_tile(tile, line_tiles)
+        return self.hex_distance(tile, nearest) if nearest else 999
+
+    def evenly_assigned_plan_targets(self, divisions, target_slots):
+        if not divisions or not target_slots:
+            return {}
+        assignments = {}
+        unique_targets = []
+        seen_target_keys = set()
+        for tile in target_slots:
+            tile_key = self.tile_key(tile)
+            if tile_key in seen_target_keys:
+                continue
+            seen_target_keys.add(tile_key)
+            unique_targets.append(tile)
+        if not unique_targets:
+            return assignments
+        target_indices = {self.tile_key(tile): index for index, tile in enumerate(unique_targets)}
+
+        def division_line_position(division):
+            nearest = self.nearest_line_tile(division.tile, unique_targets)
+            if nearest is None:
+                return 999
+            return target_indices.get(self.tile_key(nearest), 999)
+
+        sorted_divisions = sorted(divisions, key=lambda division: (division_line_position(division), division.id))
+        owner = divisions[0].owner if divisions else None
+        weights = [self.plan_target_weight(owner, tile) if owner else 1.0 for tile in unique_targets]
+        total_weight = sum(weights)
+        if total_weight <= 0:
+            total_weight = float(len(unique_targets))
+            weights = [1.0 for _tile in unique_targets]
+
+        cumulative = []
+        running = 0.0
+        for weight in weights:
+            running += weight
+            cumulative.append(running)
+
+        for index, division in enumerate(sorted_divisions):
+            if len(sorted_divisions) == 1:
+                desired = total_weight / 2
+            else:
+                desired = (index + 0.5) * total_weight / len(sorted_divisions)
+            target_index = 0
+            while target_index < len(cumulative) - 1 and cumulative[target_index] < desired:
+                target_index += 1
+            preferred = unique_targets[target_index]
+            assignments[division.id] = preferred
+        return assignments
+
+    def issue_division_plan_order(self, division, target_tile, offensive=False):
+        if not division or not target_tile or division.tile == target_tile:
+            return False
+        path = self.find_division_path(division, target_tile)
+        if not path:
+            return False
+        if offensive:
+            path = path[:1]
+            target_tile = path[-1]
+        division.path = path
+        division.target_tile = target_tile
+        division.route_mode = "attack" if target_tile.owner and target_tile.owner != division.owner else "move"
+        division.route_tiles = [division.tile] + list(path)
+        division.movement_progress = 0.0
+        division.visual_movement_progress = 0.0
+        return True
+
+    def execute_army_plan_step(self, army):
+        divisions = [
+            division for division in self.divisions_for_army(army)
+            if not self.division_busy_for_army_plan(division)
+        ]
+        if not divisions:
+            return False
+
+        offensive_plan = self.latest_army_plan(army, ("offensive",))
+        front_plan = self.active_front_plan_for_army(army)
+        changed = False
+
+        if offensive_plan:
+            offensive_slots = self.plan_target_slots(army, offensive_plan)
+            front_tiles = self.battle_plan_tiles(front_plan) if front_plan else []
+            staging = []
+            attacking = []
+            for division in divisions:
+                if front_tiles and self.line_distance(division.tile, front_tiles) > ARMY_PLAN_OFFENSIVE_READY_DISTANCE:
+                    staging.append(division)
+                else:
+                    attacking.append(division)
+            if staging and front_tiles:
+                assignments = self.evenly_assigned_plan_targets(staging, self.plan_target_slots(army, front_plan))
+                for division in staging:
+                    target = assignments.get(division.id)
+                    if target and self.hex_distance(division.tile, target) > ARMY_PLAN_HOLD_DISTANCE:
+                        changed = self.issue_division_plan_order(division, target) or changed
+            if attacking and offensive_slots:
+                assignments = self.evenly_assigned_plan_targets(attacking, offensive_slots)
+                for division in attacking:
+                    target = assignments.get(division.id)
+                    if target:
+                        changed = self.issue_division_plan_order(division, target, offensive=True) or changed
+            return changed
+
+        hold_plan = front_plan
+        if not hold_plan:
+            return False
+        slots = self.plan_target_slots(army, hold_plan)
+        assignments = self.evenly_assigned_plan_targets(divisions, slots)
+        for division in divisions:
+            target = assignments.get(division.id)
+            if target and self.hex_distance(division.tile, target) > ARMY_PLAN_HOLD_DISTANCE:
+                changed = self.issue_division_plan_order(division, target) or changed
+        return changed
+
+    def update_army_plans(self, elapsed_hours):
+        if elapsed_hours <= 0:
+            return
+        changed = False
+        for player in self.players:
+            for army in getattr(player, "armies", []) or []:
+                if not getattr(army, "executing_plan", False):
+                    continue
+                army.plan_update_accumulator += elapsed_hours
+                if army.plan_update_accumulator < ARMY_PLAN_UPDATE_INTERVAL_HOURS:
+                    continue
+                army.plan_update_accumulator = 0.0
+                changed = self.execute_army_plan_step(army) or changed
+        if changed:
+            self.invalidate_division_render_cache()
+
     def division_list_groups(self):
         selected = self.selected_divisions()
         if not selected or not self.human_player:
@@ -10374,7 +11337,7 @@ class Game(arcade.View):
         for division in divisions:
             if free_slots <= 0:
                 break
-            if division.owner != army.owner or division.army_id is not None or division.id in existing:
+            if division.owner is not army.owner or division.army_id is not None or division.id in existing:
                 continue
             division.army_id = army.id
             current_ids.append(division.id)
@@ -10400,11 +11363,92 @@ class Game(arcade.View):
         self.add_divisions_to_army(army, divisions)
         return army
 
+    def toggle_army_plan_execution(self, army):
+        if not army:
+            return False
+        army.executing_plan = not army.executing_plan
+        army.plan_update_accumulator = ARMY_PLAN_UPDATE_INTERVAL_HOURS
+        return True
+
+    def clear_army_plan(self, army):
+        if not army:
+            return False
+        changed = bool(getattr(army, "battle_plans", []) or army.executing_plan)
+        army.battle_plans = []
+        army.executing_plan = False
+        army.plan_update_accumulator = 0.0
+        army.active_front_plan_id = None
+        if self.army_plan_army_id == army.id:
+            self.cancel_army_plan_mode()
+        for division in self.divisions_for_army(army):
+            if division.route_mode == "retreat" or division.battle_id:
+                continue
+            if division.path or division.target_tile or division.route_tiles:
+                division.path = []
+                division.target_tile = None
+                division.route_tiles = []
+                division.route_mode = "move"
+                division.movement_progress = 0.0
+                division.visual_movement_progress = 0.0
+                changed = True
+        if changed:
+            self.invalidate_division_render_cache()
+        return changed
+
+    def handle_army_plan_button_click(self, x, y):
+        hit = self.army_plan_button_at(x, y)
+        if not hit:
+            return False
+        army = hit["army"]
+        action = hit["action"]
+        if action == "execute":
+            self.toggle_army_plan_execution(army)
+        elif action == "clear":
+            self.clear_army_plan(army)
+        else:
+            self.begin_army_plan_mode(army, action)
+        return True
+
+    def draw_army_plan_buttons(self, army, card_rect):
+        if not army or not card_rect:
+            return
+        card_x, card_y, card_w, card_h = card_rect
+        definitions = self.army_plan_button_definitions()
+        button_size = 24
+        gap = 4
+        total_width = len(definitions) * button_size + (len(definitions) - 1) * gap
+        x = card_x + card_w / 2 - total_width / 2
+        x = max(8, min(x, self.window.width - total_width - 8))
+        y = card_y + card_h + 7
+        for action, label, tooltip in definitions:
+            rect = (x, y, button_size, button_size)
+            active = (
+                self.army_plan_mode == action
+                and self.army_plan_army_id == army.id
+            ) or (action == "execute" and army.executing_plan)
+            hovered_army = self.hovered_army_plan_button.get("army") if self.hovered_army_plan_button else None
+            hovered = bool(
+                self.hovered_army_plan_button
+                and hovered_army is army
+                and self.hovered_army_plan_button.get("action") == action
+            )
+            fill = (68, 90, 60, 238) if active else (28, 38, 45, 238)
+            if hovered:
+                fill = self.blend_colors(fill[:3], (120, 150, 178), 0.35)
+            border = (194, 214, 126) if active else (94, 116, 136)
+            arcade.draw_lbwh_rectangle_filled(*rect, fill)
+            arcade.draw_lbwh_rectangle_outline(*rect, border, 1)
+            self.draw_ui_text(label, x + button_size / 2, y + button_size / 2 + 1,
+                              arcade.color.WHITE, 12, anchor_x="center", anchor_y="center")
+            self.army_plan_button_rects.append((rect, army, action, label, tooltip))
+            x += button_size + gap
+
     def draw_army_command_bar(self):
         rows = self.division_list_rows()
         rect = self.army_command_bar_rect()
         self.army_command_card_rects = []
         self.army_command_add_rect = None
+        self.army_plan_button_rects = []
         if not rect:
             return
         armies = self.army_command_items()
@@ -10429,6 +11473,8 @@ class Game(arcade.View):
         gap = 7
         self.army_command_card_rects = []
         current_x = card_x
+        active_army = self.active_army_for_plan_controls()
+        active_card_rect = None
         for index, army in enumerate(armies):
             if current_x + card_w > bar_x + bar_width - 6:
                 break
@@ -10443,7 +11489,10 @@ class Game(arcade.View):
                 variant=index,
                 active=active,
             )
-            self.army_command_card_rects.append(((current_x, bar_y + 5, card_w, card_h), army))
+            card_rect = (current_x, bar_y + 5, card_w, card_h)
+            self.army_command_card_rects.append((card_rect, army))
+            if active_army and army.id == active_army.id:
+                active_card_rect = card_rect
             current_x += card_w + gap
 
         add_x = current_x
@@ -10460,6 +11509,9 @@ class Game(arcade.View):
             self.army_command_add_rect = (add_x, bar_y + 5, card_w, card_h)
         else:
             self.army_command_add_rect = None
+
+        if active_army and active_card_rect:
+            self.draw_army_plan_buttons(active_army, active_card_rect)
 
     def handle_division_list_click(self, x, y, modifiers):
         if not self.division_list_panel_rect or not self.point_in_rect(x, y, self.division_list_panel_rect):
@@ -11095,6 +12147,7 @@ class Game(arcade.View):
         if self.paused or self.game_over:
             return
 
+        self.update_division_visual_motion(delta_time)
         self.fps_frame_count += 1
         self.fps_timer += delta_time
         if self.fps_timer >= 0.5:
@@ -11119,9 +12172,11 @@ class Game(arcade.View):
                 self.run_population_tick(player, elapsed_hours)
             self.update_divisions(elapsed_hours)
             self.update_battles(elapsed_hours)
+            self.update_army_plans(elapsed_hours)
             self.update_economy_month_history(snapshot.current_time)
             self.last_production_tick_count = snapshot.tick_count
 
+        self.process_ownership_refresh()
         self.handle_camera_keys(delta_time)
         self.clamp_target_camera()
 
@@ -11207,6 +12262,9 @@ class Game(arcade.View):
             if self.handle_map_layer_control_click(x, y):
                 return
 
+            if self.handle_army_plan_button_click(x, y):
+                return
+
             if self.handle_division_list_click(x, y, modifiers):
                 return
 
@@ -11264,6 +12322,9 @@ class Game(arcade.View):
                 if time_button.contains(x, y):
                     time_button.action()
                     return
+
+            if self.army_plan_mode and self.handle_army_plan_map_press(x, y):
+                return
 
             if self.construction_placement_mode and self.active_top_panel_key == "construction":
                 tile = self.get_tile_at(world_x, world_y)
@@ -11346,6 +12407,8 @@ class Game(arcade.View):
     def on_mouse_release(self, x, y, button, modifiers):
         if button == arcade.MOUSE_BUTTON_LEFT:
             self.active_pause_slider = None
+            if self.handle_army_plan_map_release(x, y):
+                return
             if self.division_selection_drag_active:
                 if self.division_selection_drag_started:
                     self.select_divisions_in_screen_rect(self.division_selection_start, (x, y), modifiers)
@@ -11377,6 +12440,10 @@ class Game(arcade.View):
                 self.division_selection_drag_started = True
             return
 
+        if self.army_plan_drag_active and buttons & arcade.MOUSE_BUTTON_LEFT:
+            self.handle_army_plan_map_drag(x, y)
+            return
+
         if self.is_dragging and (
             arcade.MOUSE_BUTTON_RIGHT & buttons
             or arcade.MOUSE_BUTTON_MIDDLE & buttons
@@ -11395,6 +12462,7 @@ class Game(arcade.View):
             self.hovered_budget_summary = False
             self.hovered_resource_summary = False
             self.hovered_division_detach_button = False
+            self.hovered_army_plan_button = None
             if self.pause_screen == "settings" and self.open_pause_dropdown:
                 for dropdown in self.pause_dropdowns:
                     if dropdown.key == self.open_pause_dropdown:
@@ -11425,6 +12493,7 @@ class Game(arcade.View):
             self.division_detach_button_rect is not None
             and self.point_in_rect(x, y, self.division_detach_button_rect)
         )
+        self.hovered_army_plan_button = self.army_plan_button_at(x, y)
         self.hovered_warning_key = self.warning_icon_at(x, y)
         top_button = self.top_nav_button_at(x, y)
         self.hovered_top_nav_key = top_button["key"] if top_button else None
@@ -11451,12 +12520,14 @@ class Game(arcade.View):
             self.army_command_bar_rect() is not None
             and self.point_in_rect(x, y, self.army_command_bar_rect())
         )
+        over_army_plan_button = self.hovered_army_plan_button is not None
         if (
             self.hovered_top_nav_key
             or self.hovered_warning_key
             or self.hovered_side_panel_close
             or over_division_list
             or over_army_command_bar
+            or over_army_plan_button
             or over_hex_panel
             or y >= self.window.height - TOP_UI_HEIGHT
             or (self.side_panel_progress > 0 and self.point_in_rect(x, y, self.side_panel_rect()))
@@ -11575,6 +12646,10 @@ class Game(arcade.View):
 
     def on_key_press(self, key, modifiers):
         if key == arcade.key.ESCAPE:
+            if self.army_plan_mode:
+                self.cancel_army_plan_mode()
+                return
+
             if not self.paused and self.construction_placement_mode:
                 self.set_construction_placement_mode(False)
                 return
