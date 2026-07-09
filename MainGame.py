@@ -4928,6 +4928,12 @@ class Game(arcade.View):
         for division in divisions:
             if division.route_mode == "retreat":
                 continue
+            if target_tile == division.tile:
+                if self.cancel_selected_division_orders_on_tile(target_tile):
+                    ordered = True
+                continue
+            if division.organization < division.max_organization * DIVISION_MIN_ORDER_ORG_RATIO:
+                continue
             if division.battle_id:
                 self.detach_division_from_battle(division)
             start_tile = division.path[-1] if append and division.path else division.tile
@@ -5274,6 +5280,13 @@ class Game(arcade.View):
             else:
                 self.destroy_division(division)
 
+        attacker_remaining_paths = {
+            division.id: [
+                tile for tile in getattr(division, "post_battle_path", [])
+                if tile is not None and tile != battle_tile
+            ]
+            for division in attackers
+        }
         self.transfer_tile_owner(battle_tile, new_owner)
         for division in attackers:
             division.tile = battle.tile
@@ -5281,10 +5294,7 @@ class Game(arcade.View):
             division.y = battle.tile.center_y
         self.end_battle(battle)
         for division in attackers:
-            remaining_path = [
-                tile for tile in getattr(division, "post_battle_path", [])
-                if tile is not None and tile != battle_tile
-            ]
+            remaining_path = attacker_remaining_paths.get(division.id, [])
             division.post_battle_path = []
             division.path = remaining_path
             division.target_tile = remaining_path[-1] if remaining_path else None
@@ -5416,6 +5426,14 @@ class Game(arcade.View):
             if division.battle_id:
                 continue
             if division.path:
+                if (
+                    division.route_mode != "retreat"
+                    and division.organization < division.max_organization * DIVISION_MIN_ORDER_ORG_RATIO
+                ):
+                    supply = self.clamp01(getattr(division.tile, "supply_score", 0.75) if division.tile else 0.75)
+                    recovery = DIVISION_ORG_RECOVERY_PER_DAY * self.organization_recovery_factor(division) * supply * elapsed_hours / 24.0
+                    division.organization = min(division.max_organization, division.organization + recovery)
+                    continue
                 next_tile = division.path[0]
                 if next_tile.owner and next_tile.owner != division.owner and self.enemy_divisions_on_tile(next_tile, division.owner):
                     self.start_or_join_battle(division, next_tile)
