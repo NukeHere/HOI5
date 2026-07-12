@@ -51,6 +51,8 @@ DIVISION_TEMPLATE_DEFAULTS = {
     "top_armor": 1.0,
     "infantry_share": 0.92,
     "vehicle_share": 0.08,
+    "supply_capacity": {},
+    "combat_supply_use": {},
 }
 DIVISION_TEMPLATE_NUMERIC_FIELDS = (
     "manpower",
@@ -88,6 +90,15 @@ DIVISION_ORG_MOVE_COST_PER_TILE = 1.4
 DIVISION_ORG_RECOVERY_PER_DAY = 8.0
 DIVISION_LOW_ORG_SPEED_FLOOR = 0.35
 DIVISION_MIN_ORDER_ORG_RATIO = 0.30
+DIVISION_REINFORCEMENT_STRENGTH_PER_DAY = 1.6
+DIVISION_REINFORCEMENT_SUPPLY_FILL_PER_DAY = 0.18
+DIVISION_COMBAT_REINFORCEMENT_MULT = 0.22
+DIVISION_FOREIGN_TILE_SUPPLY_MULT = 0.25
+DIVISION_MANPOWER_STRENGTH_LOSS_MULT = 1.0
+DIVISION_EQUIPMENT_STRENGTH_LOSS_MULT = 0.75
+DIVISION_AMMO_ATTACK_FLOOR = 0.35
+DIVISION_LOW_SUPPLY_ATTACK_FLOOR = 0.45
+DIVISION_STARTING_ARMY_STOCK_MULT = 2.5
 COMBAT_WIDTH_DEFAULT = 80.0
 COMBAT_WIDTH_EXTRA_DIRECTION = 40.0
 COMBAT_REINFORCE_BASE_CHANCE = 0.10
@@ -105,6 +116,58 @@ DIVISION_ROUTE_COLORS = {
     "attack": ((132, 42, 42), (238, 92, 82)),
     "retreat": ((36, 76, 132), (92, 164, 244)),
 }
+DIVISION_ARMY_RESOURCE_KEYS = [
+    "weapons",
+    "infantry_equipment",
+    "old_assault_rifles",
+    "small_arms_ammo",
+    "old_light_artillery",
+    "light_artillery_ammo",
+    "old_light_aa_artillery",
+    "light_aa_ammo",
+    "old_ifv",
+    "old_at_missiles",
+    "autocannon_ammo",
+    "artillery_ammo",
+    "tank_ammo",
+    "anti_air_ammo",
+    "vehicles",
+    "refined_fuel",
+    "spare_parts",
+    "field_supplies",
+]
+DIVISION_DEFAULT_SUPPLY_CAPACITY = {
+    "weapons": 950,
+    "infantry_equipment": 850,
+    "small_arms_ammo": 4_800,
+    "artillery_ammo": 520,
+    "tank_ammo": 180,
+    "anti_air_ammo": 140,
+    "vehicles": 220,
+    "refined_fuel": 1_100,
+    "spare_parts": 360,
+    "field_supplies": 900,
+}
+DIVISION_DEFAULT_COMBAT_SUPPLY_USE_PER_HOUR = {
+    "small_arms_ammo": 16.0,
+    "artillery_ammo": 2.2,
+    "tank_ammo": 0.9,
+    "anti_air_ammo": 0.45,
+    "refined_fuel": 3.2,
+    "field_supplies": 1.1,
+}
+DIVISION_EQUIPMENT_LOSS_KEYS = [
+    "weapons",
+    "infantry_equipment",
+    "old_assault_rifles",
+    "old_light_artillery",
+    "old_light_aa_artillery",
+    "old_ifv",
+    "old_at_missiles",
+    "vehicles",
+    "spare_parts",
+    "field_supplies",
+]
 STATE_COLORS = [
     (235, 65, 56),
     (255, 184, 0),
@@ -201,6 +264,21 @@ STARTING_STOCK_MULTIPLIERS = {
     "fertilizer": 2.2,
     "consumer_goods": 12.0,
     "weapons": 0.55,
+    "infantry_equipment": 1.35,
+    "old_assault_rifles": 1.25,
+    "small_arms_ammo": 5.0,
+    "old_light_artillery": 0.35,
+    "light_artillery_ammo": 1.35,
+    "old_light_aa_artillery": 0.28,
+    "light_aa_ammo": 1.25,
+    "old_ifv": 0.32,
+    "old_at_missiles": 0.75,
+    "autocannon_ammo": 1.30,
+    "artillery_ammo": 1.45,
+    "tank_ammo": 0.70,
+    "anti_air_ammo": 0.60,
+    "spare_parts": 1.40,
+    "field_supplies": 2.25,
     "ships": 0.25,
     "electronics": 0.65,
     "construction_goods": 12.0,
@@ -544,6 +622,21 @@ FINISHED_RESOURCE_NAMES = [
     "electronics",
     "construction_goods",
     "weapons",
+    "infantry_equipment",
+    "old_assault_rifles",
+    "small_arms_ammo",
+    "old_light_artillery",
+    "light_artillery_ammo",
+    "old_light_aa_artillery",
+    "light_aa_ammo",
+    "old_ifv",
+    "old_at_missiles",
+    "autocannon_ammo",
+    "artillery_ammo",
+    "tank_ammo",
+    "anti_air_ammo",
+    "spare_parts",
+    "field_supplies",
     "ships",
 ]
 PRODUCTION_STAGES = ["raw", "semi_finished", "agriculture", "finished", "upkeep"]
@@ -848,6 +941,21 @@ RESOURCE_DISPLAY_NAMES = {
     "electronics": "Электроника",
     "construction_goods": "Стройтовары",
     "weapons": "Оружие",
+    "infantry_equipment": "Пехотное оснащ.",
+    "old_assault_rifles": "Старые штурм. винт.",
+    "small_arms_ammo": "Патроны",
+    "old_light_artillery": "Старая малая арт.",
+    "light_artillery_ammo": "Малые арт. БК",
+    "old_light_aa_artillery": "Старая малая ПВО",
+    "light_aa_ammo": "Малые ПВО БК",
+    "old_ifv": "Старые БМП",
+    "old_at_missiles": "Старые ПТУР",
+    "autocannon_ammo": "БК автопушек",
+    "artillery_ammo": "Арт. боеприпасы",
+    "tank_ammo": "Танк. боеприпасы",
+    "anti_air_ammo": "ПВО боеприпасы",
+    "spare_parts": "Запчасти",
+    "field_supplies": "Полевое снабж.",
     "ships": "Корабли",
 }
 RESOURCE_USAGE_DESCRIPTIONS = {
@@ -886,6 +994,21 @@ RESOURCE_USAGE_DESCRIPTIONS = {
     "electronics": "Исследования, связь, автоматизация, армия и высокие технологии.",
     "construction_goods": "Готовые материалы для ускоренного строительства.",
     "weapons": "Оснащение армии, мобилизация и военное производство.",
+    "infantry_equipment": "Форма, связь, инструменты и базовое оснащение пехоты.",
+    "old_assault_rifles": "Базовое стрелковое оружие стартовой пехоты.",
+    "small_arms_ammo": "Патроны и боеприпасы малого калибра для стрелкового оружия.",
+    "old_light_artillery": "Небольшое количество устаревших малокалиберных артиллерийских орудий.",
+    "light_artillery_ammo": "Боеприпасы малого калибра для артиллерийских рот.",
+    "old_light_aa_artillery": "Устаревшая мелкокалиберная зенитная артиллерия.",
+    "light_aa_ammo": "Боеприпасы мелкого калибра для зенитной артиллерии.",
+    "old_ifv": "Устаревшие БМП для моторизованного батальона.",
+    "old_at_missiles": "Старые противотанковые ракеты и пусковые средства.",
+    "autocannon_ammo": "Боеприпасы мелкого калибра для автопушек БМП.",
+    "artillery_ammo": "Снаряды среднего и крупного калибра для артиллерии.",
+    "tank_ammo": "Боеприпасы для бронетехники и танковых подразделений.",
+    "anti_air_ammo": "Зенитные снаряды и ракеты для подразделений ПВО.",
+    "spare_parts": "Запчасти для ремонта техники и поддержания боеспособности.",
+    "field_supplies": "Прочие расходники армии: медикаменты, пайки, инженерные материалы.",
     "ships": "Флот, морская торговля, перевозки и контроль побережья.",
 }
 TILE_VISUAL_ASSETS = {
@@ -1014,6 +1137,21 @@ TRADE_BASE_PRICES = {
     "electronics": 1_250,
     "construction_goods": 170,
     "weapons": 1_100,
+    "infantry_equipment": 520,
+    "old_assault_rifles": 380,
+    "small_arms_ammo": 42,
+    "old_light_artillery": 1_450,
+    "light_artillery_ammo": 190,
+    "old_light_aa_artillery": 1_650,
+    "light_aa_ammo": 230,
+    "old_ifv": 2_200,
+    "old_at_missiles": 620,
+    "autocannon_ammo": 160,
+    "artillery_ammo": 280,
+    "tank_ammo": 460,
+    "anti_air_ammo": 540,
+    "spare_parts": 240,
+    "field_supplies": 95,
     "ships": 4_200,
 }
 MARKET_RESOURCE_RARITY = {
@@ -1052,6 +1190,21 @@ MARKET_RESOURCE_RARITY = {
     "electronics": 0.22,
     "construction_goods": 0.95,
     "weapons": 0.26,
+    "infantry_equipment": 0.36,
+    "old_assault_rifles": 0.34,
+    "small_arms_ammo": 0.42,
+    "old_light_artillery": 0.22,
+    "light_artillery_ammo": 0.32,
+    "old_light_aa_artillery": 0.20,
+    "light_aa_ammo": 0.30,
+    "old_ifv": 0.16,
+    "old_at_missiles": 0.18,
+    "autocannon_ammo": 0.30,
+    "artillery_ammo": 0.30,
+    "tank_ammo": 0.22,
+    "anti_air_ammo": 0.20,
+    "spare_parts": 0.45,
+    "field_supplies": 0.70,
     "ships": 0.14,
 }
 MARKET_RESOURCE_VOLATILITY = {
@@ -1062,6 +1215,12 @@ MARKET_RESOURCE_VOLATILITY = {
     "electronics": 1.35,
     "ships": 1.45,
     "weapons": 1.30,
+    "old_ifv": 1.25,
+    "old_at_missiles": 1.20,
+    "tank_ammo": 1.28,
+    "anti_air_ammo": 1.35,
+    "artillery_ammo": 1.18,
+    "small_arms_ammo": 1.05,
     "oil": 1.25,
     "natural_gas": 1.20,
     "rubber": 1.25,

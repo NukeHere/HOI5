@@ -23,7 +23,32 @@
       "front_armor": 2.0,
       "top_armor": 1.0,
       "infantry_share": 0.92,
-      "vehicle_share": 0.08
+      "vehicle_share": 0.08,
+      "supply_capacity": {
+        "infantry_equipment": 950,
+        "old_assault_rifles": 900,
+        "small_arms_ammo": 5600,
+        "old_light_artillery": 24,
+        "light_artillery_ammo": 420,
+        "old_light_aa_artillery": 18,
+        "light_aa_ammo": 340,
+        "old_ifv": 48,
+        "old_at_missiles": 160,
+        "autocannon_ammo": 520,
+        "vehicles": 260,
+        "field_supplies": 1050,
+        "spare_parts": 130,
+        "refined_fuel": 360
+      },
+      "combat_supply_use": {
+        "small_arms_ammo": 15.0,
+        "light_artillery_ammo": 1.4,
+        "light_aa_ammo": 0.35,
+        "old_at_missiles": 0.05,
+        "autocannon_ammo": 0.65,
+        "field_supplies": 0.9,
+        "refined_fuel": 0.45
+      }
     },
     "tank": {
       "name": "Танковая дивизия",

@@ -284,6 +284,7 @@ class StatePlayer:
     monthly_balance: float = 0.0
     monthly_trade_balance: float = 0.0
     population_month_accumulator: float = 0.0
+    manpower_reserve: float = 0.0
     stability: float = 0.72
     legitimacy: float = 0.61
     war_support: float = 0.50
@@ -414,6 +415,12 @@ class Division:
     top_armor: float = 1.0
     infantry_share: float = 0.92
     vehicle_share: float = 0.08
+    max_manpower: int = 10_000
+    supply_capacity: dict = field(default_factory=dict)
+    supply_stock: dict = field(default_factory=dict)
+    combat_supply_use: dict = field(default_factory=dict)
+    last_supply_ratio: float = 1.0
+    last_reinforcement_ratio: float = 0.0
     selected: bool = False
     x: float = 0.0
     y: float = 0.0
@@ -429,6 +436,14 @@ class Division:
         if self.tile is not None and self.x == 0.0 and self.y == 0.0:
             self.x = self.tile.center_x
             self.y = self.tile.center_y
+        if self.max_manpower <= 0:
+            self.max_manpower = max(1, int(self.manpower))
+        if not self.supply_capacity:
+            self.supply_capacity = {}
+        if not self.supply_stock:
+            self.supply_stock = dict(self.supply_capacity)
+        if not self.combat_supply_use:
+            self.combat_supply_use = {}
 
 
 @dataclass
@@ -1050,6 +1065,54 @@ class Game(arcade.View):
             )
         return templates
 
+    @staticmethod
+    def clean_positive_amounts(values):
+        cleaned = {}
+        if not isinstance(values, dict):
+            return cleaned
+        for key, amount in values.items():
+            try:
+                value = float(amount)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                cleaned[str(key)] = value
+        return cleaned
+
+    def default_division_supply_capacity(self, template):
+        manpower_ratio = max(0.25, float(template.get("manpower", 10_000)) / 10_000)
+        infantry_share = self.clamp01(float(template.get("infantry_share", 0.92)))
+        vehicle_share = self.clamp01(float(template.get("vehicle_share", 0.08)))
+        combat_weight = max(0.5, float(template.get("front_width", 20.0)) / 20.0)
+        capacity = {}
+        for key, base_amount in DIVISION_DEFAULT_SUPPLY_CAPACITY.items():
+            if key in ("vehicles", "tank_ammo", "refined_fuel", "spare_parts"):
+                scale = manpower_ratio * (0.25 + vehicle_share * 1.35)
+            elif key in ("artillery_ammo", "anti_air_ammo"):
+                scale = manpower_ratio * (0.55 + combat_weight * 0.35 + vehicle_share * 0.20)
+            else:
+                scale = manpower_ratio * (0.35 + infantry_share * 0.85 + vehicle_share * 0.20)
+            capacity[key] = max(0.0, base_amount * scale)
+        return capacity
+
+    def default_division_combat_supply_use(self, template):
+        manpower_ratio = max(0.25, float(template.get("manpower", 10_000)) / 10_000)
+        infantry_share = self.clamp01(float(template.get("infantry_share", 0.92)))
+        vehicle_share = self.clamp01(float(template.get("vehicle_share", 0.08)))
+        soft_attack = max(0.0, float(template.get("soft_attack", 18.0)))
+        hard_front = max(0.0, float(template.get("hard_front_attack", 3.0)))
+        hard_top = max(0.0, float(template.get("hard_top_attack", 1.0)))
+        speed = max(0.1, float(template.get("speed", 1.35)))
+        base_use = DIVISION_DEFAULT_COMBAT_SUPPLY_USE_PER_HOUR
+        return {
+            "small_arms_ammo": max(base_use["small_arms_ammo"] * 0.25, (6.0 + soft_attack * 0.55) * infantry_share * manpower_ratio),
+            "artillery_ammo": max(base_use["artillery_ammo"] * 0.15, (soft_attack - 10.0) * 0.16 * manpower_ratio),
+            "tank_ammo": max(base_use["tank_ammo"] * vehicle_share * 0.25, hard_front * vehicle_share * 0.18 * manpower_ratio),
+            "anti_air_ammo": max(base_use["anti_air_ammo"] * 0.15, hard_top * 0.10 * manpower_ratio),
+            "refined_fuel": max(base_use["refined_fuel"] * vehicle_share * 0.25, vehicle_share * speed * 4.2 * manpower_ratio),
+            "field_supplies": max(base_use["field_supplies"] * 0.25, 0.85 * manpower_ratio),
+        }
+
     def normalize_division_template(self, key, template_data):
         template = dict(DIVISION_TEMPLATE_DEFAULTS)
         template.update(template_data)
@@ -1074,6 +1137,12 @@ class Game(arcade.View):
         else:
             template["infantry_share"] = DIVISION_TEMPLATE_DEFAULTS["infantry_share"]
             template["vehicle_share"] = DIVISION_TEMPLATE_DEFAULTS["vehicle_share"]
+        explicit_supply_capacity = self.clean_positive_amounts(template.get("supply_capacity", {}))
+        explicit_combat_supply_use = self.clean_positive_amounts(template.get("combat_supply_use", {}))
+        supply_capacity = explicit_supply_capacity or self.default_division_supply_capacity(template)
+        combat_supply_use = explicit_combat_supply_use or self.default_division_combat_supply_use(template)
+        template["supply_capacity"] = supply_capacity
+        template["combat_supply_use"] = combat_supply_use
         return template
 
     def register_division_template(self, key, template_data):
@@ -1116,6 +1185,10 @@ class Game(arcade.View):
             top_armor=template["top_armor"],
             infantry_share=template["infantry_share"],
             vehicle_share=template["vehicle_share"],
+            max_manpower=template["manpower"],
+            supply_capacity=dict(template["supply_capacity"]),
+            supply_stock=dict(template["supply_capacity"]),
+            combat_supply_use=dict(template["combat_supply_use"]),
         )
         self.next_division_id += 1
         return division
@@ -2008,8 +2081,10 @@ class Game(arcade.View):
             for stage in ("semi_finished", "agriculture", "finished")
         )
         upkeep = stage_inputs.get("upkeep", {}).get(resource_key, 0.0)
+        army = flows.get("army_inputs", {}).get(resource_key, 0.0)
         exports = flows["trade_inputs"].get(resource_key, 0.0)
         items = [
+            ("Армия", army),
             ("Стройки", construction),
             ("Производство", industry),
             ("Поддержание", upkeep),
@@ -2088,6 +2163,7 @@ class Game(arcade.View):
             "stage_inputs": {stage: {} for stage in PRODUCTION_STAGES},
             "stage_outputs": {stage: {} for stage in PRODUCTION_STAGES},
             "construction_inputs": {},
+            "army_inputs": {},
             "trade_inputs": {},
             "trade_outputs": {},
             "trade_money": 0.0,
@@ -2203,6 +2279,11 @@ class Game(arcade.View):
             add_amount(flows["inputs"], key, consumed)
             add_amount(flows["construction_inputs"], key, consumed)
 
+        for key, amount in self.estimate_monthly_army_consumption(player, stock_amount).items():
+            consumed = consume_stock(key, amount)
+            add_amount(flows["inputs"], key, consumed)
+            add_amount(flows["army_inputs"], key, consumed)
+
         return flows
 
     def estimate_active_construction_consumption(self, player, stock_amount_func):
@@ -2264,6 +2345,205 @@ class Game(arcade.View):
         if consumed > 0:
             self.mark_player_stockpiles_changed(player)
         return consumed
+
+    def add_to_stockpile_unsafe(self, player, key, amount):
+        if not player or amount <= 0:
+            return 0.0
+        category = self.resource_category_for_key(key)
+        stockpiles = self.ensure_player_stockpiles(player)
+        bucket = stockpiles.setdefault(category, {})
+        bucket[key] = bucket.get(key, 0.0) + amount
+        self.mark_player_storage_dirty(player)
+        return amount
+
+    def initialize_player_manpower_reserve(self, player):
+        summary = self.population_demographic_summary(player)
+        fielded = sum(max(0, getattr(division, "max_manpower", division.manpower)) for division in player.divisions)
+        player.manpower_reserve = max(0.0, summary.get("mobilization_available", 0.0) - fielded)
+        return player.manpower_reserve
+
+    def seed_starting_military_stockpiles(self, player):
+        if not player or not getattr(player, "divisions", None):
+            return {}
+        reserve = {}
+        for division in player.divisions:
+            for key, capacity in (division.supply_capacity or {}).items():
+                reserve[key] = reserve.get(key, 0.0) + max(0.0, capacity) * DIVISION_STARTING_ARMY_STOCK_MULT
+        for key, amount in reserve.items():
+            self.add_to_stockpile_unsafe(player, key, amount)
+        return reserve
+
+    def division_supply_ratio(self, division):
+        if not division or not division.tile:
+            return 0.0
+        supply = self.clamp01(getattr(division.tile, "supply_score", 0.0))
+        if division.tile.owner is not division.owner:
+            supply *= DIVISION_FOREIGN_TILE_SUPPLY_MULT
+        return self.clamp01(supply)
+
+    def consume_division_supply(self, division, key, amount):
+        if amount <= 0:
+            return 0.0
+        stock = division.supply_stock.setdefault(key, 0.0)
+        consumed = min(stock, amount)
+        division.supply_stock[key] = max(0.0, stock - consumed)
+        return consumed
+
+    def division_strength_reinforcement_requirements(self, division, strength_delta):
+        if strength_delta <= 0:
+            return 0.0, {}
+        strength_ratio = strength_delta / max(1.0, division.max_strength)
+        manpower_needed = max(0.0, division.max_manpower - division.manpower) * strength_ratio
+        if manpower_needed <= 0:
+            manpower_needed = division.max_manpower * strength_ratio * 0.85
+        resources = {}
+        for key in DIVISION_EQUIPMENT_LOSS_KEYS:
+            capacity = (division.supply_capacity or {}).get(key, 0.0)
+            if capacity <= 0:
+                continue
+            resources[key] = capacity * strength_ratio * 0.42
+        return manpower_needed, resources
+
+    def replenish_division(self, division, elapsed_hours):
+        if elapsed_hours <= 0 or not division.owner:
+            return 0.0
+        supply = self.division_supply_ratio(division)
+        division.last_supply_ratio = supply
+        if supply <= 0:
+            division.last_reinforcement_ratio = 0.0
+            return 0.0
+
+        in_battle_mult = DIVISION_COMBAT_REINFORCEMENT_MULT if division.battle_id else 1.0
+        fill_fraction = DIVISION_REINFORCEMENT_SUPPLY_FILL_PER_DAY * elapsed_hours / 24.0 * supply * in_battle_mult
+        for key, capacity in (division.supply_capacity or {}).items():
+            capacity = max(0.0, capacity)
+            if capacity <= 0:
+                continue
+            current = min(capacity, division.supply_stock.get(key, 0.0))
+            missing = capacity - current
+            if missing <= 0:
+                continue
+            requested = min(missing, capacity * fill_fraction)
+            consumed = self.consume_from_stockpile(division.owner, key, requested)
+            if consumed > 0:
+                division.supply_stock[key] = current + consumed
+
+        if division.strength >= division.max_strength or division.manpower >= division.max_manpower:
+            division.last_reinforcement_ratio = 1.0
+            return 0.0
+
+        max_strength_delta = (
+            DIVISION_REINFORCEMENT_STRENGTH_PER_DAY
+            * elapsed_hours
+            / 24.0
+            * supply
+            * in_battle_mult
+        )
+        strength_delta = min(max_strength_delta, division.max_strength - division.strength)
+        manpower_needed, resource_needs = self.division_strength_reinforcement_requirements(division, strength_delta)
+        ratios = []
+        if manpower_needed > 0:
+            ratios.append(max(0.0, division.owner.manpower_reserve) / manpower_needed)
+        for key, required in resource_needs.items():
+            if required > 0:
+                ratios.append(self.stockpile_amount(division.owner, key) / required)
+        actual_ratio = self.clamp01(min(ratios) if ratios else 1.0)
+        actual_strength = strength_delta * actual_ratio
+        if actual_strength <= 0:
+            division.last_reinforcement_ratio = 0.0
+            return 0.0
+
+        if manpower_needed > 0:
+            manpower_used = min(division.owner.manpower_reserve, manpower_needed * actual_ratio)
+            division.owner.manpower_reserve = max(0.0, division.owner.manpower_reserve - manpower_used)
+            division.manpower = min(division.max_manpower, division.manpower + int(round(manpower_used)))
+        for key, required in resource_needs.items():
+            self.consume_from_stockpile(division.owner, key, required * actual_ratio)
+        division.strength = min(division.max_strength, division.strength + actual_strength)
+        division.last_reinforcement_ratio = actual_ratio
+        return actual_strength
+
+    def consume_division_combat_supplies(self, division, elapsed_hours):
+        if elapsed_hours <= 0:
+            return 1.0
+        ratios = []
+        for key, amount_per_hour in (division.combat_supply_use or {}).items():
+            required = max(0.0, amount_per_hour) * elapsed_hours
+            if required <= 0:
+                continue
+            consumed = self.consume_division_supply(division, key, required)
+            ratios.append(consumed / required)
+        return self.clamp01(min(ratios) if ratios else 1.0)
+
+    def consume_division_movement_supplies(self, division, elapsed_hours):
+        if elapsed_hours <= 0:
+            return 1.0
+        needs = {
+            "refined_fuel": max(0.0, division.vehicle_share * division.speed * 1.8 * elapsed_hours),
+            "field_supplies": max(0.0, 0.12 * elapsed_hours),
+        }
+        ratios = []
+        for key, required in needs.items():
+            if required <= 0:
+                continue
+            consumed = self.consume_division_supply(division, key, required)
+            ratios.append(consumed / required)
+        if not ratios:
+            return 1.0
+        return 0.55 + self.clamp01(min(ratios)) * 0.45
+
+    def apply_division_strength_losses(self, division, strength_damage):
+        actual_damage = min(max(0.0, strength_damage), max(0.0, division.strength))
+        if actual_damage <= 0:
+            return 0.0
+        loss_ratio = actual_damage / max(1.0, division.max_strength)
+        manpower_loss = division.max_manpower * loss_ratio * DIVISION_MANPOWER_STRENGTH_LOSS_MULT
+        division.manpower = max(0, int(round(division.manpower - manpower_loss)))
+        for key in DIVISION_EQUIPMENT_LOSS_KEYS:
+            capacity = (division.supply_capacity or {}).get(key, 0.0)
+            if capacity <= 0:
+                continue
+            current = division.supply_stock.get(key, 0.0)
+            loss = min(current, capacity * loss_ratio * DIVISION_EQUIPMENT_STRENGTH_LOSS_MULT)
+            division.supply_stock[key] = max(0.0, current - loss)
+        division.strength = max(0.0, division.strength - actual_damage)
+        return actual_damage
+
+    def estimate_monthly_army_consumption(self, player, stock_amount_func=None):
+        if not player:
+            return {}
+        stock_amount_func = stock_amount_func or (lambda key: self.stockpile_amount(player, key))
+        planned = {}
+
+        def add_need(key, amount):
+            if amount > 0:
+                planned[key] = planned.get(key, 0.0) + amount
+
+        for division in getattr(player, "divisions", []) or []:
+            supply = self.division_supply_ratio(division)
+            if supply <= 0:
+                continue
+            battle_mult = DIVISION_COMBAT_REINFORCEMENT_MULT if division.battle_id else 1.0
+            fill_fraction = DIVISION_REINFORCEMENT_SUPPLY_FILL_PER_DAY * 30.0 * supply * battle_mult
+            for key, capacity in (division.supply_capacity or {}).items():
+                missing = max(0.0, capacity - division.supply_stock.get(key, 0.0))
+                add_need(key, min(missing, capacity * fill_fraction))
+            if division.battle_id:
+                for key, per_hour in (division.combat_supply_use or {}).items():
+                    add_need(key, per_hour * 24.0 * 30.0)
+            strength_delta = min(
+                division.max_strength - division.strength,
+                DIVISION_REINFORCEMENT_STRENGTH_PER_DAY * 30.0 * supply * battle_mult,
+            )
+            _manpower_needed, resource_needs = self.division_strength_reinforcement_requirements(division, strength_delta)
+            for key, amount in resource_needs.items():
+                add_need(key, amount)
+
+        capped = {}
+        for key, amount in planned.items():
+            available = stock_amount_func(key)
+            capped[key] = min(amount, available)
+        return capped
 
     def tradeable_resource_keys(self, category_key=None):
         categories = [category_key] if category_key else ["raw", "semi_finished", "finished"]
@@ -5186,8 +5466,13 @@ class Game(arcade.View):
         bonus_damage = max(0.0, attack - active_defense)
         return attack * COMBAT_ATTACK_PRESSURE_MULT + bonus_damage * COMBAT_ATTACK_OVERMATCH_MULT
 
-    def apply_combat_attack(self, attacker, target, target_is_defending=True):
+    def apply_combat_attack(self, attacker, target, target_is_defending=True, elapsed_hours=1.0):
         attacker_eff = max(0.2, attacker.width_efficiency)
+        ammo_ratio = self.consume_division_combat_supplies(attacker, elapsed_hours)
+        ammo_factor = DIVISION_AMMO_ATTACK_FLOOR + (1.0 - DIVISION_AMMO_ATTACK_FLOOR) * ammo_ratio
+        supply_ratio = self.division_supply_ratio(attacker)
+        supply_factor = DIVISION_LOW_SUPPLY_ATTACK_FLOOR + (1.0 - DIVISION_LOW_SUPPLY_ATTACK_FLOOR) * supply_ratio
+        attacker_eff *= ammo_factor * supply_factor
         target_eff = max(0.2, target.width_efficiency)
         active_defense = (target.defense if target_is_defending else target.breakthrough) * target_eff
         soft_raw = self.combat_damage_value(attacker.soft_attack * attacker_eff, active_defense)
@@ -5219,7 +5504,7 @@ class Game(arcade.View):
         org_damage = damage * COMBAT_ORG_DAMAGE_MULT
         strength_damage = damage * COMBAT_STRENGTH_DAMAGE_MULT
         target.organization = max(0.0, target.organization - org_damage)
-        target.strength = max(0.0, target.strength - strength_damage)
+        strength_damage = self.apply_division_strength_losses(target, strength_damage)
         return org_damage, strength_damage
 
     def destroy_division(self, division):
@@ -5287,7 +5572,7 @@ class Game(arcade.View):
             if not defenders:
                 break
             target = random.choice(defenders)
-            org_damage, strength_damage = self.apply_combat_attack(attacker, target, target_is_defending=True)
+            org_damage, strength_damage = self.apply_combat_attack(attacker, target, target_is_defending=True, elapsed_hours=elapsed_hours)
             battle.last_attacker_org_damage += org_damage
             battle.last_attacker_strength_damage += strength_damage
         for defender in list(defenders):
@@ -5295,7 +5580,7 @@ class Game(arcade.View):
             if not attackers:
                 break
             target = random.choice(attackers)
-            org_damage, strength_damage = self.apply_combat_attack(defender, target, target_is_defending=False)
+            org_damage, strength_damage = self.apply_combat_attack(defender, target, target_is_defending=False, elapsed_hours=elapsed_hours)
             battle.last_defender_org_damage += org_damage
             battle.last_defender_strength_damage += strength_damage
 
@@ -5598,6 +5883,7 @@ class Game(arcade.View):
                 continue
             if self.destroy_stranded_enemy_division(division):
                 continue
+            self.replenish_division(division, elapsed_hours)
             if division.battle_id:
                 if division.battle_id not in self.battles:
                     division.battle_id = None
@@ -5620,6 +5906,7 @@ class Game(arcade.View):
                 movement_cost = max(1.0, float(getattr(next_tile, "movement_cost", 1.0) or 1.0))
                 org_ratio = self.clamp01(division.organization / max(1.0, division.max_organization))
                 speed_factor = max(DIVISION_LOW_ORG_SPEED_FLOOR, 0.35 + org_ratio * 0.65)
+                speed_factor *= self.consume_division_movement_supplies(division, elapsed_hours)
                 retreat_multiplier = 2.0 if division.route_mode == "retreat" else 1.0
                 progress = division.speed * retreat_multiplier * speed_factor * elapsed_hours / 24.0 / movement_cost
                 division.movement_progress += progress
@@ -6375,6 +6662,11 @@ class Game(arcade.View):
             player.divisions = []
             player.armies = []
             self.generate_starting_divisions(player)
+            self.initialize_player_manpower_reserve(player)
+            self.seed_starting_military_stockpiles(player)
+            self.recalculate_player_storage(player)
+            self.distribute_player_stockpiles_to_tiles(player)
+            self.recalculate_resource_balance_breakdown(player)
         self.invalidate_division_render_cache()
 
     def generate_starting_divisions(self, player):
@@ -9840,6 +10132,77 @@ class Game(arcade.View):
 
         return True
 
+    def draw_army_panel_content(self, panel_x, panel_y, panel_width, panel_height):
+        player = self.human_player
+        if not player:
+            return
+
+        content_x = panel_x + 18
+        content_right = panel_x + panel_width - 18
+        y = panel_y + panel_height - 72
+        divisions = list(getattr(player, "divisions", []) or [])
+        armies = list(getattr(player, "armies", []) or [])
+        selected_count = len(self.selected_division_ids)
+        avg_org = sum(division.organization for division in divisions) / max(1, len(divisions))
+        avg_strength = sum(division.strength for division in divisions) / max(1, len(divisions))
+
+        self.draw_ui_text("Сводка армии", content_x, y, arcade.color.WHITE, 15)
+        y -= 24
+        summary_lines = [
+            ("Дивизии", f"{len(divisions)}"),
+            ("Армии", f"{len(armies)}"),
+            ("Выбрано", f"{selected_count}"),
+            ("Резерв людей", self.format_resource_amount(getattr(player, "manpower_reserve", 0.0))),
+            ("Средняя орг.", f"{avg_org:.0f}%"),
+            ("Средняя прочн.", f"{avg_strength:.0f}%"),
+        ]
+        column_width = max(170, (panel_width - 42) / 2)
+        for index, (label, value) in enumerate(summary_lines):
+            row_x = content_x + (index % 2) * column_width
+            row_y = y - (index // 2) * 19
+            self.draw_ui_text(label, row_x, row_y, (150, 166, 184), 10)
+            self.draw_ui_text(value, row_x + min(118, column_width - 16), row_y, (220, 230, 240), 10, anchor_x="right")
+        y -= 72
+
+        arcade.draw_line(content_x, y + 8, content_right, y + 8, (72, 92, 112, 180), 1)
+        self.draw_ui_text("Армейские ресурсы", content_x, y - 8, arcade.color.WHITE, 15)
+        y -= 34
+        self.draw_ui_text("Ресурс", content_x, y, (150, 166, 184), 10)
+        self.draw_ui_text("Склад", content_x + 190, y, (150, 166, 184), 10, anchor_x="right")
+        self.draw_ui_text("В дивизиях", content_right, y, (150, 166, 184), 10, anchor_x="right")
+        y -= 18
+
+        division_stock = {}
+        division_capacity = {}
+        for division in divisions:
+            for key, amount in (division.supply_stock or {}).items():
+                division_stock[key] = division_stock.get(key, 0.0) + max(0.0, amount)
+            for key, amount in (division.supply_capacity or {}).items():
+                division_capacity[key] = division_capacity.get(key, 0.0) + max(0.0, amount)
+
+        for resource_key in DIVISION_ARMY_RESOURCE_KEYS:
+            stock = self.stockpile_amount(player, resource_key)
+            in_divisions = division_stock.get(resource_key, 0.0)
+            capacity = division_capacity.get(resource_key, 0.0)
+            if stock <= 0 and in_divisions <= 0 and capacity <= 0:
+                continue
+            self.draw_ui_text(self.resource_display_name(resource_key), content_x, y, (210, 222, 234), 10)
+            self.draw_ui_text(self.format_resource_amount(stock), content_x + 190, y, (220, 230, 240), 10, anchor_x="right")
+            div_text = f"{self.format_resource_amount(in_divisions)}/{self.format_resource_amount(capacity)}"
+            ratio = self.clamp01(in_divisions / capacity) if capacity > 0 else 1.0
+            color = (154, 224, 142) if ratio >= 0.65 else (236, 198, 90) if ratio >= 0.30 else (238, 128, 110)
+            self.draw_ui_text(div_text, content_right, y, color, 10, anchor_x="right")
+            y -= 17
+
+        y -= 12
+        arcade.draw_line(content_x, y + 8, content_right, y + 8, (72, 92, 112, 180), 1)
+        button_h = 34
+        for label in ("Конструктор дивизий", "Обучение новых дивизий"):
+            arcade.draw_lbwh_rectangle_filled(content_x, y - button_h, panel_width - 36, button_h, (32, 42, 54, 220))
+            arcade.draw_lbwh_rectangle_outline(content_x, y - button_h, panel_width - 36, button_h, (84, 106, 130), 1)
+            self.draw_ui_text(f"{label}: позже", content_x + 12, y - button_h / 2, (180, 192, 205), 12, anchor_y="center")
+            y -= button_h + 8
+
     def draw_side_panel(self):
         if not self.active_top_panel_key and self.side_panel_progress <= 0:
             return
@@ -9873,6 +10236,8 @@ class Game(arcade.View):
             self.draw_trade_panel_content(panel_x, panel_y, panel_width, panel_height)
         elif self.active_top_panel_key == "construction":
             self.draw_construction_panel_content(panel_x, panel_y, panel_width, panel_height)
+        elif self.active_top_panel_key == "military":
+            self.draw_army_panel_content(panel_x, panel_y, panel_width, panel_height)
         else:
             self.draw_ui_text(
                 "Раздел пока пуст",
@@ -10461,6 +10826,31 @@ class Game(arcade.View):
         rows = self.selected_divisions()
         rows.sort(key=lambda division: (division.template_key, division.id))
         return rows
+
+    def army_resource_summary_rows(self, player):
+        if not player:
+            return []
+        stock = self.ensure_player_stockpiles(player)
+        finished = stock.get("finished", {})
+        semi_finished = stock.get("semi_finished", {})
+        return [
+            ("Резерв людей", self.format_resource_amount(getattr(player, "manpower_reserve", 0.0))),
+            (
+                "Оснащение",
+                f"{self.format_resource_amount(finished.get('weapons', 0.0))} / "
+                f"{self.format_resource_amount(finished.get('infantry_equipment', 0.0))}",
+            ),
+            (
+                "БК",
+                f"{self.format_resource_amount(finished.get('small_arms_ammo', 0.0))} / "
+                f"{self.format_resource_amount(finished.get('artillery_ammo', 0.0))}",
+            ),
+            (
+                "Техника",
+                f"{self.format_resource_amount(finished.get('vehicles', 0.0))} / "
+                f"{self.format_resource_amount(semi_finished.get('refined_fuel', 0.0))}",
+            ),
+        ]
 
     def army_by_id(self, army_id):
         if not self.human_player:
@@ -12027,8 +12417,10 @@ class Game(arcade.View):
         arcade.draw_lbwh_rectangle_outline(bar_x, bar_y, bar_width, bar_height, (62, 80, 88), 2)
 
         label_w = 42
-        arcade.draw_lbwh_rectangle_filled(bar_x + 5, bar_y + 6, label_w, bar_height - 12, (28, 38, 42, 238))
-        arcade.draw_lbwh_rectangle_outline(bar_x + 5, bar_y + 6, label_w, bar_height - 12, (74, 92, 98), 1)
+        card_y = bar_y + 5
+        card_h = 72
+        arcade.draw_lbwh_rectangle_filled(bar_x + 5, card_y, label_w, card_h, (28, 38, 42, 238))
+        arcade.draw_lbwh_rectangle_outline(bar_x + 5, card_y, label_w, card_h, (74, 92, 98), 1)
         self.draw_ui_text("ТВД", bar_x + 5 + label_w / 2, bar_y + bar_height - 22,
                           (214, 226, 232), 9, anchor_x="center")
         self.draw_ui_text("1", bar_x + 5 + label_w / 2, bar_y + 24,
@@ -12036,7 +12428,6 @@ class Game(arcade.View):
 
         card_x = bar_x + label_w + 11
         card_w = 56
-        card_h = bar_height - 10
         gap = 7
         self.army_command_card_rects = []
         current_x = card_x
@@ -12049,14 +12440,14 @@ class Game(arcade.View):
             active = any(division.id in self.selected_division_ids for division in army_divisions)
             self.draw_army_command_card(
                 current_x,
-                bar_y + 5,
+                card_y,
                 card_w,
                 card_h,
                 f"{len(army_divisions)}/{ARMY_DIVISION_CAPACITY}",
                 variant=index,
                 active=active,
             )
-            card_rect = (current_x, bar_y + 5, card_w, card_h)
+            card_rect = (current_x, card_y, card_w, card_h)
             self.army_command_card_rects.append((card_rect, army))
             if active_army and army.id == active_army.id:
                 active_card_rect = card_rect
@@ -12066,14 +12457,14 @@ class Game(arcade.View):
         if add_x + card_w <= bar_x + bar_width - 6:
             self.draw_army_command_card(
                 add_x,
-                bar_y + 5,
+                card_y,
                 card_w,
                 card_h,
                 "",
                 active=has_free_selection,
                 is_add=True,
             )
-            self.army_command_add_rect = (add_x, bar_y + 5, card_w, card_h)
+            self.army_command_add_rect = (add_x, card_y, card_w, card_h)
         else:
             self.army_command_add_rect = None
 
