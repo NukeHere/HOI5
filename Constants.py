@@ -390,6 +390,25 @@ BUILDING_REPAIR_RESOURCE_MULTIPLIER = 0.35
 BUILDING_REPAIR_MONEY_MULTIPLIER = 0.10
 COMBAT_COLLATERAL_BASE_DAMAGE_PER_HOUR = 0.0008
 COMBAT_COLLATERAL_MAX_DAMAGE_PER_HOUR = 0.0022
+AIR_SALVO_INTERCEPTABLE_TYPES = {
+    "guided_missile",
+    "guided_bomb",
+    "glide_bomb",
+    "cruise_missile",
+    "ballistic_missile",
+    "heavy_strategic_missile",
+    "bunker_buster",
+}
+AIR_MISSION_BASE_COOLDOWN_HOURS = 8.0
+AIR_MISSION_MIN_COOLDOWN_HOURS = 2.0
+AIR_SALVO_BUILDING_DAMAGE_PER_WARHEAD = 0.012
+AIR_SALVO_DIVISION_ORG_DAMAGE_PER_WARHEAD = 0.70
+AIR_SALVO_DIVISION_STRENGTH_DAMAGE_PER_WARHEAD = 0.11
+AIR_SALVO_MAX_BUILDING_DAMAGE_PER_IMPACT = 0.32
+AIR_CARRIER_EXPOSURE_BASE_LOSS_CHANCE = 0.055
+AIR_DEFENSE_IMMOBILE_CLASSES = {"missile_silo", "strategic_fixed_radar"}
+FIELD_HELIPAD_HELICOPTER_CAPACITY_PER_COVERAGE = 80
+STARTING_AIRCRAFT_STOCKPILE_RATIO = 0.25
 BUILDING_CONSTRUCTION_BASE = {
     "city": {
         "work": 520.0,
@@ -842,6 +861,10 @@ AIR_DEFENSE_CLASSES = {
         "radar_range_cells": 0,
         "fire_range_cells": 1,
         "min_range_cells": 0,
+        "tracking_channels": 2,
+        "fire_channels": 2,
+        "max_targets_per_tick": 2,
+        "interceptors_per_target": 1,
         "ammo": 10,
         "readiness": 0.82,
         "camouflage": 0.82,
@@ -855,6 +878,10 @@ AIR_DEFENSE_CLASSES = {
         "radar_range_cells": 2,
         "fire_range_cells": 1,
         "min_range_cells": 0,
+        "tracking_channels": 5,
+        "fire_channels": 4,
+        "max_targets_per_tick": 5,
+        "interceptors_per_target": 1,
         "ammo": 24,
         "readiness": 0.78,
         "camouflage": 0.55,
@@ -868,6 +895,10 @@ AIR_DEFENSE_CLASSES = {
         "radar_range_cells": 5,
         "fire_range_cells": 3,
         "min_range_cells": 1,
+        "tracking_channels": 6,
+        "fire_channels": 4,
+        "max_targets_per_tick": 6,
+        "interceptors_per_target": 1,
         "ammo": 18,
         "readiness": 0.72,
         "camouflage": 0.38,
@@ -881,6 +912,10 @@ AIR_DEFENSE_CLASSES = {
         "radar_range_cells": 8,
         "fire_range_cells": 5,
         "min_range_cells": 1,
+        "tracking_channels": 5,
+        "fire_channels": 3,
+        "max_targets_per_tick": 5,
+        "interceptors_per_target": 1,
         "ammo": 12,
         "readiness": 0.66,
         "camouflage": 0.25,
@@ -894,6 +929,10 @@ AIR_DEFENSE_CLASSES = {
         "radar_range_cells": 7,
         "fire_range_cells": 0,
         "min_range_cells": 0,
+        "tracking_channels": 0,
+        "fire_channels": 0,
+        "max_targets_per_tick": 0,
+        "interceptors_per_target": 1,
         "ammo": 0,
         "readiness": 0.86,
         "camouflage": 0.30,

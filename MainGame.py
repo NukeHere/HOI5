@@ -277,6 +277,7 @@ class StatePlayer:
     air_wings: list = None
     air_defense_units: list = None
     airbases: list = None
+    aircraft_stockpile: dict = None
     monthly_income_breakdown: dict = None
     monthly_expenses_breakdown: dict = None
     economy_month_key: tuple | None = None
@@ -363,6 +364,8 @@ class StatePlayer:
             self.air_defense_units = []
         if not hasattr(self, "airbases") or self.airbases is None:
             self.airbases = []
+        if not hasattr(self, "aircraft_stockpile") or self.aircraft_stockpile is None:
+            self.aircraft_stockpile = {}
         if self.monthly_income_breakdown is None:
             self.monthly_income_breakdown = {
                 "population": 0.0,
@@ -535,6 +538,7 @@ class AirWing:
     target_tile: object | None = None
     risk_policy: str = "normal"
     sortie_intensity: float = 0.5
+    sortie_cooldown_hours: float = 0.0
 
     def __post_init__(self):
         if self.ready_count <= 0:
@@ -557,8 +561,42 @@ class AirDefenseUnit:
     radar_active: bool = False
     detection_power: float = 0.0
     tracking_quality: float = 0.0
+    tracking_channels: int = 0
+    fire_channels: int = 0
+    max_targets_per_tick: int = 0
+    interceptors_per_target: int = 1
     missile_profile: str | None = None
     health: float = 1.0
+
+
+@dataclass
+class AirSalvo:
+    id: int
+    owner: StatePlayer
+    munition_type: str
+    count: int
+    original_count: int
+    target_tile: object
+    launch_tile: object
+    source_air_wing_id: int | None = None
+    source_unit_id: int | None = None
+    target_unit_id: int | None = None
+    target_object_type: str | None = None
+    launch_distance: float = 0.0
+    remaining_distance: float = 0.0
+    current_tile: object | None = None
+    speed: float = 1.0
+    terminal_speed: float = 1.0
+    altitude_profile: str | None = None
+    flight_profile: str = "linear"
+    average_rcs: float = 0.0
+    average_infrared_signature: float = 0.0
+    average_maneuverability: float = 0.0
+    average_interceptability: float = 0.0
+    detected_by: set = field(default_factory=set)
+    ticks_alive: int = 0
+    must_spend_intercept_tick: bool = False
+    entered_defended_zone: bool = False
 
 
 @dataclass
@@ -958,6 +996,7 @@ class Game(arcade.View):
         self.airbases = []
         self.air_wings = []
         self.air_defense_units = []
+        self.air_salvos = []
         self.field_helipad_projects = []
         self.next_division_id = 1
         self.next_army_id = 1
@@ -965,8 +1004,19 @@ class Game(arcade.View):
         self.next_airbase_id = 1
         self.next_air_wing_id = 1
         self.next_air_defense_unit_id = 1
+        self.next_air_salvo_id = 1
         self.next_field_helipad_project_id = 1
         self.selected_division_ids = set()
+        self.selected_air_wing_id = None
+        self.selected_air_defense_unit_id = None
+        self.air_wing_target_mode_id = None
+        self.air_wing_rebase_mode_id = None
+        self.air_defense_move_mode_id = None
+        self.hex_air_wing_row_rects = []
+        self.hex_air_wing_button_rects = []
+        self.hex_air_defense_row_rects = []
+        self.hex_air_defense_button_rects = []
+        self.hex_airbase_upgrade_button_rect = None
         self.division_shape_list = arcade.shape_list.ShapeElementList()
         self.air_asset_shape_list = arcade.shape_list.ShapeElementList()
         self.division_route_shape_list = arcade.shape_list.ShapeElementList()
@@ -1294,6 +1344,133 @@ class Game(arcade.View):
         allowed = data.get("allowed_munitions", [])
         return allowed[0] if allowed else None
 
+    def aircraft_type_is_helicopter(self, aircraft_type):
+        return bool(self.aircraft_type_data(aircraft_type).get("is_helicopter", False))
+
+    def aircraft_stockpile_count(self, player, aircraft_type):
+        if not player:
+            return 0
+        return int((getattr(player, "aircraft_stockpile", {}) or {}).get(aircraft_type, 0))
+
+    def add_aircraft_to_stockpile(self, player, aircraft_type, count):
+        if not player or aircraft_type not in AIRCRAFT_TYPES or count <= 0:
+            return 0
+        if player.aircraft_stockpile is None:
+            player.aircraft_stockpile = {}
+        added = int(count)
+        player.aircraft_stockpile[aircraft_type] = self.aircraft_stockpile_count(player, aircraft_type) + added
+        return added
+
+    def airbase_capacity_for_wing(self, airbase, aircraft_type):
+        if not airbase:
+            return 0
+        if self.aircraft_type_is_helicopter(aircraft_type):
+            return max(0, int(airbase.helicopter_capacity))
+        return max(0, int(airbase.aircraft_capacity))
+
+    def field_helipad_capacity_for_wing(self, tile, aircraft_type):
+        if not tile or not self.aircraft_type_is_helicopter(aircraft_type):
+            return 0
+        coverage = (getattr(tile, "building_coverage", {}) or {}).get("field_helipad", 0.0)
+        if coverage <= 0 or self.building_health(tile, "field_helipad") <= 0.15:
+            return 0
+        return max(1, int(round(coverage * FIELD_HELIPAD_HELICOPTER_CAPACITY_PER_COVERAGE)))
+
+    def base_capacity_for_wing(self, tile, aircraft_type):
+        airbase = self.airbase_on_tile(tile)
+        if airbase and airbase.owner is getattr(tile, "owner", None) and self.building_health(tile, "airbase") > 0.15:
+            if not self.aircraft_type_is_helicopter(aircraft_type):
+                runway_need = int(self.aircraft_type_data(aircraft_type).get("runway_need", 1))
+                if airbase.runway_level < runway_need:
+                    return 0
+            return self.airbase_capacity_for_wing(airbase, aircraft_type)
+        return self.field_helipad_capacity_for_wing(tile, aircraft_type)
+
+    def based_aircraft_load(self, tile, helicopter=None, excluding_wing=None):
+        if not tile:
+            return 0
+        total = 0
+        for wing in self.air_wings_on_tile(tile):
+            if excluding_wing and wing is excluding_wing:
+                continue
+            is_helicopter = self.aircraft_type_is_helicopter(wing.aircraft_type)
+            if helicopter is None or is_helicopter == helicopter:
+                total += max(0, int(wing.aircraft_count))
+        return total
+
+    def base_free_capacity_for_wing(self, tile, wing):
+        if not tile or not wing:
+            return 0
+        capacity = self.base_capacity_for_wing(tile, wing.aircraft_type)
+        load = self.based_aircraft_load(
+            tile,
+            helicopter=self.aircraft_type_is_helicopter(wing.aircraft_type),
+            excluding_wing=wing,
+        )
+        return max(0, capacity - load)
+
+    def air_wing_by_id(self, wing_id):
+        for wing in self.air_wings:
+            if wing.id == wing_id:
+                return wing
+        return None
+
+    def air_defense_unit_by_id(self, unit_id):
+        for unit in self.air_defense_units:
+            if unit.id == unit_id:
+                return unit
+        return None
+
+    def rebase_air_wing(self, wing, target_tile):
+        if not wing or not target_tile:
+            return False, "Нет цели перебазирования"
+        if target_tile.owner is not wing.owner:
+            return False, "Нужна своя клетка"
+        if self.is_water_tile(target_tile):
+            return False, "Нельзя базироваться на воде"
+        capacity = self.base_capacity_for_wing(target_tile, wing.aircraft_type)
+        if capacity <= 0:
+            return False, "Нет подходящей базы"
+        free_capacity = self.base_free_capacity_for_wing(target_tile, wing)
+        if free_capacity < wing.aircraft_count:
+            return False, f"Не хватает мест: {free_capacity}/{wing.aircraft_count}"
+        wing.base_tile = target_tile
+        wing.target_tile = None
+        wing.sortie_cooldown_hours = max(wing.sortie_cooldown_hours, 1.0)
+        return True, f"Крыло перебазировано в {target_tile.q}:{target_tile.r}"
+
+    def assign_air_wing_target(self, wing, target_tile):
+        if not wing or not target_tile:
+            return False, "Нет цели"
+        if self.is_water_tile(target_tile):
+            return False, "Цель на воде пока не поддержана"
+        aircraft_data = self.aircraft_type_data(wing.aircraft_type)
+        distance = self.hex_distance(wing.base_tile, target_tile) if wing.base_tile else 999
+        if distance > float(aircraft_data.get("range", 0)):
+            return False, "Цель вне радиуса"
+        wing.target_tile = target_tile
+        if wing.mission in (None, "none"):
+            return True, "Цель назначена; выберите миссию"
+        return True, f"Цель назначена: {target_tile.q}:{target_tile.r}"
+
+    def air_defense_unit_is_movable(self, unit):
+        if not unit:
+            return False
+        return unit.unit_class not in AIR_DEFENSE_IMMOBILE_CLASSES
+
+    def move_air_defense_unit(self, unit, target_tile):
+        if not unit or not target_tile:
+            return False, "Нет цели перемещения"
+        if not self.air_defense_unit_is_movable(unit):
+            return False, "Эта ПВО стационарная"
+        if target_tile.owner is not unit.owner:
+            return False, "ПВО можно двигать только по своей территории"
+        if self.is_water_tile(target_tile):
+            return False, "ПВО нельзя поставить на воду"
+        unit.tile = target_tile
+        unit.readiness = min(unit.readiness, 0.55)
+        return True, f"ПВО перемещена в {target_tile.q}:{target_tile.r}"
+
     def create_airbase(self, player, tile, coverage=AIRBASE_STARTING_COVERAGE):
         if not player or not tile or self.is_water_tile(tile):
             return None
@@ -1329,6 +1506,12 @@ class Game(arcade.View):
     def create_air_wing(self, player, base_tile, aircraft_type, count):
         if not player or not base_tile or count <= 0 or aircraft_type not in AIRCRAFT_TYPES:
             return None
+        if base_tile.owner is not player:
+            return None
+        capacity = self.base_capacity_for_wing(base_tile, aircraft_type)
+        load = self.based_aircraft_load(base_tile, helicopter=self.aircraft_type_is_helicopter(aircraft_type))
+        if capacity <= 0 or load + int(count) > capacity:
+            return None
         wing = AirWing(
             id=self.next_air_wing_id,
             owner=player,
@@ -1360,6 +1543,10 @@ class Game(arcade.View):
             radar_active=bool(data.get("radar_active", False)),
             detection_power=float(data.get("detection_power", 0.0)),
             tracking_quality=float(data.get("tracking_quality", 0.0)),
+            tracking_channels=int(data.get("tracking_channels", 0)),
+            fire_channels=int(data.get("fire_channels", 0)),
+            max_targets_per_tick=int(data.get("max_targets_per_tick", 0)),
+            interceptors_per_target=max(1, int(data.get("interceptors_per_target", 1))),
             missile_profile=data.get("missile_profile"),
         )
         self.next_air_defense_unit_id += 1
@@ -1436,6 +1623,41 @@ class Game(arcade.View):
                 result.append(tile)
         return result
 
+    def hex_round_tile(self, q, r, s):
+        rounded_q = round(q)
+        rounded_r = round(r)
+        rounded_s = round(s)
+        q_diff = abs(rounded_q - q)
+        r_diff = abs(rounded_r - r)
+        s_diff = abs(rounded_s - s)
+
+        if q_diff > r_diff and q_diff > s_diff:
+            rounded_q = -rounded_r - rounded_s
+        elif r_diff > s_diff:
+            rounded_r = -rounded_q - rounded_s
+        else:
+            rounded_s = -rounded_q - rounded_r
+        return self.hex_lookup.get((int(rounded_q), int(rounded_r)))
+
+    def tile_between(self, start_tile, end_tile, fraction):
+        if not start_tile or not end_tile:
+            return None
+        t = self.clamp01(fraction)
+        start_s = getattr(start_tile, "s", -start_tile.q - start_tile.r)
+        end_s = getattr(end_tile, "s", -end_tile.q - end_tile.r)
+        return self.hex_round_tile(
+            start_tile.q + (end_tile.q - start_tile.q) * t,
+            start_tile.r + (end_tile.r - start_tile.r) * t,
+            start_s + (end_s - start_s) * t,
+        )
+
+    def launch_tile_for_target_distance(self, origin_tile, target_tile, launch_distance):
+        if not origin_tile or not target_tile:
+            return None
+        total_distance = max(0.001, self.hex_distance(origin_tile, target_tile))
+        progress_from_origin = self.clamp01(1.0 - max(0.0, launch_distance) / total_distance)
+        return self.tile_between(origin_tile, target_tile, progress_from_origin) or origin_tile
+
     def air_defense_fire_tiles(self, unit):
         if not unit or not unit.tile or unit.fire_range_cells <= 0:
             return []
@@ -1472,6 +1694,453 @@ class Game(arcade.View):
             and unit.radar_active
             and self.hex_distance(unit.tile, tile) <= unit.radar_range_cells
         ]
+
+    def munition_uses_air_salvo(self, munition_id, launch_distance=None):
+        munition = self.munition_data(munition_id)
+        if not munition:
+            return False
+        munition_type = munition.get("type")
+        if munition_type not in AIR_SALVO_INTERCEPTABLE_TYPES:
+            return False
+        if launch_distance is None:
+            return True
+        terminal_range = float(munition.get("terminal_range", 0.0))
+        return launch_distance > max(0.15, terminal_range)
+
+    def create_air_salvo(
+        self,
+        owner,
+        munition_id,
+        count,
+        target_tile,
+        launch_tile=None,
+        source_air_wing=None,
+        source_unit_id=None,
+        target_unit_id=None,
+        target_object_type=None,
+        launch_distance=None,
+    ):
+        munition = self.munition_data(munition_id)
+        if not owner or not munition or not target_tile or count <= 0:
+            return None
+        launch_tile = launch_tile or target_tile
+        if launch_distance is None:
+            launch_distance = self.hex_distance(launch_tile, target_tile)
+        launch_distance = max(0.0, float(launch_distance))
+        salvo = AirSalvo(
+            id=self.next_air_salvo_id,
+            owner=owner,
+            munition_type=munition_id,
+            count=int(count),
+            original_count=int(count),
+            target_tile=target_tile,
+            launch_tile=launch_tile,
+            source_air_wing_id=getattr(source_air_wing, "id", None),
+            source_unit_id=source_unit_id,
+            target_unit_id=target_unit_id,
+            target_object_type=target_object_type,
+            launch_distance=launch_distance,
+            remaining_distance=launch_distance,
+            current_tile=launch_tile,
+            speed=max(0.05, float(munition.get("cruise_speed", 1.0))),
+            terminal_speed=max(0.05, float(munition.get("terminal_speed", munition.get("cruise_speed", 1.0)))),
+            altitude_profile=munition.get("altitude_class") or munition.get("flight_profile"),
+            flight_profile=munition.get("flight_profile", "linear"),
+            average_rcs=float(munition.get("rcs", 0.0)),
+            average_infrared_signature=float(munition.get("infrared_signature", 0.0)),
+            average_maneuverability=float(munition.get("maneuverability", 0.0)),
+            average_interceptability=self.munition_interceptability(munition_id, launch_distance),
+        )
+        self.next_air_salvo_id += 1
+        self.air_salvos.append(salvo)
+        return salvo
+
+    def air_salvos_for_tile(self, tile, owner=None):
+        if not tile:
+            return []
+        return [
+            salvo for salvo in getattr(self, "air_salvos", []) or []
+            if (
+                salvo.target_tile is tile
+                or salvo.current_tile is tile
+                or salvo.launch_tile is tile
+            )
+            and (owner is None or salvo.owner is owner)
+        ]
+
+    def air_salvo_target_building_keys(self, salvo):
+        munition = self.munition_data(salvo.munition_type)
+        target_tags = set(munition.get("target_tags", []))
+        if salvo.target_object_type:
+            target_tags.add(salvo.target_object_type)
+        preferred = []
+        tag_map = {
+            "airbase": ["airbase"],
+            "hardened_shelter": ["airbase"],
+            "bunker": ["airbase", "supply_depot"],
+            "radar": ["airbase"],
+            "sam": ["airbase", "supply_depot"],
+            "infrastructure": ["supply_depot", "warehouse", "port", "fuel_storage", "city", "village"],
+            "factory": ["industry", "refinery"],
+            "depot": ["supply_depot", "warehouse", "fuel_storage"],
+            "city": ["city", "village"],
+            "buildings": list(BUILDING_CONSTRUCTION_BASE.keys()),
+        }
+        for tag in target_tags:
+            for building_key in tag_map.get(tag, []):
+                if building_key not in preferred:
+                    preferred.append(building_key)
+        return preferred
+
+    def resolve_air_salvo_building_impact(self, salvo):
+        tile = salvo.target_tile
+        if not tile:
+            return False
+        munition = self.munition_data(salvo.munition_type)
+        coverage = getattr(tile, "building_coverage", {}) or {}
+        candidate_keys = [
+            key for key in self.air_salvo_target_building_keys(salvo)
+            if coverage.get(key, 0.0) > 0 and self.building_health(tile, key) > 0
+        ]
+        if not candidate_keys:
+            candidate_keys = [
+                key for key, value in coverage.items()
+                if value > 0 and key in BUILDING_CONSTRUCTION_BASE and self.building_health(tile, key) > 0
+            ]
+        if not candidate_keys:
+            return False
+
+        accuracy = self.clamp01(float(munition.get("accuracy", 0.5)))
+        warhead = max(0.05, float(munition.get("warhead", 1.0)))
+        damage = min(
+            AIR_SALVO_MAX_BUILDING_DAMAGE_PER_IMPACT,
+            warhead * max(1, salvo.count) * accuracy * AIR_SALVO_BUILDING_DAMAGE_PER_WARHEAD,
+        )
+        weights = [max(0.03, coverage.get(key, 0.0)) for key in candidate_keys]
+        target_key = random.choices(candidate_keys, weights=weights, k=1)[0]
+        changed = self.damage_building(tile, target_key, damage, queue_repair=True)
+        if len(candidate_keys) > 1 and salvo.count >= 4 and random.random() < 0.35:
+            secondary_keys = [key for key in candidate_keys if key != target_key]
+            secondary_key = random.choice(secondary_keys)
+            changed = self.damage_building(tile, secondary_key, damage * 0.35, queue_repair=True) or changed
+        return changed
+
+    def resolve_air_salvo_division_impact(self, salvo):
+        munition = self.munition_data(salvo.munition_type)
+        target = self.division_by_id(salvo.target_unit_id) if salvo.target_unit_id else None
+        if not target:
+            candidates = self.enemy_divisions_on_tile(salvo.target_tile, salvo.owner)
+            if not candidates:
+                return False
+            target = random.choice(candidates)
+        accuracy = self.clamp01(float(munition.get("accuracy", 0.5)))
+        warhead = max(0.05, float(munition.get("warhead", 1.0)))
+        damage_scale = max(1, salvo.count) * warhead * accuracy
+        org_damage = damage_scale * AIR_SALVO_DIVISION_ORG_DAMAGE_PER_WARHEAD
+        strength_damage = damage_scale * AIR_SALVO_DIVISION_STRENGTH_DAMAGE_PER_WARHEAD
+        target.organization = max(0.0, target.organization - org_damage)
+        self.apply_division_strength_losses(target, strength_damage)
+        if target.strength <= 0:
+            self.destroy_division(target)
+        return True
+
+    def resolve_air_salvo_impact(self, salvo):
+        if not salvo or salvo.count <= 0:
+            return False
+        munition = self.munition_data(salvo.munition_type)
+        target_tags = set(munition.get("target_tags", []))
+        building_first = bool(
+            salvo.target_object_type
+            or target_tags.intersection({"buildings", "airbase", "bunker", "radar", "sam", "infrastructure", "factory", "depot", "city"})
+        )
+        if building_first and self.resolve_air_salvo_building_impact(salvo):
+            return True
+        return self.resolve_air_salvo_division_impact(salvo)
+
+    def air_defense_radar_support_bonus(self, owner, tile):
+        if not owner or not tile:
+            return 0.0
+        supporting_radars = [
+            unit for unit in getattr(owner, "air_defense_units", []) or []
+            if unit.unit_class == "radar_unit"
+            and unit.radar_active
+            and unit.readiness > 0
+            and unit.health > 0
+            and unit.tile
+            and self.hex_distance(unit.tile, tile) <= unit.radar_range_cells
+        ]
+        return min(0.18, 0.06 * len(supporting_radars))
+
+    def air_defense_salvo_intercept_chance(self, unit, salvo):
+        if not unit or not salvo or unit.ammo <= 0 or unit.fire_range_cells <= 0:
+            return 0.0
+        current_tile = salvo.current_tile or salvo.target_tile
+        if not current_tile:
+            return 0.0
+        distance = self.hex_distance(unit.tile, current_tile)
+        if distance < max(0, unit.min_range_cells) or distance > unit.fire_range_cells:
+            return 0.0
+        profile = AIR_DEFENSE_INTERCEPTOR_PROFILES.get(unit.missile_profile or "", {})
+        profile_max_range = max(0.001, float(profile.get("max_range", unit.fire_range_cells or 1)))
+        no_escape_range = float(profile.get("no_escape_range", profile_max_range * 0.45))
+        if distance <= no_escape_range:
+            range_factor = 1.0
+        else:
+            range_ratio = (distance - no_escape_range) / max(0.001, profile_max_range - no_escape_range)
+            range_factor = max(0.35, 1.0 - range_ratio * 0.45)
+
+        rcs_sensitivity = float(profile.get("target_rcs_sensitivity", 0.45))
+        signature_factor = self.clamp01(
+            0.42
+            + salvo.average_rcs * rcs_sensitivity
+            + salvo.average_infrared_signature * 0.20
+            + self.air_defense_radar_support_bonus(unit.owner, current_tile)
+        )
+        munition = self.munition_data(salvo.munition_type)
+        speed_factor = max(0.42, 1.0 - max(0.0, salvo.terminal_speed - 1.0) * 0.14)
+        maneuver_factor = max(0.55, 1.0 - salvo.average_maneuverability * 0.28)
+        difficulty_factor = max(0.35, 1.0 - float(munition.get("interception_difficulty", 0.5)) * 0.38)
+        tracking_factor = self.clamp01(unit.tracking_quality * 0.58 + unit.detection_power * 0.42)
+        readiness_factor = self.clamp01(unit.readiness) * self.clamp01(unit.health)
+        chance = (
+            salvo.average_interceptability
+            * (0.32 + tracking_factor * 0.68)
+            * range_factor
+            * signature_factor
+            * speed_factor
+            * maneuver_factor
+            * difficulty_factor
+            * readiness_factor
+        )
+        return self.clamp01(chance)
+
+    def air_defense_engaged_salvo_count(self, unit, salvo):
+        interceptors_per_target = max(1, getattr(unit, "interceptors_per_target", 1))
+        available_interceptors = max(0, unit.ammo // interceptors_per_target)
+        return max(
+            0,
+            min(
+                salvo.count,
+                available_interceptors,
+                max(0, getattr(unit, "tracking_channels", 0)),
+                max(0, getattr(unit, "fire_channels", 0)),
+                max(0, getattr(unit, "max_targets_per_tick", 0)),
+            ),
+        )
+
+    def resolve_air_salvo_air_defense(self, salvo):
+        if not salvo or salvo.count <= 0:
+            return 0
+        current_tile = salvo.current_tile or salvo.target_tile
+        if not current_tile:
+            return 0
+        intercepted_total = 0
+        defenders = [
+            unit for unit in getattr(self, "air_defense_units", []) or []
+            if unit.owner is not salvo.owner
+            and unit.tile
+            and unit.fire_range_cells > 0
+            and unit.readiness > 0
+            and unit.health > 0
+            and self.hex_distance(unit.tile, current_tile) <= unit.fire_range_cells
+            and self.hex_distance(unit.tile, current_tile) >= max(0, unit.min_range_cells)
+        ]
+        defenders.sort(
+            key=lambda unit: (
+                -unit.fire_range_cells,
+                -unit.tracking_quality,
+                self.hex_distance(unit.tile, current_tile),
+            )
+        )
+        for unit in defenders:
+            if salvo.count <= 0:
+                break
+            engaged_count = self.air_defense_engaged_salvo_count(unit, salvo)
+            if engaged_count <= 0:
+                continue
+            chance = self.air_defense_salvo_intercept_chance(unit, salvo)
+            intercepted = min(salvo.count, int(engaged_count * chance + 0.5))
+            unit.ammo = max(0, unit.ammo - engaged_count * max(1, unit.interceptors_per_target))
+            salvo.count = max(0, salvo.count - intercepted)
+            intercepted_total += intercepted
+            salvo.detected_by.add(unit.owner.id if unit.owner else unit.id)
+        return intercepted_total
+
+    def update_air_salvo_position(self, salvo, elapsed_hours):
+        if not salvo or not salvo.target_tile:
+            return
+        if salvo.launch_distance <= 0:
+            salvo.remaining_distance = 0.0
+            salvo.current_tile = salvo.target_tile
+            return
+        speed = salvo.terminal_speed if salvo.remaining_distance <= 1.0 else salvo.speed
+        salvo.remaining_distance = max(0.0, salvo.remaining_distance - max(0.0, elapsed_hours) * speed)
+        progress = 1.0 - salvo.remaining_distance / max(0.001, salvo.launch_distance)
+        salvo.current_tile = self.tile_between(salvo.launch_tile, salvo.target_tile, progress) or salvo.target_tile
+
+    def air_salvo_in_defended_zone(self, salvo):
+        current_tile = salvo.current_tile or salvo.target_tile
+        if not current_tile:
+            return False
+        return any(
+            unit.owner is not salvo.owner
+            and unit.tile
+            and unit.fire_range_cells > 0
+            and unit.readiness > 0
+            and unit.health > 0
+            and self.hex_distance(unit.tile, current_tile) <= unit.fire_range_cells
+            and self.hex_distance(unit.tile, current_tile) >= max(0, unit.min_range_cells)
+            for unit in getattr(self, "air_defense_units", []) or []
+        )
+
+    def update_air_salvos(self, elapsed_hours):
+        if elapsed_hours <= 0:
+            return
+        completed = []
+        for salvo in list(getattr(self, "air_salvos", []) or []):
+            if salvo.count <= 0 or not salvo.target_tile:
+                completed.append(salvo)
+                continue
+            salvo.ticks_alive += 1
+            self.update_air_salvo_position(salvo, elapsed_hours)
+            in_defended_zone = self.air_salvo_in_defended_zone(salvo)
+            if in_defended_zone and not salvo.entered_defended_zone:
+                salvo.entered_defended_zone = True
+                salvo.must_spend_intercept_tick = True
+            if in_defended_zone or salvo.must_spend_intercept_tick:
+                self.resolve_air_salvo_air_defense(salvo)
+                salvo.must_spend_intercept_tick = False
+            if salvo.count <= 0:
+                completed.append(salvo)
+                continue
+            if salvo.remaining_distance <= 0:
+                self.resolve_air_salvo_impact(salvo)
+                completed.append(salvo)
+
+        for salvo in completed:
+            if salvo in self.air_salvos:
+                self.air_salvos.remove(salvo)
+
+    def air_wing_munition_count_per_sortie(self, wing, munition_id):
+        munition_type = self.munition_data(munition_id).get("type")
+        if munition_type == "unguided_rocket":
+            return 8
+        if munition_type in {"guided_missile", "guided_bomb", "glide_bomb"}:
+            return 2
+        if munition_type in {"cruise_missile", "ballistic_missile", "bunker_buster"}:
+            return 1
+        if munition_type == "heavy_strategic_missile":
+            return 1
+        return 1
+
+    def known_enemy_air_defense_radius_near(self, owner, target_tile):
+        if not owner or not target_tile:
+            return 0
+        radius = 0
+        for unit in getattr(self, "air_defense_units", []) or []:
+            if unit.owner is owner or not unit.tile or unit.fire_range_cells <= 0:
+                continue
+            if self.hex_distance(unit.tile, target_tile) <= unit.fire_range_cells + 1:
+                radius = max(radius, unit.fire_range_cells)
+        return radius
+
+    def resolve_close_air_attack(self, wing, target_tile, munition_id, munition_count):
+        if not wing or not target_tile or munition_count <= 0:
+            return False
+        threat_units = [
+            unit for unit in getattr(self, "air_defense_units", []) or []
+            if unit.owner is not wing.owner
+            and unit.tile
+            and unit.fire_range_cells > 0
+            and self.hex_distance(unit.tile, target_tile) <= unit.fire_range_cells
+        ]
+        loss_chance = min(
+            0.55,
+            sum(unit.readiness * unit.health * AIR_CARRIER_EXPOSURE_BASE_LOSS_CHANCE for unit in threat_units),
+        )
+        sorties = max(1, min(wing.ready_count, int(math.ceil(munition_count / max(1, self.air_wing_munition_count_per_sortie(wing, munition_id))))))
+        lost_aircraft = 0
+        for _index in range(sorties):
+            if random.random() < loss_chance:
+                lost_aircraft += 1
+        if lost_aircraft:
+            wing.ready_count = max(0, wing.ready_count - lost_aircraft)
+            wing.damaged_count = min(wing.aircraft_count, wing.damaged_count + lost_aircraft)
+        delivered_count = max(0, munition_count - lost_aircraft * self.air_wing_munition_count_per_sortie(wing, munition_id))
+        if delivered_count <= 0:
+            return False
+        pseudo_salvo = self.create_air_salvo(
+            wing.owner,
+            munition_id,
+            delivered_count,
+            target_tile,
+            launch_tile=target_tile,
+            source_air_wing=wing,
+            launch_distance=0.0,
+        )
+        if not pseudo_salvo:
+            return False
+        changed = self.resolve_air_salvo_impact(pseudo_salvo)
+        if pseudo_salvo in self.air_salvos:
+            self.air_salvos.remove(pseudo_salvo)
+        return changed
+
+    def update_air_missions(self, elapsed_hours):
+        if elapsed_hours <= 0:
+            return
+        for wing in list(getattr(self, "air_wings", []) or []):
+            if wing.mission in (None, "none") or wing.ready_count <= 0 or not wing.base_tile:
+                continue
+            wing.sortie_cooldown_hours = max(0.0, wing.sortie_cooldown_hours - elapsed_hours)
+            if wing.sortie_cooldown_hours > 0:
+                continue
+            target_tile = wing.target_tile or wing.target_area
+            if wing.mission == "cas" and not target_tile:
+                owned_battles = [
+                    battle for battle in self.battles.values()
+                    if battle.attacker is wing.owner or battle.defender is wing.owner
+                ]
+                if owned_battles:
+                    target_tile = min(owned_battles, key=lambda battle: self.hex_distance(wing.base_tile, battle.tile)).tile
+            if not target_tile:
+                continue
+            aircraft_data = self.aircraft_type_data(wing.aircraft_type)
+            if self.hex_distance(wing.base_tile, target_tile) > float(aircraft_data.get("range", 0)):
+                continue
+            munition_id = wing.current_loadout or self.default_air_wing_loadout(wing.aircraft_type)
+            if not munition_id or munition_id not in aircraft_data.get("allowed_munitions", []):
+                continue
+            target_distance = self.hex_distance(wing.base_tile, target_tile)
+            air_defense_radius = self.known_enemy_air_defense_radius_near(wing.owner, target_tile)
+            launch_distance = self.choose_air_mission_launch_distance(
+                target_distance,
+                munition_id,
+                air_defense_radius,
+                wing.risk_policy,
+                wing.mission,
+            )
+            if launch_distance is None:
+                continue
+            sorties = max(1, min(wing.ready_count, int(math.ceil(wing.ready_count * self.clamp01(wing.sortie_intensity) * 0.25))))
+            munition_count = sorties * self.air_wing_munition_count_per_sortie(wing, munition_id)
+            if self.munition_uses_air_salvo(munition_id, launch_distance):
+                launch_tile = self.launch_tile_for_target_distance(wing.base_tile, target_tile, launch_distance)
+                self.create_air_salvo(
+                    wing.owner,
+                    munition_id,
+                    munition_count,
+                    target_tile,
+                    launch_tile=launch_tile,
+                    source_air_wing=wing,
+                    launch_distance=launch_distance,
+                )
+            else:
+                self.resolve_close_air_attack(wing, target_tile, munition_id, munition_count)
+            intensity = max(0.1, self.clamp01(wing.sortie_intensity))
+            wing.sortie_cooldown_hours = max(
+                AIR_MISSION_MIN_COOLDOWN_HOURS,
+                AIR_MISSION_BASE_COOLDOWN_HOURS / intensity,
+            )
 
     def update_air_assets_after_tile_owner_change(self, tile, old_owner, new_owner):
         if not tile or old_owner is new_owner:
@@ -5328,11 +5997,79 @@ class Game(arcade.View):
                 counts[wing.aircraft_type] = counts.get(wing.aircraft_type, 0) + wing.aircraft_count
         return counts
 
+    def air_wings_for_tiles(self, tiles):
+        wings = []
+        seen = set()
+        for tile in tiles:
+            for wing in self.air_wings_on_tile(tile):
+                if wing.id in seen:
+                    continue
+                seen.add(wing.id)
+                wings.append(wing)
+        return sorted(wings, key=lambda wing: (wing.owner.id if wing.owner else 0, wing.aircraft_type, wing.id))
+
+    def air_defense_units_for_tiles(self, tiles):
+        units = []
+        seen = set()
+        for tile in tiles:
+            for unit in self.air_defense_units_on_tile(tile):
+                if unit.id in seen:
+                    continue
+                seen.add(unit.id)
+                units.append(unit)
+        return sorted(units, key=lambda unit: (unit.owner.id if unit.owner else 0, unit.unit_class, unit.id))
+
+    def player_aircraft_inventory_by_type(self, player):
+        totals = {}
+        if not player:
+            return totals
+        for aircraft_type, count in (getattr(player, "aircraft_stockpile", {}) or {}).items():
+            totals.setdefault(aircraft_type, {"based": 0, "reserve": 0})
+            totals[aircraft_type]["reserve"] += int(count)
+        for wing in getattr(player, "air_wings", []) or []:
+            totals.setdefault(wing.aircraft_type, {"based": 0, "reserve": 0})
+            totals[wing.aircraft_type]["based"] += max(0, int(wing.aircraft_count))
+        return totals
+
+    def airbase_load_summary(self, tile):
+        if not tile:
+            return None
+        airbase = self.airbase_on_tile(tile)
+        fixed_load = self.based_aircraft_load(tile, helicopter=False)
+        helicopter_load = self.based_aircraft_load(tile, helicopter=True)
+        if airbase:
+            return {
+                "fixed_load": fixed_load,
+                "fixed_capacity": max(0, int(airbase.aircraft_capacity)),
+                "helicopter_load": helicopter_load,
+                "helicopter_capacity": max(0, int(airbase.helicopter_capacity)),
+            }
+        helipad_capacity = self.field_helipad_capacity_for_wing(tile, "attack_helicopter")
+        if helipad_capacity > 0:
+            return {
+                "fixed_load": 0,
+                "fixed_capacity": 0,
+                "helicopter_load": helicopter_load,
+                "helicopter_capacity": helipad_capacity,
+            }
+        return None
+
     def air_defense_counts_by_class_for_tiles(self, tiles):
         counts = {}
         for tile in tiles:
             for unit in self.air_defense_units_on_tile(tile):
                 counts[unit.unit_class] = counts.get(unit.unit_class, 0) + 1
+        return counts
+
+    def air_salvo_counts_for_tiles(self, tiles):
+        counts = {}
+        seen = set()
+        for tile in tiles:
+            for salvo in self.air_salvos_for_tile(tile):
+                if salvo.id in seen:
+                    continue
+                seen.add(salvo.id)
+                counts[salvo.munition_type] = counts.get(salvo.munition_type, 0) + salvo.count
         return counts
 
     def selected_industry_allocation_summary(self, industry_tiles):
@@ -7211,15 +7948,18 @@ class Game(arcade.View):
         self.airbases = []
         self.air_wings = []
         self.air_defense_units = []
+        self.air_salvos = []
         self.field_helipad_projects = []
         self.next_airbase_id = 1
         self.next_air_wing_id = 1
         self.next_air_defense_unit_id = 1
+        self.next_air_salvo_id = 1
         self.next_field_helipad_project_id = 1
         for player in self.players:
             player.airbases = []
             player.air_wings = []
             player.air_defense_units = []
+            player.aircraft_stockpile = {}
         for tile in self.hex_grid:
             tile.airbase = None
 
@@ -7251,7 +7991,10 @@ class Game(arcade.View):
         scale = max(0.55, min(1.20, getattr(player, "starting_scale", 1.0)))
         for aircraft_type, base_count in STARTING_AIR_WINGS.items():
             count = max(1, int(round(base_count * scale)))
-            self.create_air_wing(player, airbase.tile, aircraft_type, count)
+            wing = self.create_air_wing(player, airbase.tile, aircraft_type, count)
+            if wing:
+                reserve_count = max(1, int(round(count * STARTING_AIRCRAFT_STOCKPILE_RATIO)))
+                self.add_aircraft_to_stockpile(player, aircraft_type, reserve_count)
 
     def important_air_defense_tiles(self, player, airbase_tile, limit=3):
         candidates = []
@@ -9222,18 +9965,37 @@ class Game(arcade.View):
             arcade.draw_line(x - 6, y - 5, x + 6, y - 5, color, 2)
             arcade.draw_line(x + 6, y - 5, x, y + 6, color, 2)
 
-    def draw_selected_air_defense_ranges(self):
-        tile = self.selected_tile
+    def draw_air_salvo_icon(self, salvo):
+        tile = salvo.current_tile or salvo.target_tile
         if not tile:
             return
-        units = self.air_defense_units_on_tile(tile)
+        x, y = tile.center_x, tile.center_y - 24
+        color = (238, 198, 104)
+        arcade.draw_circle_filled(x, y, 6, (18, 24, 31, 230))
+        arcade.draw_circle_outline(x, y, 7, color, 2)
+        if salvo.target_tile and salvo.target_tile is not tile:
+            arcade.draw_line(x, y, salvo.target_tile.center_x, salvo.target_tile.center_y, (*color, 105), 1)
+        label = str(max(1, salvo.count))
+        arcade.Text(label, x, y - 1, (244, 238, 212), 8, anchor_x="center", anchor_y="center").draw()
+
+    def draw_selected_air_defense_ranges(self):
+        tile = self.selected_tile
+        units = []
+        selected_unit = self.air_defense_unit_by_id(self.selected_air_defense_unit_id)
+        if selected_unit:
+            units.append(selected_unit)
+        if tile:
+            for unit in self.air_defense_units_on_tile(tile):
+                if unit not in units:
+                    units.append(unit)
         for unit in units:
             if unit.fire_range_cells > 0:
                 radius = unit.fire_range_cells * HEX_WID
-                arcade.draw_circle_outline(unit.tile.center_x, unit.tile.center_y, radius, (238, 170, 104, 95), 2)
+                arcade.draw_circle_outline(unit.tile.center_x, unit.tile.center_y, radius, (248, 176, 96, 150), 4)
+                arcade.draw_circle_outline(unit.tile.center_x, unit.tile.center_y, radius + 3, (248, 176, 96, 85), 2)
             if unit.radar_active and unit.radar_range_cells > 0:
                 radius = unit.radar_range_cells * HEX_WID
-                arcade.draw_circle_outline(unit.tile.center_x, unit.tile.center_y, radius, (122, 186, 238, 80), 1)
+                arcade.draw_circle_outline(unit.tile.center_x, unit.tile.center_y, radius, (122, 196, 248, 112), 3)
 
     def draw_air_assets(self):
         visible_keys = self.visible_tile_key_set()
@@ -9260,6 +10022,10 @@ class Game(arcade.View):
         for unit in self.air_defense_units:
             if unit.tile and self.tile_key(unit.tile) in visible_keys:
                 self.draw_air_defense_icon(unit)
+        for salvo in getattr(self, "air_salvos", []) or []:
+            tile = salvo.current_tile or salvo.target_tile
+            if tile and self.tile_key(tile) in visible_keys:
+                self.draw_air_salvo_icon(salvo)
 
     def setup_premium_shader(self):
         if not self.window:
@@ -11408,6 +12174,173 @@ class Game(arcade.View):
         self.hex_resources_expanded = False
         self.hex_resources_toggle_rect = None
         self.hex_panel_specialization_mode = False
+        self.hex_air_wing_row_rects = []
+        self.hex_air_wing_button_rects = []
+        self.hex_air_defense_row_rects = []
+        self.hex_air_defense_button_rects = []
+        self.hex_airbase_upgrade_button_rect = None
+
+    def set_hex_panel_message(self, message, timer=2.0):
+        self.hex_panel_message = message or ""
+        self.hex_panel_message_timer = max(0.0, float(timer))
+
+    def select_air_wing(self, wing):
+        if not wing:
+            return False
+        self.selected_air_wing_id = wing.id
+        self.selected_air_defense_unit_id = None
+        self.air_wing_target_mode_id = None
+        self.air_wing_rebase_mode_id = None
+        self.air_defense_move_mode_id = None
+        return True
+
+    def select_air_defense_unit(self, unit):
+        if not unit:
+            return False
+        self.selected_air_defense_unit_id = unit.id
+        self.selected_air_wing_id = None
+        self.air_wing_target_mode_id = None
+        self.air_wing_rebase_mode_id = None
+        return True
+
+    def cycle_air_wing_mission(self, wing):
+        if not wing:
+            return False
+        allowed = ["none"] + list(self.aircraft_type_data(wing.aircraft_type).get("allowed_missions", []))
+        if not allowed:
+            return False
+        try:
+            current_index = allowed.index(wing.mission)
+        except ValueError:
+            current_index = 0
+        wing.mission = allowed[(current_index + 1) % len(allowed)]
+        if wing.mission == "none":
+            wing.target_tile = None
+        mission_label = {
+            "none": "нет",
+            "cas": "CAS",
+            "patrol": "патруль",
+            "strategic_strike": "удар",
+            "intercept": "перехват",
+            "air_superiority": "превосходство",
+        }.get(wing.mission, wing.mission)
+        self.set_hex_panel_message(f"Миссия крыла: {mission_label}")
+        return True
+
+    def cycle_air_wing_risk_policy(self, wing):
+        if not wing:
+            return False
+        policies = ["cautious", "normal", "aggressive"]
+        try:
+            current_index = policies.index(wing.risk_policy)
+        except ValueError:
+            current_index = 1
+        wing.risk_policy = policies[(current_index + 1) % len(policies)]
+        label = {
+            "cautious": "осторожно",
+            "normal": "нормально",
+            "aggressive": "агрессивно",
+        }.get(wing.risk_policy, wing.risk_policy)
+        self.set_hex_panel_message(f"Риск крыла: {label}")
+        return True
+
+    def handle_hex_air_controls_click(self, x, y):
+        for rect, action, obj_id in self.hex_air_wing_button_rects:
+            if not self.point_in_rect(x, y, rect):
+                continue
+            wing = self.air_wing_by_id(obj_id)
+            if not wing:
+                self.set_hex_panel_message("Крыло уже недоступно")
+                return True
+            self.select_air_wing(wing)
+            if action == "mission":
+                self.cycle_air_wing_mission(wing)
+            elif action == "risk":
+                self.cycle_air_wing_risk_policy(wing)
+            elif action == "target":
+                self.air_wing_target_mode_id = wing.id
+                self.air_wing_rebase_mode_id = None
+                self.air_defense_move_mode_id = None
+                self.set_hex_panel_message("Выберите цель на карте")
+            elif action == "rebase":
+                self.air_wing_rebase_mode_id = wing.id
+                self.air_wing_target_mode_id = None
+                self.air_defense_move_mode_id = None
+                self.set_hex_panel_message("Выберите аэродром или площадку на карте")
+            return True
+
+        for rect, action, obj_id in self.hex_air_defense_button_rects:
+            if not self.point_in_rect(x, y, rect):
+                continue
+            unit = self.air_defense_unit_by_id(obj_id)
+            if not unit:
+                self.set_hex_panel_message("ПВО уже недоступна")
+                return True
+            self.select_air_defense_unit(unit)
+            if action == "move":
+                if not self.air_defense_unit_is_movable(unit):
+                    self.set_hex_panel_message("Эта ПВО стационарная")
+                else:
+                    self.air_defense_move_mode_id = unit.id
+                    self.air_wing_target_mode_id = None
+                    self.air_wing_rebase_mode_id = None
+                    self.set_hex_panel_message("Выберите свою клетку для ПВО")
+            elif action == "radar":
+                unit.radar_active = not unit.radar_active
+                state = "вкл." if unit.radar_active else "выкл."
+                self.set_hex_panel_message(f"Радар: {state}")
+            return True
+
+        for rect, wing_id in self.hex_air_wing_row_rects:
+            if self.point_in_rect(x, y, rect):
+                wing = self.air_wing_by_id(wing_id)
+                if wing:
+                    self.select_air_wing(wing)
+                    self.set_hex_panel_message("Авиакрыло выбрано")
+                return True
+
+        for rect, unit_id in self.hex_air_defense_row_rects:
+            if self.point_in_rect(x, y, rect):
+                unit = self.air_defense_unit_by_id(unit_id)
+                if unit:
+                    self.select_air_defense_unit(unit)
+                    self.set_hex_panel_message("ПВО выбрана")
+                return True
+
+        if self.hex_airbase_upgrade_button_rect and self.point_in_rect(x, y, self.hex_airbase_upgrade_button_rect):
+            self.set_hex_panel_message("Развитие аэродрома: заглушка")
+            return True
+        return False
+
+    def handle_air_map_command_click(self, target_tile):
+        if self.air_wing_target_mode_id:
+            wing = self.air_wing_by_id(self.air_wing_target_mode_id)
+            ok, message = self.assign_air_wing_target(wing, target_tile)
+            self.set_hex_panel_message(message)
+            if ok:
+                self.air_wing_target_mode_id = None
+                if target_tile:
+                    self.set_single_selected_tile(target_tile)
+            return True
+        if self.air_wing_rebase_mode_id:
+            wing = self.air_wing_by_id(self.air_wing_rebase_mode_id)
+            ok, message = self.rebase_air_wing(wing, target_tile)
+            self.set_hex_panel_message(message)
+            if ok:
+                self.air_wing_rebase_mode_id = None
+                if target_tile:
+                    self.set_single_selected_tile(target_tile)
+            return True
+        if self.air_defense_move_mode_id:
+            unit = self.air_defense_unit_by_id(self.air_defense_move_mode_id)
+            ok, message = self.move_air_defense_unit(unit, target_tile)
+            self.set_hex_panel_message(message)
+            if ok:
+                self.air_defense_move_mode_id = None
+                if target_tile:
+                    self.set_single_selected_tile(target_tile)
+            return True
+        return False
 
     def rebuild_selection_borders(self):
         self.selection_border_sprite_list.clear()
@@ -11475,6 +12408,11 @@ class Game(arcade.View):
         self.hex_resources_toggle_rect = None
         self.hex_panel_specialization_mode = False
         self.hex_specialization_row_rects = []
+        self.hex_air_wing_row_rects = []
+        self.hex_air_wing_button_rects = []
+        self.hex_air_defense_row_rects = []
+        self.hex_air_defense_button_rects = []
+        self.hex_airbase_upgrade_button_rect = None
         self.hex_panel_message = ""
         self.rebuild_selection_borders()
 
@@ -11556,6 +12494,11 @@ class Game(arcade.View):
         visible_content_height = max(1, content_top - content_bottom)
         self.hex_specialization_row_rects = []
         self.hex_resources_toggle_rect = None
+        self.hex_air_wing_row_rects = []
+        self.hex_air_wing_button_rects = []
+        self.hex_air_defense_row_rects = []
+        self.hex_air_defense_button_rects = []
+        self.hex_airbase_upgrade_button_rect = None
 
         def visible_y(draw_y, top_margin=24):
             return content_bottom <= draw_y <= content_top + top_margin
@@ -11567,6 +12510,23 @@ class Game(arcade.View):
         def panel_section(title, draw_y):
             panel_text(title, panel_x + 16, draw_y, arcade.color.WHITE, 14)
             return draw_y - 20
+
+        def panel_button(rect, label, fill=(44, 58, 74), border=(92, 118, 148), color=(226, 236, 246)):
+            rect_x, rect_y, rect_width, rect_height = rect
+            if rect_y + rect_height < content_bottom or rect_y > content_top:
+                return False
+            arcade.draw_lbwh_rectangle_filled(rect_x, rect_y, rect_width, rect_height, fill)
+            arcade.draw_lbwh_rectangle_outline(rect_x, rect_y, rect_width, rect_height, border, 1)
+            self.draw_ui_text(
+                label,
+                rect_x + rect_width / 2,
+                rect_y + rect_height / 2,
+                color,
+                10,
+                anchor_x="center",
+                anchor_y="center",
+            )
+            return True
 
         arcade.draw_lbwh_rectangle_filled(panel_x, panel_y, panel_width, panel_height, (18, 24, 31, 244))
         arcade.draw_lbwh_rectangle_outline(panel_x, panel_y, panel_width, panel_height, (110, 130, 154), 2)
@@ -11680,13 +12640,25 @@ class Game(arcade.View):
             y -= 16
 
         airbases = [self.airbase_on_tile(selected) for selected in tiles if self.airbase_on_tile(selected)]
+        tile_air_wings = self.air_wings_for_tiles(tiles)
+        tile_air_defense_units = self.air_defense_units_for_tiles(tiles)
         wing_counts = self.air_wing_counts_by_type_for_tiles(tiles)
         air_defense_counts = self.air_defense_counts_by_class_for_tiles(tiles)
+        air_salvo_counts = self.air_salvo_counts_for_tiles(tiles)
+        inventory_player = tile.owner if not multi_selected else None
+        aircraft_inventory = self.player_aircraft_inventory_by_type(inventory_player)
         helipad_projects = [
             project for selected in tiles
             for project in self.field_helipad_projects_on_tile(selected)
         ]
-        has_aviation_info = bool(airbases or wing_counts or air_defense_counts or helipad_projects)
+        has_aviation_info = bool(
+            airbases
+            or wing_counts
+            or air_defense_counts
+            or air_salvo_counts
+            or aircraft_inventory
+            or helipad_projects
+        )
         if has_aviation_info:
             y -= 8
             y = panel_section("Авиация/ПВО", y)
@@ -11696,41 +12668,138 @@ class Game(arcade.View):
                 else:
                     airbase = airbases[0]
                     health = self.building_health(airbase.tile, "airbase")
+                    load = self.airbase_load_summary(airbase.tile)
                     panel_text(
-                        f"Аэродром: ВПП {airbase.runway_level}, емк. {airbase.aircraft_capacity}/{airbase.helicopter_capacity}, сост. {health:.0%}",
+                        f"Аэродром: ВПП {airbase.runway_level}, сост. {health:.0%}",
                         panel_x + 16,
                         y,
                         (224, 234, 244),
                         11,
                     )
-                y -= 16
+                    y -= 16
+                    if load:
+                        panel_text(
+                            f"Места: сам. {load['fixed_load']}/{load['fixed_capacity']} | верт. {load['helicopter_load']}/{load['helicopter_capacity']}",
+                            panel_x + 16,
+                            y,
+                            (206, 218, 230),
+                            11,
+                        )
+                        y -= 16
+                    if airbase.owner is self.human_player:
+                        upgrade_rect = (panel_x + 16, y - 5, min(180, content_width), 20)
+                        if panel_button(upgrade_rect, "Развитие аэродрома", fill=(52, 62, 78), border=(112, 134, 160)):
+                            self.hex_airbase_upgrade_button_rect = upgrade_rect
+                        y -= 16
             helipad_coverage = sum((getattr(selected, "building_coverage", {}) or {}).get("field_helipad", 0.0) for selected in tiles)
             if helipad_coverage > 0:
-                panel_text(f"Полевые площадки: {helipad_coverage:.0%}", panel_x + 16, y, (206, 224, 210), 11)
+                helipad_load = self.airbase_load_summary(tile) if not multi_selected else None
+                label = f"Полевые площадки: {helipad_coverage:.0%}"
+                if helipad_load and helipad_load["helicopter_capacity"] > 0 and not airbases:
+                    label += f" | верт. {helipad_load['helicopter_load']}/{helipad_load['helicopter_capacity']}"
+                panel_text(label, panel_x + 16, y, (206, 224, 210), 11)
                 y -= 16
             for project in helipad_projects:
                 progress = project.progress_hours / max(1.0, project.work_required_hours)
                 panel_text(f"Площадка строится: {progress:.0%}", panel_x + 16, y, (190, 230, 174), 11)
                 y -= 16
-            for aircraft_type, count in sorted(wing_counts.items()):
-                aircraft_name = AIRCRAFT_TYPES.get(aircraft_type, {}).get("name", aircraft_type)
-                panel_text(f"{aircraft_name}: {count}", panel_x + 16, y, (206, 218, 230), 11)
-                y -= 16
-            for unit_class, count in sorted(air_defense_counts.items()):
-                unit_name = AIR_DEFENSE_CLASSES.get(unit_class, {}).get("name", unit_class)
-                label = f"{unit_name}: {count}"
-                if not multi_selected:
-                    unit = next(
-                        (
-                            candidate for candidate in self.air_defense_units_on_tile(tile)
-                            if candidate.unit_class == unit_class
-                        ),
-                        None,
+            if aircraft_inventory:
+                panel_text("Парк самолетов", panel_x + 16, y, (150, 166, 184), 10)
+                y -= 14
+                for aircraft_type, counts in sorted(aircraft_inventory.items()):
+                    aircraft_name = AIRCRAFT_TYPES.get(aircraft_type, {}).get("name", aircraft_type)
+                    if len(aircraft_name) > 23:
+                        aircraft_name = aircraft_name[:22] + "..."
+                    panel_text(
+                        f"{aircraft_name}: база {counts.get('based', 0)} | резерв {counts.get('reserve', 0)}",
+                        panel_x + 16,
+                        y,
+                        (206, 218, 230),
+                        11,
                     )
-                    if unit:
-                        label += f" | огонь {unit.fire_range_cells}, РЛС {unit.radar_range_cells}"
-                panel_text(label, panel_x + 16, y, (224, 214, 184), 11)
+                    y -= 16
+            if tile_air_wings:
+                panel_text("Авиакрылья", panel_x + 16, y, (150, 166, 184), 10)
+                y -= 14
+            for wing in tile_air_wings:
+                row_y = y - 6
+                row_height = 22
+                selected = wing.id == self.selected_air_wing_id
+                if content_bottom <= row_y + row_height and row_y <= content_top:
+                    fill = (58, 78, 98, 178) if selected else (30, 40, 52, 120)
+                    arcade.draw_lbwh_rectangle_filled(panel_x + 12, row_y, content_width + 8, row_height, fill)
+                    arcade.draw_lbwh_rectangle_outline(panel_x + 12, row_y, content_width + 8, row_height, (84, 108, 132), 1)
+                    self.hex_air_wing_row_rects.append(((panel_x + 12, row_y, content_width + 8, row_height), wing.id))
+                aircraft_name = AIRCRAFT_TYPES.get(wing.aircraft_type, {}).get("name", wing.aircraft_type)
+                if len(aircraft_name) > 20:
+                    aircraft_name = aircraft_name[:19] + "..."
+                mission_label = {
+                    "none": "нет",
+                    "cas": "CAS",
+                    "patrol": "патруль",
+                    "strategic_strike": "удар",
+                    "intercept": "перехват",
+                    "air_superiority": "превосх.",
+                }.get(wing.mission, wing.mission)
+                panel_text(
+                    f"{aircraft_name}: {wing.aircraft_count} | {mission_label}",
+                    panel_x + 18,
+                    y,
+                    (228, 238, 248) if selected else (206, 218, 230),
+                    11,
+                )
+                y -= 25
+                if selected and wing.owner is self.human_player:
+                    buttons = [
+                        ("mission", "Мис.", 48),
+                        ("risk", "Риск", 52),
+                        ("target", "Цель", 50),
+                        ("rebase", "База", 50),
+                    ]
+                    button_x = panel_x + 18
+                    for action, label, width in buttons:
+                        rect = (button_x, y - 4, width, 20)
+                        if panel_button(rect, label):
+                            self.hex_air_wing_button_rects.append((rect, action, wing.id))
+                        button_x += width + 6
+                    y -= 24
+            for munition_type, count in sorted(air_salvo_counts.items()):
+                munition_name = MUNITIONS.get(munition_type, {}).get("name", munition_type)
+                panel_text(f"Залп: {munition_name} x{count}", panel_x + 16, y, (238, 218, 176), 11)
                 y -= 16
+            if tile_air_defense_units:
+                panel_text("ПВО", panel_x + 16, y, (150, 166, 184), 10)
+                y -= 14
+            for unit in tile_air_defense_units:
+                unit_name = AIR_DEFENSE_CLASSES.get(unit.unit_class, {}).get("name", unit.unit_class)
+                selected = unit.id == self.selected_air_defense_unit_id
+                row_y = y - 6
+                row_height = 22
+                if content_bottom <= row_y + row_height and row_y <= content_top:
+                    fill = (70, 66, 48, 178) if selected else (36, 38, 34, 120)
+                    arcade.draw_lbwh_rectangle_filled(panel_x + 12, row_y, content_width + 8, row_height, fill)
+                    arcade.draw_lbwh_rectangle_outline(panel_x + 12, row_y, content_width + 8, row_height, (118, 104, 72), 1)
+                    self.hex_air_defense_row_rects.append(((panel_x + 12, row_y, content_width + 8, row_height), unit.id))
+                radar_state = "РЛС+" if unit.radar_active else "РЛС-"
+                panel_text(
+                    f"{unit_name}: огонь {unit.fire_range_cells}, {radar_state}, БК {unit.ammo}",
+                    panel_x + 18,
+                    y,
+                    (238, 228, 198) if selected else (224, 214, 184),
+                    11,
+                )
+                y -= 25
+                if selected and unit.owner is self.human_player:
+                    buttons = [("move", "Двигать", 72)]
+                    if unit.radar_range_cells > 0:
+                        buttons.append(("radar", "Радар", 58))
+                    button_x = panel_x + 18
+                    for action, label, width in buttons:
+                        rect = (button_x, y - 4, width, 20)
+                        if panel_button(rect, label):
+                            self.hex_air_defense_button_rects.append((rect, action, unit.id))
+                        button_x += width + 6
+                    y -= 24
 
         if self.selected_tile_has_industry():
             y -= 8
@@ -14269,6 +15338,8 @@ class Game(arcade.View):
             self.update_divisions(elapsed_hours)
             self.update_battles(elapsed_hours)
             self.update_field_helipad_projects(elapsed_hours)
+            self.update_air_missions(elapsed_hours)
+            self.update_air_salvos(elapsed_hours)
             self.update_army_plans(elapsed_hours)
             self.update_economy_month_history(snapshot.current_time)
             self.last_production_tick_count = snapshot.tick_count
@@ -14386,6 +15457,8 @@ class Game(arcade.View):
                         if self.point_in_rect(x, y, rect):
                             self.set_selected_tile_industry_sector(sector)
                             return
+                if self.handle_hex_air_controls_click(x, y):
+                    return
                 if self.point_in_rect(x, y, self.hex_panel_build_button_rect()):
                     self.open_top_panel("construction")
                     return
@@ -14423,8 +15496,12 @@ class Game(arcade.View):
             if self.army_plan_mode and self.handle_army_plan_map_press(x, y):
                 return
 
+            target_tile = self.get_tile_at(world_x, world_y)
+            if self.handle_air_map_command_click(target_tile):
+                return
+
             if self.construction_placement_mode and self.active_top_panel_key == "construction":
-                tile = self.get_tile_at(world_x, world_y)
+                tile = target_tile
                 building_key = self.selected_construction_building_key()
                 if tile and self.can_place_construction(self.human_player, tile, building_key):
                     steps = 1
@@ -14451,6 +15528,12 @@ class Game(arcade.View):
                 if self.handle_division_list_right_click(x, y):
                     return
                 if self.handle_army_command_bar_click(x, y, activate=False, modifiers=modifiers):
+                    return
+                if self.air_wing_target_mode_id or self.air_wing_rebase_mode_id or self.air_defense_move_mode_id:
+                    self.air_wing_target_mode_id = None
+                    self.air_wing_rebase_mode_id = None
+                    self.air_defense_move_mode_id = None
+                    self.set_hex_panel_message("Авиационная команда отменена")
                     return
 
             if (
