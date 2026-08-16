@@ -274,6 +274,9 @@ class StatePlayer:
     construction_queue: list = None
     divisions: list = None
     armies: list = None
+    air_wings: list = None
+    air_defense_units: list = None
+    airbases: list = None
     monthly_income_breakdown: dict = None
     monthly_expenses_breakdown: dict = None
     economy_month_key: tuple | None = None
@@ -354,6 +357,12 @@ class StatePlayer:
             self.divisions = []
         if not hasattr(self, "armies") or self.armies is None:
             self.armies = []
+        if not hasattr(self, "air_wings") or self.air_wings is None:
+            self.air_wings = []
+        if not hasattr(self, "air_defense_units") or self.air_defense_units is None:
+            self.air_defense_units = []
+        if not hasattr(self, "airbases") or self.airbases is None:
+            self.airbases = []
         if self.monthly_income_breakdown is None:
             self.monthly_income_breakdown = {
                 "population": 0.0,
@@ -491,6 +500,75 @@ class Battle:
     last_defender_strength_damage: float = 0.0
     started_at: object | None = None
     last_tick: object | None = None
+
+
+@dataclass
+class Airbase:
+    id: int
+    owner: StatePlayer
+    tile: object
+    runway_level: int = 1
+    aircraft_capacity: int = 36
+    helicopter_capacity: int = 12
+    fuel_storage: float = 12_000.0
+    munition_storage: float = 6_000.0
+    hangar_level: int = 1
+    hardened_shelter_level: int = 0
+    repair_capacity: float = 1.0
+    radar_control_level: int = 1
+
+
+@dataclass
+class AirWing:
+    id: int
+    owner: StatePlayer
+    base_tile: object
+    aircraft_type: str
+    aircraft_count: int
+    ready_count: int = 0
+    damaged_count: int = 0
+    reserve_count: int = 0
+    fuel: float = 1.0
+    current_loadout: str | None = None
+    mission: str = "none"
+    target_area: object | None = None
+    target_tile: object | None = None
+    risk_policy: str = "normal"
+    sortie_intensity: float = 0.5
+
+    def __post_init__(self):
+        if self.ready_count <= 0:
+            self.ready_count = max(0, self.aircraft_count - self.damaged_count - self.reserve_count)
+        self.ready_count = min(self.aircraft_count, max(0, self.ready_count))
+
+
+@dataclass
+class AirDefenseUnit:
+    id: int
+    owner: StatePlayer
+    tile: object
+    unit_class: str
+    radar_range_cells: int = 0
+    fire_range_cells: int = 0
+    min_range_cells: int = 0
+    ammo: int = 0
+    readiness: float = 1.0
+    camouflage: float = 0.0
+    radar_active: bool = False
+    detection_power: float = 0.0
+    tracking_quality: float = 0.0
+    missile_profile: str | None = None
+    health: float = 1.0
+
+
+@dataclass
+class FieldHelipadProject:
+    id: int
+    owner: StatePlayer
+    tile: object
+    progress_hours: float = 0.0
+    work_required_hours: float = FIELD_HELIPAD_AUTO_WORK_HOURS
+    source_battle_id: tuple | None = None
 
 
 class LocalSimulationServer:
@@ -877,11 +955,20 @@ class Game(arcade.View):
         self.divisions = []
         self.division_templates = self.load_division_templates()
         self.battles = {}
+        self.airbases = []
+        self.air_wings = []
+        self.air_defense_units = []
+        self.field_helipad_projects = []
         self.next_division_id = 1
         self.next_army_id = 1
         self.next_battle_plan_id = 1
+        self.next_airbase_id = 1
+        self.next_air_wing_id = 1
+        self.next_air_defense_unit_id = 1
+        self.next_field_helipad_project_id = 1
         self.selected_division_ids = set()
         self.division_shape_list = arcade.shape_list.ShapeElementList()
+        self.air_asset_shape_list = arcade.shape_list.ShapeElementList()
         self.division_route_shape_list = arcade.shape_list.ShapeElementList()
         self.division_route_cache_key = None
         self.division_group_shape_list = arcade.shape_list.ShapeElementList()
@@ -1193,6 +1280,225 @@ class Game(arcade.View):
         self.next_division_id += 1
         return division
 
+    def aircraft_type_data(self, aircraft_type):
+        return AIRCRAFT_TYPES.get(aircraft_type, {})
+
+    def munition_data(self, munition_id):
+        return MUNITIONS.get(munition_id, {})
+
+    def air_defense_class_data(self, unit_class):
+        return AIR_DEFENSE_CLASSES.get(unit_class, {})
+
+    def default_air_wing_loadout(self, aircraft_type):
+        data = self.aircraft_type_data(aircraft_type)
+        allowed = data.get("allowed_munitions", [])
+        return allowed[0] if allowed else None
+
+    def create_airbase(self, player, tile, coverage=AIRBASE_STARTING_COVERAGE):
+        if not player or not tile or self.is_water_tile(tile):
+            return None
+        self.set_tile_building_coverage(
+            tile,
+            "airbase",
+            max(coverage, (getattr(tile, "building_coverage", {}) or {}).get("airbase", 0.0)),
+            INFRASTRUCTURE_COVERAGE_LIMITS["airbase"][1],
+        )
+        effective_coverage = self.effective_building_coverage(tile, "airbase")
+        airbase = Airbase(
+            id=self.next_airbase_id,
+            owner=player,
+            tile=tile,
+            runway_level=1 + int(effective_coverage >= 0.32),
+            aircraft_capacity=max(18, int(28 + effective_coverage * 90)),
+            helicopter_capacity=max(8, int(8 + effective_coverage * 38)),
+            fuel_storage=8_000 + effective_coverage * 38_000,
+            munition_storage=4_000 + effective_coverage * 18_000,
+            hangar_level=1,
+            hardened_shelter_level=1 if effective_coverage >= 0.30 else 0,
+            repair_capacity=0.8 + effective_coverage * 1.4,
+            radar_control_level=1,
+        )
+        self.next_airbase_id += 1
+        self.airbases.append(airbase)
+        player.airbases.append(airbase)
+        tile.airbase = airbase
+        self.tile_visual_revision += 1
+        self.invalidate_tile_visual_cache()
+        return airbase
+
+    def create_air_wing(self, player, base_tile, aircraft_type, count):
+        if not player or not base_tile or count <= 0 or aircraft_type not in AIRCRAFT_TYPES:
+            return None
+        wing = AirWing(
+            id=self.next_air_wing_id,
+            owner=player,
+            base_tile=base_tile,
+            aircraft_type=aircraft_type,
+            aircraft_count=int(count),
+            current_loadout=self.default_air_wing_loadout(aircraft_type),
+        )
+        self.next_air_wing_id += 1
+        self.air_wings.append(wing)
+        player.air_wings.append(wing)
+        return wing
+
+    def create_air_defense_unit(self, player, tile, unit_class):
+        data = self.air_defense_class_data(unit_class)
+        if not player or not tile or self.is_water_tile(tile) or not data:
+            return None
+        unit = AirDefenseUnit(
+            id=self.next_air_defense_unit_id,
+            owner=player,
+            tile=tile,
+            unit_class=unit_class,
+            radar_range_cells=int(data.get("radar_range_cells", 0)),
+            fire_range_cells=int(data.get("fire_range_cells", 0)),
+            min_range_cells=int(data.get("min_range_cells", 0)),
+            ammo=int(data.get("ammo", 0)),
+            readiness=float(data.get("readiness", 1.0)),
+            camouflage=float(data.get("camouflage", 0.0)),
+            radar_active=bool(data.get("radar_active", False)),
+            detection_power=float(data.get("detection_power", 0.0)),
+            tracking_quality=float(data.get("tracking_quality", 0.0)),
+            missile_profile=data.get("missile_profile"),
+        )
+        self.next_air_defense_unit_id += 1
+        self.air_defense_units.append(unit)
+        player.air_defense_units.append(unit)
+        return unit
+
+    def munition_profile_factor(self, flight_profile, range_ratio):
+        t = self.clamp01(range_ratio)
+        if flight_profile == "sqrt":
+            return math.sqrt(t)
+        if flight_profile == "square":
+            return t * t
+        if flight_profile == "glide":
+            return self.clamp01(0.18 + math.sqrt(t) * 0.92)
+        if flight_profile == "rocket_boost_then_glide":
+            return self.clamp01(0.12 + t * 0.55 + t * t * 0.35)
+        if flight_profile == "sustained_motor":
+            return self.clamp01(t * 0.72)
+        if flight_profile == "two_stage":
+            return self.clamp01(t * 0.58 + max(0.0, t - 0.70) * 0.35)
+        if flight_profile == "ballistic":
+            return self.clamp01(0.20 + t * 0.42)
+        return t
+
+    def munition_interceptability(self, munition_id, launch_distance):
+        munition = self.munition_data(munition_id)
+        if not munition:
+            return 0.0
+        max_range = max(0.001, float(munition.get("max_range", 1.0)))
+        range_ratio = max(0.0, launch_distance) / max_range
+        profile_factor = self.munition_profile_factor(munition.get("flight_profile", "linear"), range_ratio)
+        low = float(munition.get("min_interceptability", 0.0))
+        high = float(munition.get("max_interceptability", low))
+        return self.clamp01(low + (high - low) * profile_factor)
+
+    def choose_air_mission_launch_distance(
+        self,
+        target_distance,
+        munition_id,
+        known_or_suspected_air_defense_radius=0,
+        risk_policy="normal",
+        mission_type="strategic_strike",
+    ):
+        munition = self.munition_data(munition_id)
+        if not munition:
+            return None
+        min_range = float(munition.get("min_range", 0.0))
+        max_range = float(munition.get("max_range", 0.0))
+        optimal = float(munition.get("optimal_range", max_range))
+        target_distance = max(0.0, float(target_distance))
+        if target_distance > max_range:
+            return None
+
+        safe_edge = max(0.0, float(known_or_suspected_air_defense_radius))
+        if risk_policy == "cautious":
+            desired = max(optimal, safe_edge, max_range * 0.82)
+        elif risk_policy == "aggressive":
+            desired = max(min_range, min(optimal * 0.65, max_range * 0.55))
+        elif risk_policy == "all_out":
+            desired = min_range
+        else:
+            desired = max(optimal, safe_edge if safe_edge > 0 else optimal * 0.75)
+        if mission_type == "cas":
+            desired = min(desired, max_range * 0.62)
+        return max(min_range, min(max_range, target_distance, desired))
+
+    def tiles_within_radius(self, center_tile, radius):
+        if not center_tile or radius < 0:
+            return []
+        result = []
+        for tile in self.hex_grid:
+            if self.hex_distance(center_tile, tile) <= radius:
+                result.append(tile)
+        return result
+
+    def air_defense_fire_tiles(self, unit):
+        if not unit or not unit.tile or unit.fire_range_cells <= 0:
+            return []
+        return [
+            tile for tile in self.tiles_within_radius(unit.tile, unit.fire_range_cells)
+            if self.hex_distance(unit.tile, tile) >= max(0, unit.min_range_cells)
+        ]
+
+    def air_defense_detection_tiles(self, unit):
+        if not unit or not unit.tile:
+            return []
+        radius = max(unit.radar_range_cells, unit.fire_range_cells if not unit.radar_active else 0)
+        return self.tiles_within_radius(unit.tile, radius)
+
+    def air_defense_units_covering_tile(self, owner, tile):
+        if not owner or not tile:
+            return []
+        return [
+            unit for unit in getattr(owner, "air_defense_units", []) or []
+            if unit.fire_range_cells > 0
+            and unit.readiness > 0
+            and unit.tile
+            and self.hex_distance(unit.tile, tile) <= unit.fire_range_cells
+            and self.hex_distance(unit.tile, tile) >= max(0, unit.min_range_cells)
+        ]
+
+    def air_defense_units_detecting_tile(self, owner, tile):
+        if not owner or not tile:
+            return []
+        return [
+            unit for unit in getattr(owner, "air_defense_units", []) or []
+            if unit.tile
+            and unit.radar_range_cells > 0
+            and unit.radar_active
+            and self.hex_distance(unit.tile, tile) <= unit.radar_range_cells
+        ]
+
+    def update_air_assets_after_tile_owner_change(self, tile, old_owner, new_owner):
+        if not tile or old_owner is new_owner:
+            return
+        airbase = self.airbase_on_tile(tile)
+        if airbase:
+            if old_owner and airbase in getattr(old_owner, "airbases", []):
+                old_owner.airbases.remove(airbase)
+            airbase.owner = new_owner
+            if new_owner and airbase not in getattr(new_owner, "airbases", []):
+                new_owner.airbases.append(airbase)
+            for wing in list(self.air_wings_on_tile(tile, owner=old_owner)):
+                if wing in self.air_wings:
+                    self.air_wings.remove(wing)
+                if old_owner and wing in getattr(old_owner, "air_wings", []):
+                    old_owner.air_wings.remove(wing)
+        for unit in list(self.air_defense_units_on_tile(tile)):
+            if unit.owner is new_owner:
+                continue
+            if unit in self.air_defense_units:
+                self.air_defense_units.remove(unit)
+            if unit.owner and unit in getattr(unit.owner, "air_defense_units", []):
+                unit.owner.air_defense_units.remove(unit)
+        for project in list(self.field_helipad_projects_on_tile(tile)):
+            if project.owner is not new_owner and project in self.field_helipad_projects:
+                self.field_helipad_projects.remove(project)
+
     def setup(self):
         self.grid_width = self.map_size
         self.grid_height = self.map_size
@@ -1440,9 +1746,15 @@ class Game(arcade.View):
         capacities = self.empty_storage_summary()
         for category_key, building_values in STORAGE_CAPACITY_BY_COVERAGE.items():
             for building_key, capacity_per_coverage in building_values.items():
-                capacities[category_key] += coverage.get(building_key, 0.0) * capacity_per_coverage
+                capacities[category_key] += (
+                    self.effective_building_coverage(tile, building_key, coverage.get(building_key, 0.0))
+                    * capacity_per_coverage
+                )
         for building_key, capacity_per_coverage in FUEL_STORAGE_CAPACITY_BY_COVERAGE.items():
-            capacities["fuel"] += coverage.get(building_key, 0.0) * capacity_per_coverage
+            capacities["fuel"] += (
+                self.effective_building_coverage(tile, building_key, coverage.get(building_key, 0.0))
+                * capacity_per_coverage
+            )
         return capacities
 
     def tile_storage_capacity(self, tile, category_key=None):
@@ -1624,7 +1936,7 @@ class Game(arcade.View):
         coverage = getattr(tile, "building_coverage", {}) or {}
         strength = 0.0
         for building_key, weight in SUPPLY_SOURCE_WEIGHTS.items():
-            strength += max(0.0, coverage.get(building_key, 0.0)) * weight
+            strength += self.effective_building_coverage(tile, building_key, coverage.get(building_key, 0.0)) * weight
         if tile == player.capital_tile:
             strength += 0.85
         return self.clamp01(strength)
@@ -1669,7 +1981,7 @@ class Game(arcade.View):
             for tile in land_tiles:
                 coverage = getattr(tile, "building_coverage", {}) or {}
                 relay_strength = sum(
-                    coverage.get(building_key, 0.0) * weight
+                    self.effective_building_coverage(tile, building_key, coverage.get(building_key, 0.0)) * weight
                     for building_key, weight in SUPPLY_RELAY_BUILDING_WEIGHTS.items()
                 )
                 if relay_strength <= 0:
@@ -1878,7 +2190,8 @@ class Game(arcade.View):
 
     def calculate_tile_production_cache(self, player, tile):
         cache = self.empty_production_cache()
-        coverage = getattr(tile, "building_coverage", {}) or {}
+        raw_coverage = getattr(tile, "building_coverage", {}) or {}
+        coverage = self.effective_building_coverage_map(tile)
         modifiers = player.production_modifiers
 
         mine_coverage = coverage.get("mine", 0.0)
@@ -1931,9 +2244,9 @@ class Game(arcade.View):
             self.add_production_amount(cache, "agriculture", "outputs", "food", base_output * FERTILIZER_FOOD_BONUS)
 
         allocation = getattr(tile, "industry_allocation", None)
-        if allocation is None or (coverage.get("industry", 0.0) > 0 and not allocation):
+        if allocation is None or (raw_coverage.get("industry", 0.0) > 0 and not allocation):
             allocation = self.assign_industry_allocation(player, tile)
-        elif coverage.get("industry", 0.0) > 0:
+        elif raw_coverage.get("industry", 0.0) > 0:
             allocation = self.normalize_industry_allocation(allocation)
             tile.industry_allocation = allocation
         specialization_efficiency = self.specialization_efficiency(
@@ -1988,7 +2301,7 @@ class Game(arcade.View):
             )
 
         for tile in player.tiles:
-            coverage = getattr(tile, "building_coverage", {}) or {}
+            coverage = self.effective_building_coverage_map(tile)
             for building, upkeep in SETTLEMENT_UPKEEP_PER_COVERAGE.items():
                 building_coverage = coverage.get(building, 0.0)
                 if building_coverage <= 0:
@@ -2289,17 +2602,31 @@ class Game(arcade.View):
     def estimate_active_construction_consumption(self, player, stock_amount_func):
         if not player.construction_queue:
             return {}
-        project = player.construction_queue[0]
-        status_info = self.evaluate_construction_project_status(
-            player,
-            project,
-            month_fraction=CONSTRUCTION_STATUS_CHECK_MONTH_FRACTION,
-            stock_amount_func=stock_amount_func,
-        )
-        if status_info["status"] != "building":
+        projects = self.active_construction_projects(player)
+        if not projects:
             return {}
-        monthly_delta = self.construction_project_progress_delta(player, project, month_fraction=1.0)
-        return self.construction_project_resource_needs(project, monthly_delta)
+        build_power = self.build_power(player) / max(1, len(projects))
+        totals = {}
+        for project in projects:
+            project_build_power = build_power * self.construction_project_speed_multiplier(project)
+            status_info = self.evaluate_construction_project_status(
+                player,
+                project,
+                month_fraction=CONSTRUCTION_STATUS_CHECK_MONTH_FRACTION,
+                stock_amount_func=stock_amount_func,
+                build_power=project_build_power,
+            )
+            if not self.construction_project_is_active_status(status_info["status"]):
+                continue
+            monthly_delta = self.construction_project_progress_delta(
+                player,
+                project,
+                month_fraction=1.0,
+                build_power=project_build_power,
+            )
+            for key, amount in self.construction_project_resource_needs(project, monthly_delta).items():
+                totals[key] = totals.get(key, 0.0) + amount
+        return totals
 
     def stockpile_amount(self, player, key):
         category = self.resource_category_for_key(key)
@@ -2690,7 +3017,7 @@ class Game(arcade.View):
         coverage_totals = {}
         for tile in player.tiles:
             for key, value in (getattr(tile, "building_coverage", {}) or {}).items():
-                coverage_totals[key] = coverage_totals.get(key, 0.0) + max(0.0, value)
+                coverage_totals[key] = coverage_totals.get(key, 0.0) + self.effective_building_coverage(tile, key, value)
         supply = (player.supply_summary or {}).get("average", 1.0)
         logistics = (player.production_modifiers or {}).get("logistics_efficiency", 1.0)
         port_capacity = coverage_totals.get("port", 0.0) * TRADE_PORT_CAPACITY_PER_COVERAGE
@@ -2979,11 +3306,99 @@ class Game(arcade.View):
         next_step = math.floor(coverage / CONSTRUCTION_STEP + 1e-9) + 1
         return min(1.0, next_step * CONSTRUCTION_STEP)
 
+    def building_health_map(self, tile):
+        health = getattr(tile, "building_health", None)
+        if health is None:
+            health = {}
+            tile.building_health = health
+        return health
+
+    def building_health(self, tile, building_key):
+        if not tile or not building_key:
+            return 1.0
+        coverage = (getattr(tile, "building_coverage", {}) or {}).get(building_key, 0.0)
+        if coverage <= 0:
+            return 1.0
+        health = self.building_health_map(tile).get(building_key, 1.0)
+        return max(0.0, min(1.0, health))
+
+    def set_building_health(self, tile, building_key, health):
+        if not tile or not building_key:
+            return False
+        coverage = (getattr(tile, "building_coverage", {}) or {}).get(building_key, 0.0)
+        if coverage <= 0:
+            return False
+        health = max(0.0, min(1.0, health))
+        health_map = self.building_health_map(tile)
+        old_health = self.building_health(tile, building_key)
+        if abs(old_health - health) < 0.0005:
+            return False
+        if health >= 0.999:
+            health_map.pop(building_key, None)
+        else:
+            health_map[building_key] = health
+        return True
+
+    def effective_building_coverage(self, tile, building_key, coverage=None):
+        if coverage is None:
+            coverage = (getattr(tile, "building_coverage", {}) or {}).get(building_key, 0.0)
+        return max(0.0, coverage) * self.building_health(tile, building_key)
+
+    def effective_building_coverage_map(self, tile):
+        coverage = getattr(tile, "building_coverage", {}) or {}
+        return {
+            key: self.effective_building_coverage(tile, key, value)
+            for key, value in coverage.items()
+            if value > 0
+        }
+
+    def building_damage_fraction(self, tile, building_key):
+        return 1.0 - self.building_health(tile, building_key)
+
+    def damaged_building_keys(self, tile, threshold=0.001):
+        coverage = getattr(tile, "building_coverage", {}) or {}
+        return [
+            key for key, value in coverage.items()
+            if value > 0 and self.building_damage_fraction(tile, key) > threshold
+        ]
+
+    def refresh_tile_after_building_health_change(self, tile, owner=None):
+        owner = owner or getattr(tile, "owner", None)
+        if owner:
+            self.update_tile_production_cache(tile)
+            self.recalculate_player_supply(owner)
+            self.mark_player_storage_dirty(owner)
+            self.distribute_player_stockpiles_to_tiles(owner)
+            self.recalculate_resource_balance_breakdown(owner)
+            self.recalculate_monthly_balance(owner)
+        self.tile_visual_revision += 1
+        self.invalidate_tile_visual_cache()
+        self.invalidate_construction_placement_cache()
+
+    def damage_building(self, tile, building_key, damage_fraction, queue_repair=True):
+        if damage_fraction <= 0:
+            return False
+        old_health = self.building_health(tile, building_key)
+        if old_health <= 0:
+            return False
+        new_health = max(0.0, old_health - damage_fraction)
+        changed = self.set_building_health(tile, building_key, new_health)
+        if changed:
+            owner = getattr(tile, "owner", None)
+            self.refresh_tile_after_building_health_change(tile, owner)
+            if queue_repair and owner:
+                self.enqueue_auto_repair(owner, tile, building_key)
+        return changed
+
+    def effective_tile_movement_cost(self, tile):
+        # Roads are not modeled yet; damaged infrastructure affects movement indirectly through supply.
+        return max(1.0, float(getattr(tile, "movement_cost", 1.0) or 1.0))
+
     def build_power(self, player):
         coverage_totals = {}
         for tile in player.tiles:
             for key, value in (getattr(tile, "building_coverage", {}) or {}).items():
-                coverage_totals[key] = coverage_totals.get(key, 0.0) + max(0.0, value)
+                coverage_totals[key] = coverage_totals.get(key, 0.0) + self.effective_building_coverage(tile, key, value)
 
         modifiers = player.construction_modifiers or {}
         industry_efficiency = (player.production_modifiers or {}).get("industry_efficiency", 1.0)
@@ -3029,9 +3444,133 @@ class Game(arcade.View):
             "work_required": work_required,
         }
 
+    def repair_cost(self, player, tile, building_key):
+        base = BUILDING_CONSTRUCTION_BASE.get(building_key)
+        if not base or not tile:
+            return None
+        coverage = (getattr(tile, "building_coverage", {}) or {}).get(building_key, 0.0)
+        if coverage <= 0:
+            return None
+        health = self.building_health(tile, building_key)
+        damage = 1.0 - health
+        if damage <= 0.001:
+            return None
+
+        level = self.construction_level_for_coverage(coverage)
+        level_multiplier = CONSTRUCTION_LEVEL_MULTIPLIER ** (level - 1)
+        repair_scale = coverage * damage * level_multiplier
+        resource_costs = {
+            key: amount * repair_scale * BUILDING_REPAIR_RESOURCE_MULTIPLIER
+            for key, amount in base.get("resources", {}).items()
+        }
+        return {
+            "project_type": "repair",
+            "building": building_key,
+            "from_health": health,
+            "target_health": 1.0,
+            "damaged_coverage": coverage,
+            "level": level,
+            "money_cost": base.get("money", 0.0) * repair_scale * BUILDING_REPAIR_MONEY_MULTIPLIER,
+            "resource_costs": resource_costs,
+            "work_required": max(1.0, base.get("work", 0.0) * repair_scale * BUILDING_REPAIR_WORK_MULTIPLIER),
+        }
+
+    def queued_repair_project(self, player, tile, building_key):
+        if not player or not tile or not building_key:
+            return None
+        for project in player.construction_queue:
+            cost = project.get("cost", {}) or {}
+            if (
+                project.get("project_type") == "repair"
+                and project.get("tile") is tile
+                and (project.get("building") or cost.get("building")) == building_key
+            ):
+                return project
+        return None
+
+    def enqueue_auto_repair(self, player, tile, building_key):
+        if not player or not tile or tile.owner is not player:
+            return False
+        if self.queued_repair_project(player, tile, building_key):
+            return False
+        cost = self.repair_cost(player, tile, building_key)
+        if not cost:
+            return False
+        resources_spent = {}
+        cost["resources_spent"] = resources_spent
+        player.construction_queue.append({
+            "project_type": "repair",
+            "auto_repair": True,
+            "tile": tile,
+            "building": building_key,
+            "from_health": cost.get("from_health", 1.0),
+            "target_health": cost.get("target_health", 1.0),
+            "money_cost": cost.get("money_cost", 0.0),
+            "resource_costs": cost.get("resource_costs", {}),
+            "resources_spent": resources_spent,
+            "cost": cost,
+            "speed": self.build_power(player),
+            "progress": 0.0,
+            "money_paid": False,
+            "status": "queued",
+            "status_reason": "Ждет очереди",
+            "stall_reasons": [],
+            "missing_money": 0.0,
+            "missing_resources": {},
+        })
+        self.invalidate_construction_placement_cache()
+        self.mark_player_resource_balance_dirty(player)
+        return True
+
+    def enqueue_tile_repairs(self, player, tile):
+        if not player or not tile or tile.owner is not player:
+            return 0
+        added = 0
+        for building_key in self.damaged_building_keys(tile):
+            if self.enqueue_auto_repair(player, tile, building_key):
+                added += 1
+        return added
+
+    def prune_invalid_repair_projects(self, player):
+        if not player or not player.construction_queue:
+            return False
+        kept_projects = []
+        changed = False
+        for project in player.construction_queue:
+            if project.get("project_type") != "repair":
+                kept_projects.append(project)
+                continue
+            cost = project.get("cost", {}) or {}
+            tile = project.get("tile")
+            building_key = project.get("building") or cost.get("building")
+            if (
+                not tile
+                or tile.owner is not player
+                or not building_key
+                or self.building_damage_fraction(tile, building_key) <= 0.001
+            ):
+                changed = True
+                continue
+            kept_projects.append(project)
+        if changed:
+            player.construction_queue[:] = kept_projects
+            self.invalidate_construction_placement_cache()
+        return changed
+
+    def enqueue_auto_repairs_for_player(self, player):
+        if not player:
+            return 0
+        self.prune_invalid_repair_projects(player)
+        added = 0
+        for tile in player.tiles:
+            added += self.enqueue_tile_repairs(player, tile)
+        return added
+
     def queued_target_coverage(self, player, tile, building_key):
         coverage = (getattr(tile, "building_coverage", {}) or {}).get(building_key, 0.0)
         for project in player.construction_queue:
+            if project.get("project_type") == "repair":
+                continue
             cost = project.get("cost", {})
             if project.get("tile") == tile and cost.get("building") == building_key:
                 coverage = max(coverage, cost.get("target_coverage", coverage))
@@ -3042,6 +3581,8 @@ class Game(arcade.View):
         if not player or not building_key:
             return targets
         for project in player.construction_queue:
+            if project.get("project_type") == "repair":
+                continue
             cost = project.get("cost", {})
             if cost.get("building") != building_key:
                 continue
@@ -3363,6 +3904,7 @@ class Game(arcade.View):
         resource_costs = cost.get("resource_costs", {})
         cost["resources_spent"] = resources_spent
         player.construction_queue.append({
+            "project_type": "build",
             "tile": tile,
             "building": building_key,
             "from_coverage": cost.get("from_coverage", current_coverage),
@@ -3513,12 +4055,19 @@ class Game(arcade.View):
 
     def sync_construction_project_fields(self, project):
         cost = project.setdefault("cost", {})
+        project_type = project.get("project_type") or cost.get("project_type") or "build"
+        project["project_type"] = project_type
+        cost["project_type"] = project_type
         building_key = project.get("building") or cost.get("building")
         if building_key:
             project["building"] = building_key
             cost["building"] = building_key
 
-        for key in ("from_coverage", "target_coverage", "money_cost", "work_required", "level"):
+        for key in (
+            "from_coverage", "target_coverage",
+            "from_health", "target_health", "damaged_coverage",
+            "money_cost", "work_required", "level",
+        ):
             if key not in project and key in cost:
                 project[key] = cost[key]
             elif key in project:
@@ -3551,6 +4100,7 @@ class Game(arcade.View):
         labels = {
             "queued": "Ждет очереди",
             "building": "Строится",
+            "repairing": "Ремонт",
             "waiting_money": "Ждет деньги",
             "waiting_resources": "Ждет ресурсы",
             "waiting_power": "Нет строймощности",
@@ -3575,9 +4125,9 @@ class Game(arcade.View):
         project["missing_money"] = max(0.0, missing_money)
         project["missing_resources"] = dict(missing_resources)
 
-    def construction_project_progress_delta(self, player, project, month_fraction=1.0):
+    def construction_project_progress_delta(self, player, project, month_fraction=1.0, build_power=None):
         cost = self.sync_construction_project_fields(project)
-        speed = self.build_power(player)
+        speed = self.build_power(player) if build_power is None else build_power
         project["speed"] = speed
         if speed <= 0:
             return 0.0
@@ -3600,9 +4150,42 @@ class Game(arcade.View):
                 needs[key] = amount_needed
         return needs
 
-    def construction_project_remaining_months(self, player, project):
+    @staticmethod
+    def construction_project_is_active_status(status):
+        return status in ("building", "repairing")
+
+    def tile_has_active_battle(self, tile):
+        if not tile or not getattr(self, "battles", None):
+            return False
+        return (tile.q, tile.r) in self.battles
+
+    def construction_project_speed_multiplier(self, project):
+        tile = project.get("tile") if project else None
+        if self.tile_has_active_battle(tile):
+            return CONSTRUCTION_BATTLE_TILE_SPEED_MULTIPLIER
+        return 1.0
+
+    def construction_project_speed_note(self, project):
+        if self.construction_project_speed_multiplier(project) < 0.999:
+            return "Работы замедлены: бой на клетке"
+        return None
+
+    def active_construction_projects(self, player, limit=None):
+        if not player:
+            return []
+        limit = CONSTRUCTION_PARALLEL_PROJECTS if limit is None else max(1, limit)
+        projects = []
+        for project in player.construction_queue:
+            if project.get("paused", False):
+                continue
+            projects.append(project)
+            if len(projects) >= limit:
+                break
+        return projects
+
+    def construction_project_remaining_months(self, player, project, build_power=None):
         cost = self.sync_construction_project_fields(project)
-        speed = self.build_power(player)
+        speed = self.build_power(player) if build_power is None else build_power
         if speed <= 0:
             return None
         progress = max(0.0, min(1.0, project.get("progress", 0.0)))
@@ -3615,11 +4198,12 @@ class Game(arcade.View):
         project,
         month_fraction=1.0,
         stock_amount_func=None,
+        build_power=None,
         update=True,
     ):
         cost = self.sync_construction_project_fields(project)
         stock_amount_func = stock_amount_func or (lambda key: self.stockpile_amount(player, key))
-        speed = self.build_power(player) if player else 0.0
+        speed = (self.build_power(player) if player else 0.0) if build_power is None else build_power
         project["speed"] = speed
         progress = max(0.0, min(1.0, project.get("progress", 0.0)))
         money_cost = max(0.0, cost.get("money_cost", project.get("money_cost", 0.0)))
@@ -3631,7 +4215,7 @@ class Game(arcade.View):
             "missing_resources": {},
             "resource_needs": {},
             "progress_delta": 0.0,
-            "remaining_months": self.construction_project_remaining_months(player, project),
+            "remaining_months": self.construction_project_remaining_months(player, project, build_power=speed),
         }
 
         if progress >= 0.999:
@@ -3672,7 +4256,7 @@ class Game(arcade.View):
                 self.set_construction_project_status(project, "waiting_power", info["reasons"])
             return info
 
-        progress_delta = self.construction_project_progress_delta(player, project, month_fraction)
+        progress_delta = self.construction_project_progress_delta(player, project, month_fraction, build_power=speed)
         info["progress_delta"] = progress_delta
         if progress_delta <= 0:
             info["status"] = "complete"
@@ -3707,16 +4291,36 @@ class Game(arcade.View):
                 )
             return info
 
-        info["status"] = "building"
+        info["status"] = "repairing" if project.get("project_type") == "repair" else "building"
         if update:
-            self.set_construction_project_status(project, "building")
+            self.set_construction_project_status(project, info["status"])
         return info
+
+    def apply_repair_project_progress(self, player, project, old_progress, new_progress):
+        if project.get("project_type") != "repair":
+            return
+        tile = project.get("tile")
+        cost = self.sync_construction_project_fields(project)
+        building_key = project.get("building") or cost.get("building")
+        if not tile or not building_key:
+            return
+        from_health = max(0.0, min(1.0, cost.get("from_health", project.get("from_health", 1.0))))
+        target_health = max(from_health, min(1.0, cost.get("target_health", project.get("target_health", 1.0))))
+        health_gain = max(0.0, new_progress - old_progress) * max(0.0, target_health - from_health)
+        if health_gain <= 0:
+            return
+        if self.set_building_health(tile, building_key, self.building_health(tile, building_key) + health_gain):
+            self.refresh_tile_after_building_health_change(tile, player)
 
     def complete_construction_project(self, player, project):
         tile = project.get("tile")
         cost = self.sync_construction_project_fields(project)
         building_key = project.get("building") or cost.get("building")
         if not tile or not building_key:
+            return
+        if project.get("project_type") == "repair":
+            self.set_building_health(tile, building_key, cost.get("target_health", 1.0))
+            self.refresh_tile_after_building_health_change(tile, player)
             return
         coverage = getattr(tile, "building_coverage", None)
         if coverage is None:
@@ -3727,6 +4331,8 @@ class Game(arcade.View):
             tile.buildings = []
         if building_key not in tile.buildings:
             tile.buildings.append(building_key)
+        if building_key == "airbase" and not self.airbase_on_tile(tile):
+            self.create_airbase(player, tile, coverage.get("airbase", 0.0))
         self.recalculate_state_resources(player)
         self.update_tile_production_cache(tile)
         self.recalculate_player_supply(player)
@@ -3739,64 +4345,104 @@ class Game(arcade.View):
         self.invalidate_construction_placement_cache()
 
     def run_construction_tick(self, player, elapsed_hours=None):
+        self.enqueue_auto_repairs_for_player(player)
         if not player.construction_queue:
-            return
-        project = player.construction_queue[0]
-        if project.get("paused", False):
-            self.evaluate_construction_project_status(player, project, update=True)
             return
         month_fraction = max(0.0, (elapsed_hours or 0.0) / PRODUCTION_MONTH_HOURS)
         if month_fraction <= 0:
             return
 
-        cost = project.get("cost", {})
-        money_cost = cost.get("money_cost", 0.0)
-        if not project.get("money_paid", False):
-            if player.budget < money_cost:
-                self.evaluate_construction_project_status(player, project, month_fraction)
-                return
-            player.budget -= money_cost
-            project["money_paid"] = True
-
-        status_info = self.evaluate_construction_project_status(player, project, month_fraction)
-        if status_info["status"] != "building":
+        active_projects = self.active_construction_projects(player)
+        if not active_projects:
+            for project in player.construction_queue:
+                if project.get("paused", False):
+                    self.evaluate_construction_project_status(player, project, update=True)
             return
 
-        resources_spent = project.get("resources_spent", cost.setdefault("resources_spent", {}))
-        for key, amount_needed in status_info["resource_needs"].items():
-            consumed = self.consume_from_stockpile(player, key, amount_needed)
-            resources_spent[key] = resources_spent.get(key, 0.0) + consumed
+        build_power = self.build_power(player) / max(1, len(active_projects))
+        completed_projects = []
+        for project in list(active_projects):
+            project_build_power = build_power * self.construction_project_speed_multiplier(project)
+            cost = self.sync_construction_project_fields(project)
+            money_cost = cost.get("money_cost", 0.0)
+            if not project.get("money_paid", False):
+                if player.budget < money_cost:
+                    self.evaluate_construction_project_status(
+                        player,
+                        project,
+                        month_fraction,
+                        build_power=project_build_power,
+                    )
+                    continue
+                player.budget -= money_cost
+                project["money_paid"] = True
 
-        project["progress"] = min(1.0, project.get("progress", 0.0) + status_info["progress_delta"])
-        self.set_construction_project_status(project, "building")
-        self.mark_player_resource_balance_dirty(player)
-        if project["progress"] >= 0.999:
-            self.complete_construction_project(player, project)
-            player.construction_queue.pop(0)
+            status_info = self.evaluate_construction_project_status(
+                player,
+                project,
+                month_fraction,
+                build_power=project_build_power,
+            )
+            if not self.construction_project_is_active_status(status_info["status"]):
+                continue
+
+            resources_spent = project.get("resources_spent", cost.setdefault("resources_spent", {}))
+            for key, amount_needed in status_info["resource_needs"].items():
+                consumed = self.consume_from_stockpile(player, key, amount_needed)
+                resources_spent[key] = resources_spent.get(key, 0.0) + consumed
+
+            old_progress = max(0.0, min(1.0, project.get("progress", 0.0)))
+            new_progress = min(1.0, old_progress + status_info["progress_delta"])
+            project["progress"] = new_progress
+            if project.get("project_type") == "repair":
+                self.apply_repair_project_progress(player, project, old_progress, new_progress)
+            self.set_construction_project_status(project, status_info["status"])
+            self.mark_player_resource_balance_dirty(player)
+            if project["progress"] >= 0.999:
+                self.complete_construction_project(player, project)
+                completed_projects.append(project)
+
+        for project in completed_projects:
+            if project in player.construction_queue:
+                player.construction_queue.remove(project)
+        if completed_projects:
             self.invalidate_construction_placement_cache()
 
     def active_construction_consumption(self, player):
         if not player.construction_queue:
             return {}
-        project = player.construction_queue[0]
-        if project.get("paused", False):
+        projects = self.active_construction_projects(player)
+        if not projects:
             return {}
-        status_info = self.evaluate_construction_project_status(
-            player,
-            project,
-            month_fraction=CONSTRUCTION_STATUS_CHECK_MONTH_FRACTION,
-        )
-        if status_info["status"] != "building":
-            return {}
-        monthly_delta = self.construction_project_progress_delta(player, project, month_fraction=1.0)
-        return self.construction_project_resource_needs(project, monthly_delta)
+        build_power = self.build_power(player) / max(1, len(projects))
+        totals = {}
+        for project in projects:
+            project_build_power = build_power * self.construction_project_speed_multiplier(project)
+            status_info = self.evaluate_construction_project_status(
+                player,
+                project,
+                month_fraction=CONSTRUCTION_STATUS_CHECK_MONTH_FRACTION,
+                build_power=project_build_power,
+            )
+            if not self.construction_project_is_active_status(status_info["status"]):
+                continue
+            monthly_delta = self.construction_project_progress_delta(
+                player,
+                project,
+                month_fraction=1.0,
+                build_power=project_build_power,
+            )
+            for key, amount in self.construction_project_resource_needs(project, monthly_delta).items():
+                totals[key] = totals.get(key, 0.0) + amount
+        return totals
 
     def construction_stall_reasons(self, player):
         if not player.construction_queue:
             return []
-        project = player.construction_queue[0]
-        if project.get("paused", False):
+        projects = self.active_construction_projects(player)
+        if not projects:
             return []
+        project = projects[0]
         status_info = self.evaluate_construction_project_status(
             player,
             project,
@@ -3810,7 +4456,8 @@ class Game(arcade.View):
         reasons = self.construction_stall_reasons(player)
         if not reasons:
             return None
-        project = player.construction_queue[0]
+        active_projects = self.active_construction_projects(player)
+        project = active_projects[0] if active_projects else player.construction_queue[0]
         status_label = self.construction_project_status_label(project.get("status", "queued"))
         return {
             "level": "red",
@@ -3839,20 +4486,19 @@ class Game(arcade.View):
             income += (population / 1_000_000) * self.population_income_rate_for_tile(tile)
         return income
 
-    @staticmethod
-    def monthly_company_income(player):
+    def monthly_company_income(self, player):
         income = 0.0
         for tile in player.tiles:
             coverage = getattr(tile, "building_coverage", {}) or {}
             for building_key, amount_per_coverage in COMPANY_INCOME_PER_COVERAGE.items():
-                income += max(0.0, coverage.get(building_key, 0.0)) * amount_per_coverage
+                income += self.effective_building_coverage(tile, building_key, coverage.get(building_key, 0.0)) * amount_per_coverage
         return income
 
     def monthly_tile_company_income(self, tile):
         income = 0.0
         coverage = getattr(tile, "building_coverage", {}) or {}
         for building_key, amount_per_coverage in COMPANY_INCOME_PER_COVERAGE.items():
-            income += max(0.0, coverage.get(building_key, 0.0)) * amount_per_coverage
+            income += self.effective_building_coverage(tile, building_key, coverage.get(building_key, 0.0)) * amount_per_coverage
         return income
 
     def monthly_tile_population_income(self, tile):
@@ -4631,6 +5277,63 @@ class Game(arcade.View):
                 if key in BUILDING_DISPLAY_NAMES:
                     listed_buildings.add(key)
         return totals, listed_buildings
+
+    def building_damage_rows_for_tiles(self, tiles):
+        damage_totals = {}
+        coverage_totals = {}
+        for tile in tiles:
+            for key, coverage in (getattr(tile, "building_coverage", {}) or {}).items():
+                if coverage <= 0:
+                    continue
+                damage = self.building_damage_fraction(tile, key)
+                coverage_totals[key] = coverage_totals.get(key, 0.0) + coverage
+                damage_totals[key] = damage_totals.get(key, 0.0) + coverage * damage
+        return {
+            key: damage_totals.get(key, 0.0) / max(0.001, coverage_totals.get(key, 0.0))
+            for key in coverage_totals
+            if damage_totals.get(key, 0.0) > 0.001
+        }
+
+    def airbase_on_tile(self, tile):
+        return getattr(tile, "airbase", None) if tile else None
+
+    def air_wings_on_tile(self, tile, owner=None):
+        if not tile:
+            return []
+        return [
+            wing for wing in self.air_wings
+            if wing.base_tile is tile and (owner is None or wing.owner is owner)
+        ]
+
+    def air_defense_units_on_tile(self, tile, owner=None):
+        if not tile:
+            return []
+        return [
+            unit for unit in self.air_defense_units
+            if unit.tile is tile and (owner is None or unit.owner is owner)
+        ]
+
+    def field_helipad_projects_on_tile(self, tile, owner=None):
+        if not tile:
+            return []
+        return [
+            project for project in self.field_helipad_projects
+            if project.tile is tile and (owner is None or project.owner is owner)
+        ]
+
+    def air_wing_counts_by_type_for_tiles(self, tiles):
+        counts = {}
+        for tile in tiles:
+            for wing in self.air_wings_on_tile(tile):
+                counts[wing.aircraft_type] = counts.get(wing.aircraft_type, 0) + wing.aircraft_count
+        return counts
+
+    def air_defense_counts_by_class_for_tiles(self, tiles):
+        counts = {}
+        for tile in tiles:
+            for unit in self.air_defense_units_on_tile(tile):
+                counts[unit.unit_class] = counts.get(unit.unit_class, 0) + 1
+        return counts
 
     def selected_industry_allocation_summary(self, industry_tiles):
         totals = {}
@@ -5556,6 +6259,188 @@ class Game(arcade.View):
                     division.battle_status = "reserve"
             self.rebalance_battle_side(battle, side)
 
+    def apply_battle_collateral_damage(self, battle, elapsed_hours, active_attackers, active_defenders):
+        tile = battle.tile
+        if not tile or elapsed_hours <= 0:
+            return False
+        coverage = {
+            key: value
+            for key, value in (getattr(tile, "building_coverage", {}) or {}).items()
+            if value > 0 and key in BUILDING_CONSTRUCTION_BASE
+        }
+        if not coverage:
+            return False
+
+        active_count = len(active_attackers) + len(active_defenders)
+        if active_count <= 0:
+            return False
+        total_org_damage = battle.last_attacker_org_damage + battle.last_defender_org_damage
+        total_strength_damage = battle.last_attacker_strength_damage + battle.last_defender_strength_damage
+        intensity = self.clamp01((total_org_damage / 18.0) + (total_strength_damage / 7.0))
+        active_factor = self.clamp01(active_count / 6.0)
+        per_hour_damage = COMBAT_COLLATERAL_BASE_DAMAGE_PER_HOUR * (0.45 + intensity * 0.85) * (0.65 + active_factor)
+        per_hour_damage = min(COMBAT_COLLATERAL_MAX_DAMAGE_PER_HOUR, per_hour_damage)
+        damage = per_hour_damage * elapsed_hours
+        if damage <= 0:
+            return False
+
+        keys = list(coverage.keys())
+        weights = [max(0.02, coverage[key]) for key in keys]
+        primary_key = random.choices(keys, weights=weights, k=1)[0]
+        changed = self.damage_building(tile, primary_key, damage, queue_repair=True)
+        if len(keys) > 1 and random.random() < 0.25 + intensity * 0.25:
+            secondary_keys = [key for key in keys if key != primary_key]
+            secondary_weights = [max(0.02, coverage[key]) for key in secondary_keys]
+            secondary_key = random.choices(secondary_keys, weights=secondary_weights, k=1)[0]
+            changed = self.damage_building(tile, secondary_key, damage * 0.45, queue_repair=True) or changed
+        return changed
+
+    def player_has_attack_helicopters(self, player):
+        return any(
+            wing.aircraft_type == "attack_helicopter" and wing.aircraft_count > 0
+            for wing in getattr(player, "air_wings", []) or []
+        )
+
+    def air_support_base_tiles(self, player):
+        tiles = []
+        for airbase in getattr(player, "airbases", []) or []:
+            if airbase.tile and airbase.tile.owner is player and self.building_health(airbase.tile, "airbase") > 0.15:
+                tiles.append(airbase.tile)
+        for tile in player.tiles:
+            if (getattr(tile, "building_coverage", {}) or {}).get("field_helipad", 0.0) > 0:
+                if self.building_health(tile, "field_helipad") > 0.15:
+                    tiles.append(tile)
+        return tiles
+
+    def has_air_support_base_near(self, player, tile, radius=FIELD_HELIPAD_OPERATIONAL_RADIUS):
+        if not player or not tile:
+            return False
+        return any(self.hex_distance(tile, base_tile) <= radius for base_tile in self.air_support_base_tiles(player))
+
+    def has_field_helipad_or_project_near(self, player, tile, radius=FIELD_HELIPAD_AUTO_SEARCH_RADIUS):
+        if not player or not tile:
+            return False
+        for owned_tile in player.tiles:
+            if (getattr(owned_tile, "building_coverage", {}) or {}).get("field_helipad", 0.0) <= 0:
+                continue
+            if self.hex_distance(tile, owned_tile) <= radius:
+                return True
+        return any(
+            project.owner is player
+            and project.tile
+            and self.hex_distance(tile, project.tile) <= radius
+            for project in self.field_helipad_projects
+        )
+
+    def battle_side_all_divisions(self, battle, side):
+        return (
+            self.battle_divisions(battle, f"active_{side}s")
+            + self.battle_divisions(battle, f"reserve_{side}s")
+            + self.battle_divisions(battle, f"recovering_{side}s")
+        )
+
+    def division_can_prepare_field_helipad(self, division, tile):
+        if not division or not tile or tile.owner is not division.owner or self.is_water_tile(tile):
+            return False
+        if self.hex_distance(division.tile, tile) > 1:
+            return False
+        supply = getattr(tile, "supply_score", 0.0)
+        return supply >= 0.30 and division.strength > 0 and division.organization > 0
+
+    def field_helipad_candidate_tiles(self, player, battle, divisions):
+        candidates = []
+        search_tiles = [battle.tile] + self.neighbor_tiles(battle.tile)
+        for tile in search_tiles:
+            if tile.owner is not player or self.is_water_tile(tile):
+                continue
+            if (getattr(tile, "building_coverage", {}) or {}).get("field_helipad", 0.0) > 0:
+                continue
+            if any(project.tile is tile for project in self.field_helipad_projects):
+                continue
+            if not any(self.division_can_prepare_field_helipad(division, tile) for division in divisions):
+                continue
+            candidates.append(tile)
+        return sorted(
+            candidates,
+            key=lambda tile: (
+                -getattr(tile, "supply_score", 0.0),
+                self.hex_distance(tile, battle.tile),
+                tile.r,
+                tile.q,
+            ),
+        )
+
+    def create_field_helipad_project(self, player, tile, battle_id=None):
+        if not player or not tile or tile.owner is not player:
+            return None
+        project = FieldHelipadProject(
+            id=self.next_field_helipad_project_id,
+            owner=player,
+            tile=tile,
+            source_battle_id=battle_id,
+        )
+        self.next_field_helipad_project_id += 1
+        self.field_helipad_projects.append(project)
+        return project
+
+    def maybe_start_field_helipad_for_battle_side(self, battle, player, divisions):
+        if not player or not divisions or not self.player_has_attack_helicopters(player):
+            return False
+        if self.has_air_support_base_near(player, battle.tile):
+            return False
+        if self.has_field_helipad_or_project_near(player, battle.tile):
+            return False
+        candidates = self.field_helipad_candidate_tiles(player, battle, divisions)
+        if not candidates:
+            return False
+        return self.create_field_helipad_project(player, candidates[0], battle.id) is not None
+
+    def maybe_start_field_helipads_for_battle(self, battle):
+        attackers = self.battle_side_all_divisions(battle, "attacker")
+        defenders = self.battle_side_all_divisions(battle, "defender")
+        changed = False
+        if battle.attacker:
+            changed = self.maybe_start_field_helipad_for_battle_side(battle, battle.attacker, attackers) or changed
+        if battle.defender:
+            changed = self.maybe_start_field_helipad_for_battle_side(battle, battle.defender, defenders) or changed
+        return changed
+
+    def update_field_helipad_projects(self, elapsed_hours):
+        if elapsed_hours <= 0:
+            return
+        for battle in list(self.battles.values()):
+            self.maybe_start_field_helipads_for_battle(battle)
+        completed = []
+        for project in list(self.field_helipad_projects):
+            if not project.tile or project.tile.owner is not project.owner:
+                completed.append(project)
+                continue
+            supply = self.clamp01(getattr(project.tile, "supply_score", 0.0))
+            if supply < 0.25:
+                continue
+            nearby_divisions = [
+                division for division in getattr(project.owner, "divisions", []) or []
+                if division.tile and self.hex_distance(division.tile, project.tile) <= 1
+            ]
+            if not nearby_divisions:
+                continue
+            project.progress_hours += elapsed_hours * (0.45 + supply * 0.55)
+            if project.progress_hours >= project.work_required_hours:
+                self.set_tile_building_coverage(
+                    project.tile,
+                    "field_helipad",
+                    max(
+                        FIELD_HELIPAD_AUTO_COVERAGE,
+                        (getattr(project.tile, "building_coverage", {}) or {}).get("field_helipad", 0.0),
+                    ),
+                    INFRASTRUCTURE_COVERAGE_LIMITS["field_helipad"][1],
+                )
+                self.refresh_tile_after_building_health_change(project.tile, project.owner)
+                completed.append(project)
+        for project in completed:
+            if project in self.field_helipad_projects:
+                self.field_helipad_projects.remove(project)
+
     def tick_battle(self, battle, elapsed_hours):
         if battle.id not in self.battles:
             return
@@ -5583,6 +6468,8 @@ class Game(arcade.View):
             org_damage, strength_damage = self.apply_combat_attack(defender, target, target_is_defending=False, elapsed_hours=elapsed_hours)
             battle.last_defender_org_damage += org_damage
             battle.last_defender_strength_damage += strength_damage
+
+        self.apply_battle_collateral_damage(battle, elapsed_hours, attackers, defenders)
 
         for division in list(self.divisions):
             if division.battle_id != battle.id:
@@ -5801,11 +6688,15 @@ class Game(arcade.View):
         self.refresh_after_ownership_change()
 
     def transfer_tile_owner(self, tile, new_owner):
+        old_owner = tile.owner if tile else None
         changed = self.set_tile_owner_only(tile, new_owner)
         if not changed:
             return False
         self.propagate_water_ownership_from_land(tile)
         self.refresh_after_ownership_change()
+        self.update_air_assets_after_tile_owner_change(tile, old_owner, new_owner)
+        if new_owner:
+            self.enqueue_tile_repairs(new_owner, tile)
         return True
 
     def cancel_selected_division_orders_on_tile(self, tile):
@@ -5903,7 +6794,7 @@ class Game(arcade.View):
                 if next_tile.owner and next_tile.owner != division.owner and self.enemy_divisions_on_tile(next_tile, division.owner):
                     self.start_or_join_battle(division, next_tile)
                     continue
-                movement_cost = max(1.0, float(getattr(next_tile, "movement_cost", 1.0) or 1.0))
+                movement_cost = self.effective_tile_movement_cost(next_tile)
                 org_ratio = self.clamp01(division.organization / max(1.0, division.max_organization))
                 speed_factor = max(DIVISION_LOW_ORG_SPEED_FLOOR, 0.35 + org_ratio * 0.65)
                 speed_factor *= self.consume_division_movement_supplies(division, elapsed_hours)
@@ -6295,6 +7186,8 @@ class Game(arcade.View):
         for tile in player.tiles:
             tile.buildings = []
             tile.building_coverage = {}
+            tile.building_health = {}
+            tile.airbase = None
             tile.population = 0.0
             tile.resource_stockpiles = self.empty_tile_stockpiles()
             tile.industry_allocation = {}
@@ -6311,6 +7204,117 @@ class Game(arcade.View):
         self.recalculate_all_supply_scores()
         for player in self.players:
             self.recalculate_player_storage(player)
+        self.tile_visual_revision += 1
+        self.invalidate_tile_visual_cache()
+
+    def reset_air_layer(self):
+        self.airbases = []
+        self.air_wings = []
+        self.air_defense_units = []
+        self.field_helipad_projects = []
+        self.next_airbase_id = 1
+        self.next_air_wing_id = 1
+        self.next_air_defense_unit_id = 1
+        self.next_field_helipad_project_id = 1
+        for player in self.players:
+            player.airbases = []
+            player.air_wings = []
+            player.air_defense_units = []
+        for tile in self.hex_grid:
+            tile.airbase = None
+
+    def airbase_site_score(self, player, tile):
+        if not tile or tile.owner is not player or self.is_water_tile(tile):
+            return -1.0
+        coverage = getattr(tile, "building_coverage", {}) or {}
+        distance = self.hex_distance(tile, player.capital_tile) if player.capital_tile else 0
+        return (
+            self.clamp01(getattr(tile, "passability", 0.0)) * 0.30
+            + coverage.get("city", 0.0) * 0.34
+            + coverage.get("industry", 0.0) * 0.22
+            + coverage.get("fuel_storage", 0.0) * 0.12
+            + coverage.get("warehouse", 0.0) * 0.08
+            - distance * 0.025
+        )
+
+    def starting_airbase_tile(self, player):
+        land_tiles = [tile for tile in player.tiles if not self.is_water_tile(tile)]
+        if not land_tiles:
+            return None
+        candidates = self.owned_tiles_within_radius(player, player.capital_tile, 4) if player.capital_tile else land_tiles
+        candidates = [tile for tile in candidates if not self.is_water_tile(tile)]
+        if not candidates:
+            candidates = land_tiles
+        return max(candidates, key=lambda tile: (self.airbase_site_score(player, tile), -tile.r, -tile.q))
+
+    def generate_starting_air_wings(self, player, airbase):
+        scale = max(0.55, min(1.20, getattr(player, "starting_scale", 1.0)))
+        for aircraft_type, base_count in STARTING_AIR_WINGS.items():
+            count = max(1, int(round(base_count * scale)))
+            self.create_air_wing(player, airbase.tile, aircraft_type, count)
+
+    def important_air_defense_tiles(self, player, airbase_tile, limit=3):
+        candidates = []
+        for tile in player.tiles:
+            if self.is_water_tile(tile):
+                continue
+            coverage = getattr(tile, "building_coverage", {}) or {}
+            border_pressure = sum(
+                1 for neighbor in self.neighbor_tiles(tile)
+                if neighbor.owner is not None and neighbor.owner is not player and not self.is_water_tile(neighbor)
+            )
+            score = (
+                coverage.get("city", 0.0) * 0.50
+                + coverage.get("industry", 0.0) * 0.28
+                + coverage.get("supply_depot", 0.0) * 0.22
+                + coverage.get("airbase", 0.0) * 0.30
+                + border_pressure * 0.18
+            )
+            if tile is player.capital_tile:
+                score += 0.45
+            if tile is airbase_tile:
+                score += 0.25
+            if score > 0:
+                candidates.append((score, tile))
+        candidates.sort(key=lambda item: (-item[0], item[1].r, item[1].q))
+        result = []
+        seen = set()
+        for _score, tile in candidates:
+            key = self.tile_key(tile)
+            if key in seen:
+                continue
+            result.append(tile)
+            seen.add(key)
+            if len(result) >= limit:
+                break
+        return result
+
+    def generate_starting_air_defense(self, player, airbase):
+        if player.capital_tile and not self.is_water_tile(player.capital_tile):
+            self.create_air_defense_unit(player, player.capital_tile, "medium_range_sam")
+            self.create_air_defense_unit(player, player.capital_tile, "radar_unit")
+        if airbase and airbase.tile:
+            self.create_air_defense_unit(player, airbase.tile, "short_range_aa")
+        important_tiles = self.important_air_defense_tiles(player, airbase.tile if airbase else None, limit=3)
+        for index, tile in enumerate(important_tiles):
+            if tile is player.capital_tile or (airbase and tile is airbase.tile):
+                continue
+            self.create_air_defense_unit(player, tile, "short_range_aa" if index == 0 else "manpads_team")
+        if getattr(player, "starting_scale", 1.0) >= 1.85 and player.capital_tile:
+            self.create_air_defense_unit(player, player.capital_tile, "long_range_sam")
+
+    def generate_starting_air_layer_for_all_states(self):
+        self.reset_air_layer()
+        for player in self.players:
+            airbase_tile = self.starting_airbase_tile(player)
+            airbase = self.create_airbase(player, airbase_tile) if airbase_tile else None
+            if airbase:
+                self.generate_starting_air_wings(player, airbase)
+            self.generate_starting_air_defense(player, airbase)
+        self.recalculate_all_supply_scores()
+        for player in self.players:
+            self.recalculate_player_storage(player)
+            self.recalculate_monthly_balance(player)
         self.tile_visual_revision += 1
         self.invalidate_tile_visual_cache()
 
@@ -6633,6 +7637,7 @@ class Game(arcade.View):
             self.apply_starting_profile(player)
 
         self.generate_starting_infrastructure_for_all_states()
+        self.generate_starting_air_layer_for_all_states()
 
         for tile in self.hex_grid:
             tile.color = self.get_tile_map_color(tile)
@@ -8175,6 +9180,87 @@ class Game(arcade.View):
             arcade.draw_circle_outline(tile.center_x, tile.center_y, 22, player.border_color, 4)
             arcade.draw_circle_filled(tile.center_x, tile.center_y, 8, player.border_color)
 
+    def visible_tile_key_set(self):
+        return {self.tile_key(tile) for tile in self.visible_tiles}
+
+    def draw_airbase_icon(self, tile, owner_color):
+        x, y = tile.center_x, tile.center_y + 12
+        arcade.draw_lbwh_rectangle_filled(x - 18, y - 4, 36, 8, (18, 24, 31, 225))
+        arcade.draw_lbwh_rectangle_outline(x - 18, y - 4, 36, 8, owner_color, 2)
+        arcade.draw_line(x - 12, y, x + 12, y, (228, 238, 248), 1)
+
+    def draw_field_helipad_icon(self, tile, owner_color, progress=None):
+        x, y = tile.center_x + 16, tile.center_y - 12
+        arcade.draw_circle_filled(x, y, 9, (18, 24, 31, 220))
+        arcade.draw_circle_outline(x, y, 10, owner_color, 2)
+        arcade.draw_line(x - 4, y - 5, x - 4, y + 5, (230, 238, 246), 1)
+        arcade.draw_line(x + 4, y - 5, x + 4, y + 5, (230, 238, 246), 1)
+        arcade.draw_line(x - 4, y, x + 4, y, (230, 238, 246), 1)
+        if progress is not None:
+            progress = self.clamp01(progress)
+            arcade.draw_line(x - 9, y - 13, x - 9 + 18 * progress, y - 13, (170, 224, 144), 2)
+
+    def draw_air_defense_icon(self, unit):
+        if not unit or not unit.tile:
+            return
+        color_by_class = {
+            "manpads_team": (180, 224, 128),
+            "short_range_aa": (124, 200, 220),
+            "medium_range_sam": (236, 204, 112),
+            "long_range_sam": (238, 150, 112),
+            "radar_unit": (178, 164, 238),
+        }
+        color = color_by_class.get(unit.unit_class, (210, 220, 230))
+        x, y = unit.tile.center_x - 17, unit.tile.center_y - 12
+        arcade.draw_circle_filled(x, y, 8, (18, 24, 31, 225))
+        arcade.draw_circle_outline(x, y, 9, color, 2)
+        if unit.unit_class == "radar_unit":
+            arcade.draw_line(x, y, x + 7, y + 4, color, 2)
+            arcade.draw_circle_outline(x, y, 13, (*color, 130), 1)
+        else:
+            arcade.draw_line(x, y + 6, x - 6, y - 5, color, 2)
+            arcade.draw_line(x - 6, y - 5, x + 6, y - 5, color, 2)
+            arcade.draw_line(x + 6, y - 5, x, y + 6, color, 2)
+
+    def draw_selected_air_defense_ranges(self):
+        tile = self.selected_tile
+        if not tile:
+            return
+        units = self.air_defense_units_on_tile(tile)
+        for unit in units:
+            if unit.fire_range_cells > 0:
+                radius = unit.fire_range_cells * HEX_WID
+                arcade.draw_circle_outline(unit.tile.center_x, unit.tile.center_y, radius, (238, 170, 104, 95), 2)
+            if unit.radar_active and unit.radar_range_cells > 0:
+                radius = unit.radar_range_cells * HEX_WID
+                arcade.draw_circle_outline(unit.tile.center_x, unit.tile.center_y, radius, (122, 186, 238, 80), 1)
+
+    def draw_air_assets(self):
+        visible_keys = self.visible_tile_key_set()
+        self.draw_selected_air_defense_ranges()
+        for airbase in self.airbases:
+            tile = airbase.tile
+            if not tile or self.tile_key(tile) not in visible_keys:
+                continue
+            owner_color = tuple((airbase.owner.border_color if airbase.owner else (190, 200, 210))[:3])
+            self.draw_airbase_icon(tile, owner_color)
+        for tile in self.visible_tiles:
+            coverage = (getattr(tile, "building_coverage", {}) or {}).get("field_helipad", 0.0)
+            if coverage <= 0:
+                continue
+            owner_color = tuple((tile.owner.border_color if tile.owner else (180, 190, 200))[:3])
+            self.draw_field_helipad_icon(tile, owner_color)
+        for project in self.field_helipad_projects:
+            tile = project.tile
+            if not tile or self.tile_key(tile) not in visible_keys:
+                continue
+            owner_color = tuple((project.owner.border_color if project.owner else (180, 190, 200))[:3])
+            progress = project.progress_hours / max(1.0, project.work_required_hours)
+            self.draw_field_helipad_icon(tile, owner_color, progress=progress)
+        for unit in self.air_defense_units:
+            if unit.tile and self.tile_key(unit.tile) in visible_keys:
+                self.draw_air_defense_icon(unit)
+
     def setup_premium_shader(self):
         if not self.window:
             return
@@ -8302,6 +9388,7 @@ class Game(arcade.View):
         self.draw_state_borders()
         if self.map_layer == "political":
             self.draw_capital_markers()
+        self.draw_air_assets()
         if self.selection_border.visible:
             self.selection_border_sprite_list.draw()
         self.draw_army_plans()
@@ -8424,7 +9511,9 @@ class Game(arcade.View):
         label.y = y
 
     def begin_trade_text_frame(self):
-        self.trade_text_pool_cursor = 0
+        # Trade text is routed through the shared UI batch. Keeping this
+        # wrapper preserves the trade panel call sites without per-label draws.
+        pass
 
     def draw_trade_text(
         self,
@@ -8436,42 +9525,18 @@ class Game(arcade.View):
         anchor_x="left",
         anchor_y="baseline",
     ):
-        index = self.trade_text_pool_cursor
-        self.trade_text_pool_cursor += 1
-        if index >= len(self.trade_text_pool):
-            self.trade_text_pool.append(
-                arcade.Text(
-                    "",
-                    0,
-                    0,
-                    color,
-                    font_size,
-                    anchor_x=anchor_x,
-                    anchor_y=anchor_y,
-                )
-            )
-        label = self.trade_text_pool[index]
-        new_text = str(text)
-        if label.text != new_text:
-            label.text = new_text
-        if label.font_size != font_size:
-            label.font_size = font_size
-        if label.anchor_x != anchor_x:
-            label.anchor_x = anchor_x
-        if label.anchor_y != anchor_y:
-            label.anchor_y = anchor_y
-        if label.color != color:
-            label.color = color
-        if label.x != x:
-            label.x = x
-        if label.y != y:
-            label.y = y
-        label.draw()
+        self.draw_ui_text(
+            text,
+            x,
+            y,
+            color,
+            font_size,
+            anchor_x=anchor_x,
+            anchor_y=anchor_y,
+        )
 
     def clear_unused_trade_text(self):
-        for index in range(self.trade_text_pool_cursor, len(self.trade_text_pool)):
-            if self.trade_text_pool[index].text:
-                self.trade_text_pool[index].text = ""
+        pass
 
     def begin_tooltip_text_frame(self):
         self.tooltip_text_pool_cursor = 0
@@ -9780,6 +10845,8 @@ class Game(arcade.View):
         building_key = cost.get("building") or project.get("building")
         tile = project.get("tile")
         label = BUILDING_DISPLAY_NAMES.get(building_key, building_key or "--")
+        if project.get("project_type") == "repair":
+            label = f"Ремонт: {label}"
         if tile:
             return f"{label} {tile.q}:{tile.r}"
         return label
@@ -9789,7 +10856,7 @@ class Game(arcade.View):
         cost = project.get("cost", {})
         tile = project.get("tile")
         building_key = cost.get("building") or project.get("building")
-        return id(tile), building_key
+        return project.get("project_type", "build"), id(tile), building_key
 
     def construction_queue_groups(self, rows=None):
         rows = self.construction_queue_rows() if rows is None else rows
@@ -9818,8 +10885,14 @@ class Game(arcade.View):
         projects = group["projects"]
         first_cost = projects[0].get("cost", {})
         last_cost = projects[-1].get("cost", {})
+        if projects[0].get("project_type") == "repair":
+            from_health = first_cost.get("from_health", projects[0].get("from_health", 1.0))
+            if projects[0].get("progress", 0.0) > 0:
+                target = first_cost.get("target_health", 1.0)
+                from_health += (target - from_health) * max(0.0, min(1.0, projects[0].get("progress", 0.0)))
+            return f"{from_health:.0%}->100%"
         from_coverage = first_cost.get("from_coverage", 0.0)
-        if group["start_index"] == 0 and projects[0].get("progress", 0.0) > 0:
+        if projects[0].get("progress", 0.0) > 0:
             target = first_cost.get("target_coverage", from_coverage)
             from_coverage += (target - from_coverage) * max(0.0, min(1.0, projects[0].get("progress", 0.0)))
         target_coverage = last_cost.get("target_coverage", from_coverage)
@@ -9844,11 +10917,16 @@ class Game(arcade.View):
     def active_construction_detail_lines(self, player):
         if not player or not player.construction_queue:
             return []
-        project = player.construction_queue[0]
+        active_projects = self.active_construction_projects(player)
+        project = active_projects[0] if active_projects else player.construction_queue[0]
+        build_power = self.build_power(player) / max(1, len(active_projects)) if active_projects else None
+        if build_power is not None:
+            build_power *= self.construction_project_speed_multiplier(project)
         status_info = self.evaluate_construction_project_status(
             player,
             project,
             month_fraction=CONSTRUCTION_STATUS_CHECK_MONTH_FRACTION,
+            build_power=build_power,
         )
         status = status_info["status"]
         lines = [
@@ -9863,8 +10941,16 @@ class Game(arcade.View):
             lines.append("Нет строительной мощности")
         elif status == "paused":
             lines.append("Стройка остановлена вручную")
-        elif status == "building":
-            monthly_delta = self.construction_project_progress_delta(player, project, month_fraction=1.0)
+        elif self.construction_project_is_active_status(status):
+            speed_note = self.construction_project_speed_note(project)
+            if speed_note:
+                lines.append(speed_note)
+            monthly_delta = self.construction_project_progress_delta(
+                player,
+                project,
+                month_fraction=1.0,
+                build_power=build_power,
+            )
             monthly_needs = self.construction_project_resource_needs(project, monthly_delta)
             consumption = self.format_resource_amount_pairs(monthly_needs, limit=2)
             if consumption != "--":
@@ -9983,11 +11069,12 @@ class Game(arcade.View):
         layout = self.construction_content_layout(rows)
         queue_rects = layout["queue_rects"]
         visible_count = len(queue_rects)
+        active_project_ids = {id(project) for project in self.active_construction_projects(self.human_player)}
         if groups:
             for index, group in enumerate(groups[:visible_count]):
                 project = group["projects"][0]
                 x, y, width, height = queue_rects[index]
-                active = group["start_index"] == 0
+                active = any(id(group_project) in active_project_ids for group_project in group["projects"])
                 fill = (46, 70, 58, 190) if active else (30, 40, 52, 160)
                 arcade.draw_lbwh_rectangle_filled(x, y, width, height, fill)
                 arcade.draw_lbwh_rectangle_outline(x, y, width, height, (82, 108, 132), 1)
@@ -10044,7 +11131,7 @@ class Game(arcade.View):
                 color = (210, 222, 234)
                 if line.startswith("Не хватает") or line.startswith("Нет "):
                     color = (236, 178, 154)
-                elif line.startswith("Статус: Строится"):
+                elif line.startswith("Статус: Строится") or line.startswith("Статус: Ремонт"):
                     color = (190, 230, 174)
                 self.draw_ui_text(
                     line,
@@ -10065,7 +11152,7 @@ class Game(arcade.View):
             12,
         )
         self.draw_ui_text(
-            "Чем больше промзон, городов и сел, тем быстрее идет первый проект в очереди.",
+            f"До {CONSTRUCTION_PARALLEL_PROJECTS} проектов делят строймощность между собой.",
             panel_x + 28,
             speed_y - 44,
             (160, 174, 190),
@@ -10574,10 +11661,14 @@ class Game(arcade.View):
         y -= 8
         y = panel_section("Строения", y)
         coverage, buildings = self.building_coverage_rows_for_tiles(tiles)
+        damage_by_building = self.building_damage_rows_for_tiles(tiles)
         if coverage:
             for key, value in sorted(coverage.items(), key=lambda item: item[0]):
                 label = BUILDING_DISPLAY_NAMES.get(key, key)
                 value_text = self.format_tile_coverage_total(value) if multi_selected else f"{value:.0%}"
+                damage = damage_by_building.get(key, 0.0)
+                if damage > 0.001:
+                    value_text += f" | повр. {damage:.0%}"
                 panel_text(f"{label}: {value_text}", panel_x + 16, y, (224, 234, 244), 11)
                 y -= 16
         elif buildings:
@@ -10587,6 +11678,59 @@ class Game(arcade.View):
         else:
             panel_text("Пока нет", panel_x + 16, y, (180, 192, 205), 11)
             y -= 16
+
+        airbases = [self.airbase_on_tile(selected) for selected in tiles if self.airbase_on_tile(selected)]
+        wing_counts = self.air_wing_counts_by_type_for_tiles(tiles)
+        air_defense_counts = self.air_defense_counts_by_class_for_tiles(tiles)
+        helipad_projects = [
+            project for selected in tiles
+            for project in self.field_helipad_projects_on_tile(selected)
+        ]
+        has_aviation_info = bool(airbases or wing_counts or air_defense_counts or helipad_projects)
+        if has_aviation_info:
+            y -= 8
+            y = panel_section("Авиация/ПВО", y)
+            if airbases:
+                if multi_selected:
+                    panel_text(f"Аэродромы: {len(airbases)}", panel_x + 16, y, (224, 234, 244), 11)
+                else:
+                    airbase = airbases[0]
+                    health = self.building_health(airbase.tile, "airbase")
+                    panel_text(
+                        f"Аэродром: ВПП {airbase.runway_level}, емк. {airbase.aircraft_capacity}/{airbase.helicopter_capacity}, сост. {health:.0%}",
+                        panel_x + 16,
+                        y,
+                        (224, 234, 244),
+                        11,
+                    )
+                y -= 16
+            helipad_coverage = sum((getattr(selected, "building_coverage", {}) or {}).get("field_helipad", 0.0) for selected in tiles)
+            if helipad_coverage > 0:
+                panel_text(f"Полевые площадки: {helipad_coverage:.0%}", panel_x + 16, y, (206, 224, 210), 11)
+                y -= 16
+            for project in helipad_projects:
+                progress = project.progress_hours / max(1.0, project.work_required_hours)
+                panel_text(f"Площадка строится: {progress:.0%}", panel_x + 16, y, (190, 230, 174), 11)
+                y -= 16
+            for aircraft_type, count in sorted(wing_counts.items()):
+                aircraft_name = AIRCRAFT_TYPES.get(aircraft_type, {}).get("name", aircraft_type)
+                panel_text(f"{aircraft_name}: {count}", panel_x + 16, y, (206, 218, 230), 11)
+                y -= 16
+            for unit_class, count in sorted(air_defense_counts.items()):
+                unit_name = AIR_DEFENSE_CLASSES.get(unit_class, {}).get("name", unit_class)
+                label = f"{unit_name}: {count}"
+                if not multi_selected:
+                    unit = next(
+                        (
+                            candidate for candidate in self.air_defense_units_on_tile(tile)
+                            if candidate.unit_class == unit_class
+                        ),
+                        None,
+                    )
+                    if unit:
+                        label += f" | огонь {unit.fire_range_cells}, РЛС {unit.radar_range_cells}"
+                panel_text(label, panel_x + 16, y, (224, 214, 184), 11)
+                y -= 16
 
         if self.selected_tile_has_industry():
             y -= 8
@@ -11784,12 +12928,6 @@ class Game(arcade.View):
             ),
         )
 
-    def enemy_divisions_on_tile(self, owner, tile):
-        return [
-            division for division in self.divisions
-            if division.tile is tile and division.owner is not owner
-        ]
-
     def army_division_counts_by_tile_key(self, divisions):
         counts = {}
         for division in divisions:
@@ -11832,8 +12970,8 @@ class Game(arcade.View):
                 "source_key": source_key,
                 "front_key": front_key,
                 "target_key": self.tile_key(step_target),
-                "target_has_enemy": bool(self.enemy_divisions_on_tile(army.owner, step_target)),
-                "enemy_count": len(self.enemy_divisions_on_tile(army.owner, step_target)),
+                "target_has_enemy": bool(self.enemy_divisions_on_tile(step_target, army.owner)),
+                "enemy_count": len(self.enemy_divisions_on_tile(step_target, army.owner)),
             })
 
         if not raw_orders:
@@ -13130,6 +14268,7 @@ class Game(arcade.View):
                 self.run_population_tick(player, elapsed_hours)
             self.update_divisions(elapsed_hours)
             self.update_battles(elapsed_hours)
+            self.update_field_helipad_projects(elapsed_hours)
             self.update_army_plans(elapsed_hours)
             self.update_economy_month_history(snapshot.current_time)
             self.last_production_tick_count = snapshot.tick_count
