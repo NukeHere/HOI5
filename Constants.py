@@ -606,7 +606,7 @@ AIRCRAFT_TYPES = {
         "allowed_missions": ["cas", "strategic_strike"],
     },
     "cas_aircraft": {
-        "name": "Штурмовик CAS",
+        "name": "Штурмовик",
         "category": "cas_aircraft",
         "is_helicopter": False,
         "range": 5,
