@@ -3384,6 +3384,73 @@ class Game(arcade.View):
         progress = 1.0 - salvo.remaining_distance / max(0.001, salvo.launch_distance)
         salvo.current_tile = self.tile_between(salvo.launch_tile, target_tile, progress) or target_tile
 
+    def air_wing_outgoing_guided_salvos(self, wing):
+        if not wing:
+            return []
+        result = []
+        for salvo in getattr(self, "air_salvos", []) or []:
+            if getattr(salvo, "source_air_wing_id", None) != wing.id or getattr(salvo, "count", 0) <= 0:
+                continue
+            munition_type = self.munition_data(salvo.munition_type).get("type")
+            if AIR_EMERGENCY_DEFENSE_GUIDANCE_LOSS_BY_TYPE.get(munition_type, 0.0) > 0:
+                result.append(salvo)
+        return result
+
+    def air_wing_emergency_defense_guidance_penalty(self, wing):
+        disrupted = 0
+        for outgoing in self.air_wing_outgoing_guided_salvos(wing):
+            munition_type = self.munition_data(outgoing.munition_type).get("type")
+            loss_ratio = self.clamp01(AIR_EMERGENCY_DEFENSE_GUIDANCE_LOSS_BY_TYPE.get(munition_type, 0.0))
+            if loss_ratio <= 0:
+                continue
+            old_count = max(0, int(outgoing.count))
+            new_count = max(0, int(old_count * (1.0 - loss_ratio) + 0.5))
+            lost = max(0, old_count - new_count)
+            if lost <= 0 and old_count > 0 and loss_ratio >= 0.45:
+                lost = 1
+                new_count = max(0, old_count - 1)
+            outgoing.count = new_count
+            disrupted += lost
+        return disrupted
+
+    def air_wing_should_emergency_defend(self, wing, salvo, target_type, engaged_count, hit_chance):
+        if not wing or not salvo or engaged_count <= 0 or hit_chance <= 0:
+            return False
+        if getattr(wing, "aborted_hours", 0.0) > 0 or getattr(wing, "defensive_hours", 0.0) > 0:
+            return False
+        if getattr(wing, "mission_state", "") in {"defensive", "aborted", "returning"}:
+            return False
+        expected_hits = engaged_count * self.clamp01(hit_chance)
+        risk_policy = getattr(wing, "risk_policy", "normal")
+        threshold = AIR_EMERGENCY_DEFENSE_EXPECTED_HIT_THRESHOLD_BY_RISK.get(risk_policy, 0.34)
+        outgoing_guided = self.air_wing_outgoing_guided_salvos(wing)
+        if outgoing_guided and getattr(wing, "mission_state", "") == "attack_run":
+            if risk_policy == "aggressive":
+                threshold *= 1.35
+            elif risk_policy == "all_out":
+                threshold *= 1.75
+            elif risk_policy == "normal":
+                threshold *= 1.15
+        if self.aircraft_type_is_helicopter(target_type):
+            threshold *= 0.85
+        return expected_hits >= threshold
+
+    def apply_air_wing_emergency_defense_against_salvo(self, wing, salvo, target_type, engaged_count, hit_chance):
+        if not self.air_wing_should_emergency_defend(wing, salvo, target_type, engaged_count, hit_chance):
+            return hit_chance, False, 0
+        defensive_mult = (
+            AIR_EMERGENCY_DEFENSE_HELICOPTER_HIT_CHANCE_MULT
+            if self.aircraft_type_is_helicopter(target_type)
+            else AIR_EMERGENCY_DEFENSE_HIT_CHANCE_MULT
+        )
+        disrupted = self.air_wing_emergency_defense_guidance_penalty(wing)
+        wing.defensive_hours = max(getattr(wing, "defensive_hours", 0.0), AIR_CARRIER_DEFENSIVE_COOLDOWN_HOURS)
+        summary = "Экстренное уклонение"
+        if disrupted:
+            summary += f": сорвано наведение {disrupted}"
+        self.set_air_wing_mission_state(wing, "defensive", salvo.current_tile or salvo.target_tile, summary)
+        return self.clamp01(hit_chance * defensive_mult), True, disrupted
+
     def resolve_air_attack_salvo_impact(self, salvo):
         if not salvo or salvo.count <= 0:
             return False
@@ -3410,7 +3477,14 @@ class Game(arcade.View):
             target_type = salvo.target_aircraft_type or target_wing.aircraft_type
             target_sorties = salvo.target_sorties or self.air_wing_ready_count_for_type(target_wing, target_type)
             engaged_count = min(salvo.count, max(0, int(target_sorties)))
-            hits = min(engaged_count, int(engaged_count * self.clamp01(salvo.hit_chance) + 0.5))
+            terminal_hit_chance, emergency_defended, disrupted = self.apply_air_wing_emergency_defense_against_salvo(
+                target_wing,
+                salvo,
+                target_type,
+                engaged_count,
+                salvo.hit_chance,
+            )
+            hits = min(engaged_count, int(engaged_count * self.clamp01(terminal_hit_chance) + 0.5))
             destroyed, damaged, aborted = self.apply_air_wing_air_defense_hits(target_wing, target_type, hits)
             if hits > 0:
                 target_wing.aborted_hours = max(getattr(target_wing, "aborted_hours", 0.0), AIR_CARRIER_ABORTED_COOLDOWN_HOURS)
@@ -3420,8 +3494,16 @@ class Game(arcade.View):
                 else:
                     summary = "УРВВ сорвали заход"
                 self.set_air_wing_mission_state(target_wing, "aborted", salvo.current_tile or salvo.target_tile, summary)
+            elif emergency_defended:
+                summary = "Экстренное уклонение спасло крыло"
+                if disrupted:
+                    summary += f", сорвано наведение {disrupted}"
+                self.set_air_wing_mission_state(target_wing, "defensive", salvo.current_tile or salvo.target_tile, summary)
             if launcher:
-                launcher.last_air_combat_summary = f"УРВВ попаданий {hits}/{salvo.original_count}"
+                if emergency_defended:
+                    launcher.last_air_combat_summary = f"УРВВ: цель экстренно уклонилась, попаданий {hits}/{salvo.original_count}"
+                else:
+                    launcher.last_air_combat_summary = f"УРВВ попаданий {hits}/{salvo.original_count}"
                 self.set_air_wing_mission_state(launcher, "egress", salvo.current_tile or salvo.target_tile, launcher.last_air_combat_summary)
             return hits > 0
 

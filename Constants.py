@@ -504,6 +504,23 @@ AIR_CARRIER_ABORTED_COOLDOWN_HOURS = 6.0
 AIR_CARRIER_DEFENSIVE_COOLDOWN_HOURS = 2.0
 AIR_CARRIER_DAMAGE_FROM_HIT_CHANCE = 0.58
 AIR_CARRIER_DESTROY_FROM_HIT_CHANCE = 0.32
+AIR_EMERGENCY_DEFENSE_HIT_CHANCE_MULT = 0.74
+AIR_EMERGENCY_DEFENSE_HELICOPTER_HIT_CHANCE_MULT = 0.80
+AIR_EMERGENCY_DEFENSE_EXPECTED_HIT_THRESHOLD_BY_RISK = {
+    "cautious": 0.16,
+    "normal": 0.34,
+    "aggressive": 0.56,
+    "all_out": 0.82,
+}
+AIR_EMERGENCY_DEFENSE_GUIDANCE_LOSS_BY_TYPE = {
+    "guided_missile": 0.25,
+    "guided_bomb": 0.55,
+    "glide_bomb": 0.45,
+    "cruise_missile": 0.12,
+    "ballistic_missile": 0.00,
+    "heavy_strategic_missile": 0.00,
+    "bunker_buster": 0.35,
+}
 AIR_DEFENSE_IMMOBILE_CLASSES = {"missile_silo", "strategic_fixed_radar"}
 FIELD_HELIPAD_HELICOPTER_CAPACITY_PER_COVERAGE = 80
 STARTING_AIRCRAFT_STOCKPILE_RATIO = 0.25
