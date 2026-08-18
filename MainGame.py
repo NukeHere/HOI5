@@ -218,6 +218,79 @@ class GameTimeSnapshot:
 
 
 @dataclass
+class SimulationCommand:
+    command_type: str
+    player_id: int | None = None
+    payload: dict = field(default_factory=dict)
+    client_id: str = "local"
+    issued_at_tick: int = 0
+    sequence: int = 0
+
+
+class _PerformanceTimer:
+    def __init__(self, profiler, name):
+        self.profiler = profiler
+        self.name = name
+        self.started_at = 0.0
+
+    def __enter__(self):
+        self.started_at = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.profiler.add_sample(self.name, time.perf_counter() - self.started_at)
+        return False
+
+
+class PerformanceProfiler:
+    def __init__(self, smoothing=0.18):
+        self.smoothing = smoothing
+        self.enabled = True
+        self.visible = False
+        self.current_phase = None
+        self.current_samples = {}
+        self.latest = {}
+        self.average = {}
+        self.peak = {}
+
+    def begin_phase(self, phase):
+        if not self.enabled:
+            return
+        self.current_phase = phase
+        self.current_samples = {}
+
+    def end_phase(self, phase):
+        if not self.enabled or self.current_phase != phase:
+            return
+        phase_samples = dict(self.current_samples)
+        self.latest[phase] = phase_samples
+        average_samples = self.average.setdefault(phase, {})
+        peak_samples = self.peak.setdefault(phase, {})
+        for name, elapsed in phase_samples.items():
+            previous = average_samples.get(name)
+            average_samples[name] = elapsed if previous is None else previous + (elapsed - previous) * self.smoothing
+            peak_samples[name] = max(peak_samples.get(name, 0.0), elapsed)
+        self.current_phase = None
+        self.current_samples = {}
+
+    def measure(self, name):
+        if not self.enabled:
+            return _PerformanceTimer(self, name)
+        return _PerformanceTimer(self, name)
+
+    def add_sample(self, name, elapsed):
+        if not self.enabled or self.current_phase is None:
+            return
+        self.current_samples[name] = self.current_samples.get(name, 0.0) + elapsed
+
+    def average_ms(self, phase, name):
+        return self.average.get(phase, {}).get(name, 0.0) * 1000.0
+
+    def latest_ms(self, phase, name):
+        return self.latest.get(phase, {}).get(name, 0.0) * 1000.0
+
+
+@dataclass
 class MarketState:
     base_prices: dict = field(default_factory=lambda: dict(TRADE_BASE_PRICES))
     current_prices: dict = field(default_factory=dict)
@@ -547,6 +620,9 @@ class AirWing:
     risk_policy: str = "normal"
     sortie_intensity: float = 0.5
     sortie_cooldown_hours: float = 0.0
+    mission_cooldowns: dict = field(default_factory=dict)
+    mission_target_cooldowns: dict = field(default_factory=dict)
+    last_mission_target_keys: dict = field(default_factory=dict)
     mission_state: str = "returning"
     mission_state_hours: float = 0.0
     mission_target_tile_key: object | None = None
@@ -584,6 +660,12 @@ class AirWing:
             self.operation_area_tile_keys = []
         if self.mission_state not in {"approach", "attack_run", "defensive", "egress", "returning", "aborted"}:
             self.mission_state = "returning"
+        if self.mission_cooldowns is None:
+            self.mission_cooldowns = {}
+        if self.mission_target_cooldowns is None:
+            self.mission_target_cooldowns = {}
+        if self.last_mission_target_keys is None:
+            self.last_mission_target_keys = {}
         self.mission_state_hours = max(0.0, float(self.mission_state_hours or 0.0))
         self.defensive_hours = max(0.0, float(self.defensive_hours or 0.0))
         self.aborted_hours = max(0.0, float(self.aborted_hours or 0.0))
@@ -663,6 +745,7 @@ class AirSalvo:
     launch_tile: object
     source_air_wing_id: int | None = None
     source_unit_id: int | None = None
+    mission_type: str | None = None
     target_unit_id: int | None = None
     target_object_type: str | None = None
     launch_distance: float = 0.0
@@ -708,6 +791,17 @@ class AirAttackSalvo:
 
 
 @dataclass
+class AirImpactDecal:
+    tile: object
+    x: float
+    y: float
+    age: float = 0.0
+    duration: float = AIR_IMPACT_DECAL_DURATION
+    size: float = 1.0
+    color: tuple = (255, 184, 86)
+
+
+@dataclass
 class AirCombatEstimate:
     detection_chance: float = 0.0
     tracking_chance: float = 0.0
@@ -743,6 +837,9 @@ class LocalSimulationServer:
         self.accumulator = 0.0
         self.market_state = MarketState()
         self.next_market_execution_time = self.next_weekly_market_time(self.current_time)
+        self.pending_commands = deque()
+        self.command_handlers = {}
+        self.next_command_sequence = 1
 
     @property
     def hours_per_tick(self):
@@ -761,6 +858,7 @@ class LocalSimulationServer:
         return execution_time
 
     def update(self, delta_time):
+        self.process_pending_commands()
         if self.paused:
             return
 
@@ -786,6 +884,42 @@ class LocalSimulationServer:
         count = self.pending_market_ticks
         self.pending_market_ticks = 0
         return count
+
+    def register_command_handler(self, command_type, handler):
+        self.command_handlers[command_type] = handler
+
+    def submit_command(self, command):
+        if not isinstance(command, SimulationCommand):
+            command = SimulationCommand(**command)
+        command.issued_at_tick = self.tick_count
+        command.sequence = self.next_command_sequence
+        self.next_command_sequence += 1
+        self.pending_commands.append(command)
+        return command.sequence
+
+    def process_pending_commands(self, max_commands=None):
+        processed = 0
+        while self.pending_commands and (max_commands is None or processed < max_commands):
+            command = self.pending_commands.popleft()
+            self.apply_command(command)
+            processed += 1
+        return processed
+
+    def apply_command(self, command):
+        if command.command_type == "toggle_pause":
+            self.toggle_pause()
+            return True
+        if command.command_type == "change_speed":
+            self.change_speed(command.payload.get("delta", 0))
+            return True
+        if command.command_type == "set_speed":
+            self.set_speed_level(command.payload.get("speed_level", self.speed_level))
+            return True
+
+        handler = self.command_handlers.get(command.command_type)
+        if handler:
+            return handler(command)
+        return False
 
     def set_paused(self, paused):
         self.paused = paused
@@ -820,13 +954,21 @@ class LocalSimulationClient:
     def sync_from_server(self):
         self.snapshot = self.server.snapshot()
 
-    def request_toggle_pause(self):
-        self.server.toggle_pause()
+    def request_command(self, command_type, player_id=None, payload=None, client_id="local"):
+        self.server.submit_command(SimulationCommand(
+            command_type=command_type,
+            player_id=player_id,
+            payload=payload or {},
+            client_id=client_id,
+        ))
+        self.server.process_pending_commands()
         self.sync_from_server()
 
+    def request_toggle_pause(self):
+        self.request_command("toggle_pause")
+
     def request_speed_change(self, delta):
-        self.server.change_speed(delta)
-        self.sync_from_server()
+        self.request_command("change_speed", payload={"delta": delta})
 
 
 
@@ -1121,6 +1263,7 @@ class Game(arcade.View):
         self.air_defense_units = []
         self.air_salvos = []
         self.air_attack_salvos = []
+        self.air_impact_decals = []
         self.field_helipad_projects = []
         self.next_division_id = 1
         self.next_army_id = 1
@@ -1231,6 +1374,7 @@ class Game(arcade.View):
         self.simulation_server = LocalSimulationServer()
         self.simulation_client = LocalSimulationClient(self.simulation_server)
         self.last_production_tick_count = 0
+        self.profiler = PerformanceProfiler()
         self.time_panel_rect = (0, 0, 0, 0)
         self.time_buttons = []
         self.hovered_time_button = None
@@ -1242,6 +1386,11 @@ class Game(arcade.View):
         self.tooltip_text_pool = []
         self.tooltip_text_pool_cursor = 0
         self.tooltip_text_pool_max_used = 0
+        self.performance_overlay_batch = Batch()
+        self.performance_overlay_texts = []
+        self.performance_overlay_rows = []
+        self.performance_overlay_last_update = 0.0
+        self.performance_overlay_update_interval = 0.25
         self.map_layer = "terrain"
         self.map_layer_menu_open = False
         self.map_layer_menu_progress = 0.0
@@ -1501,6 +1650,44 @@ class Game(arcade.View):
         allowed = data.get("allowed_munitions", [])
         return allowed[0] if allowed else None
 
+    def air_wing_mission_loadout(self, aircraft_type, mission_type, target_tile=None):
+        data = self.aircraft_type_data(aircraft_type)
+        allowed = list(data.get("allowed_munitions", []) or [])
+        if not allowed:
+            return None
+        preferences = {
+            "cas": [
+                "light_guided_missile",
+                "unguided_rockets",
+                "guided_bomb",
+                "glide_bomb",
+            ],
+            "strategic_strike": [
+                "tactical_cruise_missile",
+                "small_ballistic_missile",
+                "heavy_strategic_missile",
+                "glide_bomb",
+                "guided_bomb",
+                "bunker_buster",
+                "light_guided_missile",
+            ],
+            "intercept": [
+                AIR_WING_INTERCEPTOR_LOADOUTS.get(aircraft_type, {}).get("munition_id"),
+            ],
+            "air_superiority": [
+                AIR_WING_INTERCEPTOR_LOADOUTS.get(aircraft_type, {}).get("munition_id"),
+            ],
+            "patrol": [
+                AIR_WING_INTERCEPTOR_LOADOUTS.get(aircraft_type, {}).get("munition_id"),
+            ],
+        }
+        for munition_id in preferences.get(mission_type, []):
+            if munition_id and munition_id in allowed:
+                return munition_id
+            if munition_id and mission_type in {"intercept", "air_superiority", "patrol"}:
+                return munition_id
+        return self.default_air_wing_loadout(aircraft_type)
+
     def aircraft_type_is_helicopter(self, aircraft_type):
         return bool(self.aircraft_type_data(aircraft_type).get("is_helicopter", False))
 
@@ -1578,13 +1765,43 @@ class Game(arcade.View):
         if not composition:
             return getattr(wing, "aircraft_type", None)
         if mission:
-            candidates = [
-                (count, aircraft_type)
-                for aircraft_type, count in composition.items()
-                if mission in self.aircraft_type_data(aircraft_type).get("allowed_missions", [])
-            ]
+            role_priority = {
+                "cas": {
+                    "attack_helicopter": 5,
+                    "cas_aircraft": 5,
+                    "multirole_fighter": 3,
+                    "fighter_bomber": 2,
+                },
+                "strategic_strike": {
+                    "strategic_bomber": 6,
+                    "fighter_bomber": 5,
+                    "multirole_fighter": 4,
+                    "cas_aircraft": 2,
+                },
+                "intercept": {
+                    "light_fighter": 5,
+                    "multirole_fighter": 4,
+                    "fighter_bomber": 2,
+                    "cas_aircraft": 1,
+                },
+                "air_superiority": {
+                    "light_fighter": 5,
+                    "multirole_fighter": 4,
+                    "fighter_bomber": 2,
+                },
+                "patrol": {
+                    "light_fighter": 5,
+                    "multirole_fighter": 4,
+                    "fighter_bomber": 2,
+                },
+            }.get(mission, {})
+            candidates = []
+            for aircraft_type, count in composition.items():
+                if mission not in self.aircraft_type_data(aircraft_type).get("allowed_missions", []):
+                    continue
+                candidates.append((role_priority.get(aircraft_type, 1), count, aircraft_type))
             if candidates:
-                return max(candidates)[1]
+                return max(candidates)[2]
         return max((count, aircraft_type) for aircraft_type, count in composition.items())[1]
 
     def air_wing_ready_count_for_type(self, wing, aircraft_type):
@@ -1891,6 +2108,137 @@ class Game(arcade.View):
             and target_tile
             and self.tile_world_distance(origin_tile, target_tile) <= self.aircraft_type_range_world_radius(aircraft_type)
         )
+
+    def battle_has_enemy_for_owner(self, battle, owner):
+        if not battle or not owner:
+            return False
+        for side in ("attacker", "defender"):
+            for division in self.battle_side_present(battle, side):
+                if division.owner is not owner and division.strength > 0:
+                    return True
+        return False
+
+    def air_wing_can_attack_tile(self, wing, tile, mission_type):
+        if not wing or not tile or not wing.owner:
+            return False
+        if mission_type == "cas":
+            battle = self.battles.get(self.battle_key_for_tile(tile))
+            return self.battle_has_enemy_for_owner(battle, wing.owner)
+        if mission_type == "strategic_strike":
+            return self.air_mission_tile_is_hostile(wing.owner, tile)
+        return self.air_mission_tile_is_hostile(wing.owner, tile) or bool(self.enemy_divisions_on_tile(tile, wing.owner))
+
+    def tick_air_wing_mission_cooldowns(self, wing, elapsed_hours):
+        if not wing or elapsed_hours <= 0:
+            return
+        cooldowns = getattr(wing, "mission_cooldowns", None)
+        if cooldowns is None:
+            wing.mission_cooldowns = {}
+            cooldowns = wing.mission_cooldowns
+        previous_mission_max = max((float(value or 0.0) for value in cooldowns.values()), default=0.0)
+        previous_sortie_cooldown = max(0.0, float(getattr(wing, "sortie_cooldown_hours", 0.0) or 0.0))
+        legacy_global_cooldown = max(0.0, previous_sortie_cooldown - elapsed_hours) if previous_sortie_cooldown > previous_mission_max + 0.01 else 0.0
+        for mission_type in list(cooldowns.keys()):
+            remaining = max(0.0, float(cooldowns.get(mission_type, 0.0) or 0.0) - elapsed_hours)
+            if remaining > 0:
+                cooldowns[mission_type] = remaining
+            else:
+                cooldowns.pop(mission_type, None)
+        target_cooldowns = getattr(wing, "mission_target_cooldowns", None)
+        if target_cooldowns is None:
+            wing.mission_target_cooldowns = {}
+            target_cooldowns = wing.mission_target_cooldowns
+        for mission_type, by_key in list(target_cooldowns.items()):
+            if not isinstance(by_key, dict):
+                target_cooldowns.pop(mission_type, None)
+                continue
+            for key in list(by_key.keys()):
+                remaining = max(0.0, float(by_key.get(key, 0.0) or 0.0) - elapsed_hours)
+                if remaining > 0:
+                    by_key[key] = remaining
+                else:
+                    by_key.pop(key, None)
+            if not by_key:
+                target_cooldowns.pop(mission_type, None)
+        wing.sortie_cooldown_hours = max(legacy_global_cooldown, max(cooldowns.values(), default=0.0))
+
+    def air_wing_has_global_sortie_cooldown(self, wing):
+        if not wing:
+            return False
+        mission_max = max((float(value or 0.0) for value in (getattr(wing, "mission_cooldowns", None) or {}).values()), default=0.0)
+        return float(getattr(wing, "sortie_cooldown_hours", 0.0) or 0.0) > mission_max + 0.01
+
+    def air_wing_mission_cooldown(self, wing, mission_type):
+        if not wing:
+            return 0.0
+        cooldowns = getattr(wing, "mission_cooldowns", None) or {}
+        if mission_type in cooldowns:
+            return max(0.0, float(cooldowns.get(mission_type, 0.0) or 0.0))
+        return 0.0
+
+    def set_air_wing_mission_cooldown(self, wing, mission_type, hours):
+        if not wing or not mission_type:
+            return
+        if getattr(wing, "mission_cooldowns", None) is None:
+            wing.mission_cooldowns = {}
+        legacy_global_cooldown = (
+            max(0.0, float(getattr(wing, "sortie_cooldown_hours", 0.0) or 0.0))
+            if self.air_wing_has_global_sortie_cooldown(wing)
+            else 0.0
+        )
+        hours = max(0.0, float(hours or 0.0))
+        if hours > 0:
+            wing.mission_cooldowns[mission_type] = max(
+                hours,
+                float(wing.mission_cooldowns.get(mission_type, 0.0) or 0.0),
+            )
+        else:
+            wing.mission_cooldowns.pop(mission_type, None)
+        wing.sortie_cooldown_hours = max(legacy_global_cooldown, max(wing.mission_cooldowns.values(), default=0.0))
+
+    def air_wing_target_repeat_factor(self, wing, mission_type, tile):
+        if not wing or not tile:
+            return 1.0
+        key = self.tile_key(tile)
+        factor = 1.0
+        if (getattr(wing, "last_mission_target_keys", {}) or {}).get(mission_type) == key:
+            factor *= 0.50
+        for other_mission, other_key in (getattr(wing, "last_mission_target_keys", {}) or {}).items():
+            if other_mission != mission_type and other_key == key:
+                factor *= 0.62
+        recent = ((getattr(wing, "mission_target_cooldowns", {}) or {}).get(mission_type, {}) or {}).get(key, 0.0)
+        if recent > 0:
+            factor *= 0.38
+        for other_mission, by_key in (getattr(wing, "mission_target_cooldowns", {}) or {}).items():
+            if other_mission != mission_type and isinstance(by_key, dict) and by_key.get(key, 0.0) > 0:
+                factor *= 0.62
+        if mission_type == "strategic_strike":
+            battle = self.battles.get(self.battle_key_for_tile(tile))
+            if self.battle_has_enemy_for_owner(battle, getattr(wing, "owner", None)):
+                factor *= 0.55
+        for salvo in getattr(self, "air_salvos", []) or []:
+            if (
+                getattr(salvo, "owner", None) is wing.owner
+                and getattr(salvo, "source_air_wing_id", None) == wing.id
+                and getattr(salvo, "target_tile", None) is tile
+                and getattr(salvo, "count", 0) > 0
+            ):
+                factor *= 0.28 if self.air_salvo_source_mission(salvo) == mission_type else 0.58
+        return factor
+
+    def mark_air_wing_mission_target(self, wing, mission_type, tile, hours=None):
+        if not wing or not mission_type or not tile:
+            return
+        key = self.tile_key(tile)
+        if getattr(wing, "last_mission_target_keys", None) is None:
+            wing.last_mission_target_keys = {}
+        if getattr(wing, "mission_target_cooldowns", None) is None:
+            wing.mission_target_cooldowns = {}
+        wing.last_mission_target_keys[mission_type] = key
+        by_key = wing.mission_target_cooldowns.setdefault(mission_type, {})
+        if hours is None:
+            hours = 18.0 if mission_type == "strategic_strike" else 6.0
+        by_key[key] = max(float(by_key.get(key, 0.0) or 0.0), max(0.0, float(hours)))
 
     def set_air_wing_operation_area_for_wings(self, wings, tile, mode="replace"):
         if mode in ("add", "replace"):
@@ -2685,11 +3033,15 @@ class Game(arcade.View):
             if wing.mission_state != "defensive":
                 self.set_air_wing_mission_state(wing, "defensive", summary=wing.last_air_combat_summary)
             return
-        if wing.sortie_cooldown_hours > 0:
+        if self.air_wing_has_global_sortie_cooldown(wing):
             if wing.mission_state not in {"egress", "returning"}:
                 self.set_air_wing_mission_state(wing, "returning", summary=wing.last_air_combat_summary)
             return
-        if wing.mission_state in {"egress", "aborted", "defensive"}:
+        if wing.mission_state == "egress":
+            if wing.mission_state_hours >= AIR_VISUAL_EGRESS_HOURS:
+                self.set_air_wing_mission_state(wing, "returning", summary=wing.last_air_combat_summary)
+            return
+        if wing.mission_state in {"aborted", "defensive"}:
             self.set_air_wing_mission_state(wing, "returning", summary=wing.last_air_combat_summary)
 
     def division_tactical_air_defense_covered_tiles(self, division):
@@ -3173,7 +3525,7 @@ class Game(arcade.View):
         engaged_total = 0
         launched_total = 0
         remaining_sorties = max(0, int(target_sorties))
-        for interceptor_wing, _mission_type, interceptor_aircraft_type, sorties, estimate in candidates:
+        for interceptor_wing, mission_type, interceptor_aircraft_type, sorties, estimate in candidates:
             if remaining_sorties <= 0:
                 break
             engaged_count = self.air_wing_engaged_aircraft_count(
@@ -3206,10 +3558,7 @@ class Game(arcade.View):
             if attack_salvo:
                 launched_total += attack_salvo.count
                 remaining_sorties = max(0, remaining_sorties - engaged_count)
-            interceptor_wing.sortie_cooldown_hours = max(
-                getattr(interceptor_wing, "sortie_cooldown_hours", 0.0),
-                AIR_MISSION_MIN_COOLDOWN_HOURS,
-            )
+            self.set_air_wing_mission_cooldown(interceptor_wing, mission_type, AIR_MISSION_MIN_COOLDOWN_HOURS)
             interceptor_summary = f"УРВВ {ammo_spent}, залп в пути"
             self.set_air_wing_mission_state(interceptor_wing, "egress", exposure_tile, interceptor_summary)
 
@@ -3251,6 +3600,7 @@ class Game(arcade.View):
         launch_tile=None,
         source_air_wing=None,
         source_unit_id=None,
+        mission_type=None,
         target_unit_id=None,
         target_object_type=None,
         launch_distance=None,
@@ -3272,6 +3622,7 @@ class Game(arcade.View):
             launch_tile=launch_tile,
             source_air_wing_id=getattr(source_air_wing, "id", None),
             source_unit_id=source_unit_id,
+            mission_type=mission_type or getattr(source_air_wing, "mission", None),
             target_unit_id=target_unit_id,
             target_object_type=target_object_type,
             launch_distance=launch_distance,
@@ -3554,9 +3905,13 @@ class Game(arcade.View):
         return self.air_wing_by_id(salvo.source_air_wing_id) if getattr(salvo, "source_air_wing_id", None) else None
 
     def air_salvo_source_mission(self, salvo):
+        if getattr(salvo, "mission_type", None):
+            return salvo.mission_type
         wing = self.air_salvo_source_wing(salvo)
         if wing and getattr(wing, "mission", None):
             return wing.mission
+        if getattr(salvo, "target_object_type", None):
+            return "strategic_strike"
         munition_type = self.munition_data(getattr(salvo, "munition_type", None)).get("type")
         if munition_type in {"cruise_missile", "ballistic_missile", "heavy_strategic_missile", "bunker_buster"}:
             return "strategic_strike"
@@ -3568,6 +3923,32 @@ class Game(arcade.View):
         if salvo.target_object_type:
             tags.add(salvo.target_object_type)
         return tags
+
+    def air_mission_tile_is_hostile(self, owner, tile):
+        return bool(owner and tile and tile.owner is not None and tile.owner is not owner)
+
+    def air_salvo_has_hostile_division_target(self, salvo):
+        if not salvo or not getattr(salvo, "owner", None):
+            return False
+        if getattr(salvo, "target_unit_id", None):
+            target = self.division_by_id(salvo.target_unit_id)
+            return bool(target and target.owner is not salvo.owner and target.strength > 0)
+        return bool(self.enemy_divisions_on_tile(getattr(salvo, "target_tile", None), salvo.owner))
+
+    def air_salvo_target_is_still_valid(self, salvo):
+        if not salvo or not getattr(salvo, "owner", None) or not getattr(salvo, "target_tile", None):
+            return False
+        mission_type = self.air_salvo_source_mission(salvo)
+        target_tags = self.air_salvo_target_tags(salvo)
+        if getattr(salvo, "target_unit_id", None) or mission_type == "cas":
+            return self.air_salvo_has_hostile_division_target(salvo)
+        if getattr(salvo, "target_object_type", None) or mission_type == "strategic_strike":
+            return self.air_mission_tile_is_hostile(salvo.owner, salvo.target_tile)
+        if target_tags.intersection({"buildings", "airbase", "bunker", "radar", "sam", "infrastructure", "factory", "depot", "city"}):
+            return self.air_mission_tile_is_hostile(salvo.owner, salvo.target_tile)
+        if "divisions" in target_tags or "armor" in target_tags:
+            return self.air_salvo_has_hostile_division_target(salvo)
+        return self.air_mission_tile_is_hostile(salvo.owner, salvo.target_tile)
 
     def building_keys_for_target_tag(self, tag):
         tag_map = {
@@ -3892,6 +4273,8 @@ class Game(arcade.View):
     def resolve_air_salvo_division_impact(self, salvo):
         munition = self.munition_data(salvo.munition_type)
         target = self.division_by_id(salvo.target_unit_id) if salvo.target_unit_id else None
+        if target and (target.owner is salvo.owner or target.strength <= 0):
+            return False
         if not target:
             candidates = self.enemy_divisions_on_tile(salvo.target_tile, salvo.owner)
             if not candidates:
@@ -3939,22 +4322,32 @@ class Game(arcade.View):
     def resolve_air_salvo_impact(self, salvo):
         if not salvo or salvo.count <= 0:
             return False
+        if not self.air_salvo_target_is_still_valid(salvo):
+            return False
         target_tags = self.air_salvo_target_tags(salvo)
         mission_type = self.air_salvo_source_mission(salvo)
+        changed = False
         if (
             not salvo.target_object_type
             and (salvo.target_unit_id or mission_type == "cas" or "divisions" in target_tags)
             and self.enemy_divisions_on_tile(salvo.target_tile, salvo.owner)
         ):
-            return self.resolve_air_salvo_division_impact(salvo)
+            changed = self.resolve_air_salvo_division_impact(salvo)
+            if changed:
+                self.add_air_impact_decal(salvo.target_tile, source_id=getattr(salvo, "source_air_wing_id", None) or salvo.id, strength=max(1.0, salvo.count * 0.35))
+            return changed
         building_first = bool(
             salvo.target_object_type
             or target_tags.intersection({"buildings", "airbase", "bunker", "radar", "sam", "infrastructure", "factory", "depot", "city"})
             or mission_type == "strategic_strike"
         )
-        if building_first and self.resolve_air_salvo_building_impact(salvo):
-            return True
-        return self.resolve_air_salvo_division_impact(salvo)
+        if building_first:
+            changed = self.resolve_air_salvo_building_impact(salvo)
+        if not changed:
+            changed = self.resolve_air_salvo_division_impact(salvo)
+        if changed:
+            self.add_air_impact_decal(salvo.target_tile, source_id=getattr(salvo, "source_air_wing_id", None) or salvo.id, strength=max(1.0, salvo.count * 0.35))
+        return changed
 
     def air_defense_radar_support_bonus(self, owner, tile):
         if not owner or not tile:
@@ -4066,7 +4459,7 @@ class Game(arcade.View):
             not wing
             or not tile
             or getattr(wing, "aborted_hours", 0.0) > 0
-            or getattr(wing, "sortie_cooldown_hours", 0.0) > 0
+            or self.air_wing_has_global_sortie_cooldown(wing)
         ):
             return None
         enabled = self.air_wing_enabled_missions(wing)
@@ -4151,7 +4544,7 @@ class Game(arcade.View):
             )
             if attack_salvo:
                 launched_total += attack_salvo.count
-            wing.sortie_cooldown_hours = max(getattr(wing, "sortie_cooldown_hours", 0.0), AIR_MISSION_MIN_COOLDOWN_HOURS)
+            self.set_air_wing_mission_cooldown(wing, mission_type, AIR_MISSION_MIN_COOLDOWN_HOURS)
             wing.last_air_combat_summary = f"УРВВ {ammo_spent}, залп в пути"
             self.set_air_wing_mission_state(wing, "egress", current_tile, wing.last_air_combat_summary)
             salvo.detected_by.add(wing.owner.id if wing.owner else wing.id)
@@ -4199,6 +4592,9 @@ class Game(arcade.View):
         completed = []
         for salvo in list(getattr(self, "air_salvos", []) or []):
             if salvo.count <= 0 or not salvo.target_tile:
+                completed.append(salvo)
+                continue
+            if not self.air_salvo_target_is_still_valid(salvo):
                 completed.append(salvo)
                 continue
             salvo.ticks_alive += 1
@@ -4316,6 +4712,8 @@ class Game(arcade.View):
     def resolve_close_air_attack(self, wing, target_tile, munition_id, munition_count, aircraft_type=None, mission_type="cas"):
         if not wing or not target_tile or munition_count <= 0:
             return False
+        if not self.air_wing_can_attack_tile(wing, target_tile, mission_type):
+            return False
         aircraft_type = aircraft_type or self.air_wing_primary_type_for_mission(wing, mission_type) or wing.aircraft_type
         munitions_per_sortie = max(1, self.air_wing_munition_count_per_sortie(wing, munition_id))
         sorties = min(
@@ -4366,6 +4764,7 @@ class Game(arcade.View):
             target_tile,
             launch_tile=target_tile,
             source_air_wing=wing,
+            mission_type=mission_type,
             target_object_type=self.air_wing_strike_target_object_type(wing, target_tile) if mission_type == "strategic_strike" else None,
             launch_distance=0.0,
         )
@@ -4446,17 +4845,45 @@ class Game(arcade.View):
         if not wing:
             return None
         reachable_area = self.air_wing_reachable_operation_tiles(wing, "strategic_strike")
+        reachable_area = [
+            tile for tile in reachable_area
+            if self.air_wing_can_attack_tile(wing, tile, "strategic_strike")
+        ]
         if reachable_area:
             scored = [
-                (self.air_wing_strike_tile_score(wing, tile)[0], self.hex_distance(wing.base_tile, tile), tile)
+                (
+                    self.air_wing_strike_tile_score(wing, tile)[0] * self.air_wing_target_repeat_factor(wing, "strategic_strike", tile),
+                    self.hex_distance(wing.base_tile, tile),
+                    self.air_wing_strike_tile_score(wing, tile)[0],
+                    tile,
+                )
                 for tile in reachable_area
             ]
             scored = [item for item in scored if item[0] > 0]
             if scored:
-                scored.sort(key=lambda item: (-item[0], item[1]))
-                return scored[0][2]
-            return min(reachable_area, key=lambda tile: self.hex_distance(wing.base_tile, tile))
-        return wing.target_tile or wing.target_area
+                scored.sort(key=lambda item: (-item[0], item[1], -item[2]))
+                return scored[0][3]
+        fallback = wing.target_tile or wing.target_area
+        return fallback if self.air_wing_can_attack_tile(wing, fallback, "strategic_strike") else None
+
+    def air_wing_cas_battle_score(self, wing, battle):
+        if not wing or not battle or not battle.tile:
+            return 0.0
+        enemy_count = 0
+        active_enemy_count = 0
+        for side in ("attacker", "defender"):
+            active_ids = set(getattr(battle, f"active_{side}s", []) or [])
+            for division in self.battle_side_present(battle, side):
+                if division.owner is wing.owner or division.strength <= 0:
+                    continue
+                enemy_count += 1
+                if division.id in active_ids:
+                    active_enemy_count += 1
+        if enemy_count <= 0:
+            return 0.0
+        distance = self.hex_distance(wing.base_tile, battle.tile)
+        repeat_factor = self.air_wing_target_repeat_factor(wing, "cas", battle.tile)
+        return (1.0 + enemy_count * 0.55 + active_enemy_count * 0.35) * repeat_factor / (1.0 + distance * 0.10)
 
     def select_air_wing_cas_target(self, wing):
         if not wing or not wing.base_tile:
@@ -4466,6 +4893,10 @@ class Game(arcade.View):
             battle for battle in self.battles.values()
             if battle.attacker is wing.owner or battle.defender is wing.owner
         ]
+        owned_battles = [
+            battle for battle in owned_battles
+            if self.battle_has_enemy_for_owner(battle, wing.owner)
+        ]
         if area_keys:
             owned_battles = [
                 battle for battle in owned_battles
@@ -4473,7 +4904,15 @@ class Game(arcade.View):
             ]
         if not owned_battles:
             return None
-        return min(owned_battles, key=lambda battle: self.hex_distance(wing.base_tile, battle.tile)).tile
+        scored = [
+            (self.air_wing_cas_battle_score(wing, battle), self.hex_distance(wing.base_tile, battle.tile), battle)
+            for battle in owned_battles
+        ]
+        scored = [item for item in scored if item[0] > 0]
+        if not scored:
+            return None
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return scored[0][2].tile
 
     def select_air_wing_active_mission(self, wing):
         enabled = self.air_wing_enabled_missions(wing)
@@ -4487,6 +4926,170 @@ class Game(arcade.View):
                 return "strategic_strike", target_tile
         return None, None
 
+    def execute_air_wing_active_mission(self, wing, mission_type, target_tile, used_aircraft_counts=None, apply_mission_cooldown=True):
+        if not wing or not target_tile:
+            return 0
+        if not self.air_wing_can_attack_tile(wing, target_tile, mission_type):
+            return 0
+        mission_aircraft_type = self.air_wing_primary_type_for_mission(wing, mission_type)
+        aircraft_data = self.aircraft_type_data(mission_aircraft_type)
+        if not aircraft_data:
+            return 0
+        if not self.aircraft_type_can_reach_tile(wing.base_tile, mission_aircraft_type, target_tile):
+            return 0
+        ready_for_type = self.air_wing_ready_count_for_type(wing, mission_aircraft_type)
+        reserved_for_type = max(0, int((used_aircraft_counts or {}).get(mission_aircraft_type, 0) or 0))
+        available_for_type = max(0, ready_for_type - reserved_for_type)
+        if available_for_type <= 0:
+            return 0
+        munition_id = self.air_wing_mission_loadout(mission_aircraft_type, mission_type, target_tile)
+        if not munition_id or munition_id not in aircraft_data.get("allowed_munitions", []):
+            munition_id = wing.current_loadout or self.default_air_wing_loadout(mission_aircraft_type)
+        if not munition_id or munition_id not in aircraft_data.get("allowed_munitions", []):
+            return 0
+        target_distance = self.hex_distance(wing.base_tile, target_tile)
+        air_defense_radius = self.known_enemy_air_defense_radius_near(wing.owner, target_tile)
+        launch_distance = self.choose_air_mission_launch_distance(
+            target_distance,
+            munition_id,
+            air_defense_radius,
+            wing.risk_policy,
+            mission_type,
+        )
+        if launch_distance is None:
+            return 0
+        package_size = max(1, int(math.ceil(ready_for_type * self.clamp01(wing.sortie_intensity) * 0.25)))
+        sorties = min(available_for_type, package_size)
+        if sorties <= 0:
+            return 0
+        munition_count = sorties * self.air_wing_munition_count_per_sortie(wing, munition_id)
+        wing.mission = mission_type
+        self.set_air_wing_mission_state(wing, "approach", target_tile)
+        launched = False
+        if self.munition_uses_air_salvo(munition_id, launch_distance):
+            launch_tile = self.launch_tile_for_target_distance(wing.base_tile, target_tile, launch_distance)
+            prelaunch_risk = self.resolve_air_defense_against_air_wing(
+                wing,
+                launch_tile,
+                mission_aircraft_type,
+                sorties,
+                mission_type,
+                phase="approach",
+                target_tile=target_tile,
+                prelaunch_only=True,
+            )
+            if wing.risk_policy == "cautious" and prelaunch_risk.get("hits", 0) > 0:
+                wing.aborted_hours = max(getattr(wing, "aborted_hours", 0.0), AIR_CARRIER_DEFENSIVE_COOLDOWN_HOURS)
+                if apply_mission_cooldown:
+                    self.set_air_wing_mission_cooldown(wing, mission_type, AIR_CARRIER_DEFENSIVE_COOLDOWN_HOURS)
+                self.set_air_wing_mission_state(wing, "aborted", target_tile, "Пуск отменен: риск ПВО")
+                return 0
+            self.set_air_wing_mission_state(wing, "attack_run", target_tile)
+            threat_result = self.resolve_air_defense_against_air_wing(
+                wing,
+                launch_tile,
+                mission_aircraft_type,
+                sorties,
+                mission_type,
+                phase="attack_run",
+                target_tile=target_tile,
+            )
+            if threat_result.get("aborted"):
+                return 0
+            fighter_result = self.resolve_air_wing_interceptors_against_air_wing(
+                wing,
+                launch_tile,
+                mission_aircraft_type,
+                sorties,
+                mission_type,
+            )
+            if fighter_result.get("aborted"):
+                return 0
+            launched = bool(self.create_air_salvo(
+                wing.owner,
+                munition_id,
+                munition_count,
+                target_tile,
+                launch_tile=launch_tile,
+                source_air_wing=wing,
+                mission_type=mission_type,
+                target_object_type=self.air_wing_strike_target_object_type(wing, target_tile) if mission_type == "strategic_strike" else None,
+                launch_distance=launch_distance,
+            ))
+            if launched:
+                self.set_air_wing_mission_state(wing, "egress", target_tile, wing.last_air_combat_summary)
+        else:
+            launched = self.resolve_close_air_attack(
+                wing,
+                target_tile,
+                munition_id,
+                munition_count,
+                aircraft_type=mission_aircraft_type,
+                mission_type=mission_type,
+            )
+        if not launched:
+            return 0
+        if apply_mission_cooldown:
+            intensity = max(0.1, self.clamp01(wing.sortie_intensity))
+            cooldown = max(
+                AIR_MISSION_MIN_COOLDOWN_HOURS,
+                AIR_MISSION_BASE_COOLDOWN_HOURS / intensity,
+            )
+            self.set_air_wing_mission_cooldown(wing, mission_type, cooldown)
+        self.mark_air_wing_mission_target(wing, mission_type, target_tile)
+        if used_aircraft_counts is not None:
+            used_aircraft_counts[mission_aircraft_type] = used_aircraft_counts.get(mission_aircraft_type, 0) + sorties
+        return sorties
+
+    def launch_air_wing_mission_packages(self, wing, mission_type, used_aircraft_counts=None):
+        if not wing or mission_type not in self.air_wing_enabled_missions(wing):
+            return 0
+        if self.air_wing_mission_cooldown(wing, mission_type) > 0:
+            return 0
+        launched_packages = 0
+        launched_sorties = 0
+        max_packages = 4
+        if mission_type == "cas":
+            max_packages = max(1, min(5, len([
+                battle for battle in self.battles.values()
+                if battle.tile
+                and self.battle_has_enemy_for_owner(battle, wing.owner)
+                and self.tile_key(battle.tile) in set(self.normalize_air_wing_operation_area_keys(wing))
+            ]) or 1))
+        elif mission_type == "strategic_strike":
+            max_packages = max(1, min(5, len([
+                tile for tile in self.air_wing_reachable_operation_tiles(wing, "strategic_strike")
+                if self.air_wing_can_attack_tile(wing, tile, "strategic_strike")
+                and self.air_wing_strike_tile_score(wing, tile)[0] > 0
+            ]) or 1))
+        for _package_index in range(max_packages):
+            target_tile = (
+                self.select_air_wing_cas_target(wing)
+                if mission_type == "cas"
+                else self.select_air_wing_strike_target(wing)
+            )
+            if not target_tile:
+                break
+            sorties = self.execute_air_wing_active_mission(
+                wing,
+                mission_type,
+                target_tile,
+                used_aircraft_counts=used_aircraft_counts,
+                apply_mission_cooldown=False,
+            )
+            if sorties <= 0:
+                break
+            launched_packages += 1
+            launched_sorties += sorties
+        if launched_packages > 0:
+            intensity = max(0.1, self.clamp01(wing.sortie_intensity))
+            cooldown = max(
+                AIR_MISSION_MIN_COOLDOWN_HOURS,
+                AIR_MISSION_BASE_COOLDOWN_HOURS / intensity,
+            )
+            self.set_air_wing_mission_cooldown(wing, mission_type, cooldown)
+        return launched_sorties
+
     def update_air_missions(self, elapsed_hours):
         if elapsed_hours <= 0:
             return
@@ -4497,106 +5100,26 @@ class Game(arcade.View):
                 if getattr(wing, "mission_state", "returning") not in {"returning", "aborted", "defensive"}:
                     self.set_air_wing_mission_state(wing, "returning", summary=wing.last_air_combat_summary)
                 continue
-            wing.sortie_cooldown_hours = max(0.0, wing.sortie_cooldown_hours - elapsed_hours)
-            if wing.sortie_cooldown_hours > 0 or getattr(wing, "aborted_hours", 0.0) > 0:
+            self.tick_air_wing_mission_cooldowns(wing, elapsed_hours)
+            if getattr(wing, "aborted_hours", 0.0) > 0 or self.air_wing_has_global_sortie_cooldown(wing):
                 continue
-            mission_type, target_tile = self.select_air_wing_active_mission(wing)
-            if not target_tile:
+            launched_any = False
+            used_aircraft_counts = {}
+            if "cas" in self.air_wing_enabled_missions(wing):
+                launched_any = self.launch_air_wing_mission_packages(
+                    wing,
+                    "cas",
+                    used_aircraft_counts=used_aircraft_counts,
+                ) > 0 or launched_any
+            if "strategic_strike" in self.air_wing_enabled_missions(wing):
+                launched_any = self.launch_air_wing_mission_packages(
+                    wing,
+                    "strategic_strike",
+                    used_aircraft_counts=used_aircraft_counts,
+                ) > 0 or launched_any
+            if not launched_any:
                 if getattr(wing, "mission_state", "returning") not in {"returning", "aborted", "defensive"}:
                     self.set_air_wing_mission_state(wing, "returning", summary=wing.last_air_combat_summary)
-                continue
-            mission_aircraft_type = self.air_wing_primary_type_for_mission(wing, mission_type)
-            aircraft_data = self.aircraft_type_data(mission_aircraft_type)
-            if not self.aircraft_type_can_reach_tile(wing.base_tile, mission_aircraft_type, target_tile):
-                continue
-            ready_for_type = self.air_wing_ready_count_for_type(wing, mission_aircraft_type)
-            if ready_for_type <= 0:
-                continue
-            munition_id = wing.current_loadout or self.default_air_wing_loadout(mission_aircraft_type)
-            if not munition_id or munition_id not in aircraft_data.get("allowed_munitions", []):
-                munition_id = self.default_air_wing_loadout(mission_aircraft_type)
-            if not munition_id or munition_id not in aircraft_data.get("allowed_munitions", []):
-                continue
-            target_distance = self.hex_distance(wing.base_tile, target_tile)
-            air_defense_radius = self.known_enemy_air_defense_radius_near(wing.owner, target_tile)
-            launch_distance = self.choose_air_mission_launch_distance(
-                target_distance,
-                munition_id,
-                air_defense_radius,
-                wing.risk_policy,
-                mission_type,
-            )
-            if launch_distance is None:
-                continue
-            sorties = min(ready_for_type, int(math.ceil(ready_for_type * self.clamp01(wing.sortie_intensity) * 0.25)))
-            if sorties <= 0:
-                continue
-            munition_count = sorties * self.air_wing_munition_count_per_sortie(wing, munition_id)
-            self.set_air_wing_mission_state(wing, "approach", target_tile)
-            if self.munition_uses_air_salvo(munition_id, launch_distance):
-                launch_tile = self.launch_tile_for_target_distance(wing.base_tile, target_tile, launch_distance)
-                prelaunch_risk = self.resolve_air_defense_against_air_wing(
-                    wing,
-                    launch_tile,
-                    mission_aircraft_type,
-                    sorties,
-                    mission_type,
-                    phase="approach",
-                    target_tile=target_tile,
-                    prelaunch_only=True,
-                )
-                if wing.risk_policy == "cautious" and prelaunch_risk.get("hits", 0) > 0:
-                    wing.aborted_hours = max(getattr(wing, "aborted_hours", 0.0), AIR_CARRIER_DEFENSIVE_COOLDOWN_HOURS)
-                    wing.sortie_cooldown_hours = max(getattr(wing, "sortie_cooldown_hours", 0.0), AIR_CARRIER_DEFENSIVE_COOLDOWN_HOURS)
-                    self.set_air_wing_mission_state(wing, "aborted", target_tile, "Пуск отменен: риск ПВО")
-                    continue
-                self.set_air_wing_mission_state(wing, "attack_run", target_tile)
-                threat_result = self.resolve_air_defense_against_air_wing(
-                    wing,
-                    launch_tile,
-                    mission_aircraft_type,
-                    sorties,
-                    mission_type,
-                    phase="attack_run",
-                    target_tile=target_tile,
-                )
-                if threat_result.get("aborted"):
-                    continue
-                fighter_result = self.resolve_air_wing_interceptors_against_air_wing(
-                    wing,
-                    launch_tile,
-                    mission_aircraft_type,
-                    sorties,
-                    mission_type,
-                )
-                if fighter_result.get("aborted"):
-                    continue
-                self.create_air_salvo(
-                    wing.owner,
-                    munition_id,
-                    munition_count,
-                    target_tile,
-                    launch_tile=launch_tile,
-                    source_air_wing=wing,
-                    target_object_type=self.air_wing_strike_target_object_type(wing, target_tile) if mission_type == "strategic_strike" else None,
-                    launch_distance=launch_distance,
-                )
-                self.set_air_wing_mission_state(wing, "egress", target_tile, wing.last_air_combat_summary)
-            else:
-                self.resolve_close_air_attack(
-                    wing,
-                    target_tile,
-                    munition_id,
-                    munition_count,
-                    aircraft_type=mission_aircraft_type,
-                    mission_type=mission_type,
-                )
-            intensity = max(0.1, self.clamp01(wing.sortie_intensity))
-            wing.sortie_cooldown_hours = max(
-                getattr(wing, "sortie_cooldown_hours", 0.0),
-                AIR_MISSION_MIN_COOLDOWN_HOURS,
-                AIR_MISSION_BASE_COOLDOWN_HOURS / intensity,
-            )
 
     def update_air_assets_after_tile_owner_change(self, tile, old_owner, new_owner):
         if not tile or old_owner is new_owner:
@@ -4631,6 +5154,7 @@ class Game(arcade.View):
         self.create_hex_grid()
         self.build_tile_spatial_hash()
         self.setup_players_and_states()
+        self.register_simulation_command_handlers()
         self.setup_premium_shader()
         self.update_map_bounds()
         self.create_map_overview()
@@ -4665,6 +5189,38 @@ class Game(arcade.View):
             HudButton(">", panel_x + 48, panel_y + 10, 38, 24, self.toggle_time_pause),
             HudButton("+", panel_x + 92, panel_y + 10, 28, 24, self.increase_time_speed),
         ]
+
+    def register_simulation_command_handlers(self):
+        self.simulation_server.register_command_handler("enqueue_construction", self.handle_enqueue_construction_command)
+        self.simulation_server.register_command_handler("cancel_construction", self.handle_cancel_construction_command)
+
+    def submit_player_command(self, command_type, payload=None, player=None):
+        player = player or self.human_player
+        player_id = player.id if player else None
+        self.simulation_client.request_command(command_type, player_id=player_id, payload=payload or {})
+
+    def player_by_id(self, player_id):
+        for player in self.players:
+            if player.id == player_id:
+                return player
+        return None
+
+    def handle_enqueue_construction_command(self, command):
+        player = self.player_by_id(command.player_id)
+        tile = self.tile_for_key(command.payload.get("tile_key"))
+        building_key = command.payload.get("building_key")
+        steps = max(1, int(command.payload.get("steps", 1) or 1))
+        if not player or not tile:
+            return False
+        return self.enqueue_construction_steps(player, tile, building_key, steps) > 0
+
+    def handle_cancel_construction_command(self, command):
+        player = self.player_by_id(command.player_id)
+        tile = self.tile_for_key(command.payload.get("tile_key"))
+        building_key = command.payload.get("building_key")
+        if not player or not tile:
+            return False
+        return self.cancel_queued_construction(player, tile, building_key)
 
     def rebuild_top_ui(self):
         if not self.window:
@@ -10554,6 +11110,7 @@ class Game(arcade.View):
         self.air_defense_units = []
         self.air_salvos = []
         self.air_attack_salvos = []
+        self.air_impact_decals = []
         self.field_helipad_projects = []
         self.next_airbase_id = 1
         self.next_air_wing_id = 1
@@ -12575,97 +13132,275 @@ class Game(arcade.View):
             arcade.draw_line(x - 6, y - 5, x + 6, y - 5, color, 2)
             arcade.draw_line(x + 6, y - 5, x, y + 6, color, 2)
 
-    def air_wing_visual_target_tile(self, wing):
+    def air_wing_visual_area_tiles(self, wing):
+        if not wing:
+            return []
+        tiles = self.air_wing_operation_area_tiles(wing)
+        return tiles or ([getattr(wing, "target_tile", None)] if getattr(wing, "target_tile", None) else [])
+
+    def air_wing_visual_target_tile(self, wing, slot_index=0, now=None):
         if not wing:
             return None
         mission_tile = self.tile_for_key(getattr(wing, "mission_target_tile_key", None))
         if mission_tile:
             return mission_tile
+        area_tiles = self.air_wing_visual_area_tiles(wing)
+        if area_tiles and self.air_wing_is_standing_air_mission(wing):
+            if now is None:
+                now = time.perf_counter()
+            offset = int(now / 5.5)
+            return area_tiles[(slot_index + offset) % len(area_tiles)]
         if getattr(wing, "target_tile", None):
             return wing.target_tile
         if getattr(wing, "target_area", None):
             return wing.target_area
-        area_keys = self.normalize_air_wing_operation_area_keys(wing)
-        if area_keys:
-            return self.tile_for_key(area_keys[0])
+        if area_tiles:
+            if now is None:
+                now = time.perf_counter()
+            offset = int(now / 5.5) if self.air_wing_is_standing_air_mission(wing) else 0
+            return area_tiles[(slot_index + offset) % len(area_tiles)]
         return getattr(wing, "base_tile", None)
 
     def air_wing_is_standing_air_mission(self, wing):
         enabled = set(self.air_wing_enabled_missions(wing))
-        return bool(enabled.intersection({"patrol", "intercept", "air_superiority"}))
+        return bool(enabled.intersection({"patrol", "intercept", "air_superiority", "cas", "strategic_strike"}))
 
-    def air_wing_visual_position(self, wing, now=None):
+    def air_wing_visual_mission_for_slot(self, wing, slot_index=0):
+        enabled = self.air_wing_enabled_missions(wing)
+        if not enabled:
+            return getattr(wing, "mission", "none")
+        ordered = [
+            mission for mission in ("cas", "strategic_strike", "intercept", "air_superiority", "patrol")
+            if mission in enabled
+        ]
+        if not ordered:
+            ordered = enabled
+        return ordered[slot_index % len(ordered)]
+
+    def air_wing_visual_package_count(self, wing):
+        if not wing:
+            return 0
+        area_count = max(1, len(self.air_wing_visual_area_tiles(wing)))
+        ready_count = max(0, int(getattr(wing, "ready_count", 0) or 0))
+        if ready_count <= 0:
+            return 0
+        return max(1, min(4, area_count, int(math.ceil(ready_count / 6.0))))
+
+    def air_wing_visual_aircraft_type(self, wing, slot_index=0):
+        composition = self.air_wing_composition(wing)
+        if not composition:
+            return getattr(wing, "aircraft_type", None)
+        state = getattr(wing, "mission_state", "returning")
+        if state in {"approach", "attack_run", "egress", "defensive"}:
+            mission_type = getattr(wing, "mission", None)
+            return self.air_wing_primary_type_for_mission(wing, mission_type) or getattr(wing, "aircraft_type", None)
+        visual_mission = self.air_wing_visual_mission_for_slot(wing, slot_index)
+        preferred_type = self.air_wing_primary_type_for_mission(wing, visual_mission)
+        if preferred_type:
+            return preferred_type
+        standing_missions = set(self.air_wing_enabled_missions(wing)).intersection({"patrol", "intercept", "air_superiority", "cas", "strategic_strike"})
+        candidates = [
+            aircraft_type for aircraft_type, count in composition.items()
+            if count > 0 and (
+                not standing_missions
+                or standing_missions.intersection(set(self.aircraft_type_data(aircraft_type).get("allowed_missions", [])))
+            )
+        ]
+        if not candidates:
+            candidates = list(composition.keys())
+        candidates.sort(key=lambda aircraft_type: (-composition.get(aircraft_type, 0), aircraft_type))
+        return candidates[slot_index % len(candidates)]
+
+    @staticmethod
+    def stable_visual_seed(*values):
+        seed = 2166136261
+        for value in values:
+            if value is None:
+                item = 0
+            elif isinstance(value, (int, float)):
+                item = int(value)
+            else:
+                item = sum(ord(char) for char in str(value))
+            seed ^= item & 0xFFFFFFFF
+            seed = (seed * 16777619) & 0xFFFFFFFF
+        return seed
+
+    def air_visual_tile_point(self, tile, wing=None, slot_index=0, phase=0, scale=1.0):
+        if not tile:
+            return 0.0, 0.0
+        seed = self.stable_visual_seed(
+            getattr(wing, "id", 0),
+            getattr(tile, "q", 0),
+            getattr(tile, "r", 0),
+            slot_index,
+            phase,
+        )
+        angle = ((seed % 6283) / 1000.0) % math.tau
+        radius_noise = (((seed >> 10) & 1023) / 1023.0)
+        radius = AIR_VISUAL_TILE_OFFSET_RADIUS * max(0.0, float(scale)) * (0.35 + radius_noise * 0.65)
+        return tile.center_x + math.cos(angle) * radius, tile.center_y + math.sin(angle) * radius * 0.72
+
+    def air_wing_visual_position(self, wing, now=None, slot_index=0, slot_count=1):
         if not wing or not wing.base_tile:
             return None
         now = time.perf_counter() if now is None else now
         state = getattr(wing, "mission_state", "returning")
-        target_tile = self.air_wing_visual_target_tile(wing)
+        target_tile = self.air_wing_visual_target_tile(wing, slot_index=slot_index, now=now)
         if not target_tile:
             return None
+        slot_angle = (math.tau * slot_index / max(1, slot_count)) + wing.id * 0.19
+        base_x, base_y = self.air_visual_tile_point(wing.base_tile, wing, slot_index, phase=11, scale=0.38)
+        target_x, target_y = self.air_visual_tile_point(target_tile, wing, slot_index, phase=23, scale=0.92)
 
         if state == "approach":
-            progress = self.clamp01(getattr(wing, "mission_state_hours", 0.0) / 1.25)
-            x = wing.base_tile.center_x + (target_tile.center_x - wing.base_tile.center_x) * progress
-            y = wing.base_tile.center_y + (target_tile.center_y - wing.base_tile.center_y) * progress
-            heading = math.atan2(target_tile.center_y - wing.base_tile.center_y, target_tile.center_x - wing.base_tile.center_x)
+            progress = self.clamp01(getattr(wing, "mission_state_hours", 0.0) / AIR_VISUAL_APPROACH_HOURS)
+            x = base_x + (target_x - base_x) * progress
+            y = base_y + (target_y - base_y) * progress
+            heading = math.atan2(target_y - base_y, target_x - base_x)
             return x, y, heading, True
 
         if state in {"egress", "aborted"}:
-            progress = self.clamp01(getattr(wing, "mission_state_hours", 0.0) / 1.35)
+            progress = self.clamp01(getattr(wing, "mission_state_hours", 0.0) / AIR_VISUAL_EGRESS_HOURS)
             if progress >= 1.0:
                 return None
-            x = target_tile.center_x + (wing.base_tile.center_x - target_tile.center_x) * progress
-            y = target_tile.center_y + (wing.base_tile.center_y - target_tile.center_y) * progress
-            heading = math.atan2(wing.base_tile.center_y - target_tile.center_y, wing.base_tile.center_x - target_tile.center_x)
+            x = target_x + (base_x - target_x) * progress
+            y = target_y + (base_y - target_y) * progress
+            heading = math.atan2(base_y - target_y, base_x - target_x)
             return x, y, heading, True
 
         if state == "attack_run":
-            angle = now * 5.0 + wing.id * 0.73
+            angle = now * AIR_VISUAL_ATTACK_ORBIT_SPEED + wing.id * 0.73 + slot_angle
             radius = 14.0
-            x = target_tile.center_x + math.cos(angle) * radius
-            y = target_tile.center_y + math.sin(angle) * radius * 0.55
+            x = target_x + math.cos(angle) * radius
+            y = target_y + math.sin(angle) * radius * 0.55
             heading = angle + math.pi * 0.5
             return x, y, heading, True
 
         if state == "defensive":
-            angle = now * 3.3 + wing.id * 1.11
+            angle = now * (AIR_VISUAL_ATTACK_ORBIT_SPEED * 0.68) + wing.id * 1.11 + slot_angle
             radius = 18.0
-            x = target_tile.center_x + math.cos(angle) * radius
-            y = target_tile.center_y + math.sin(angle) * radius
+            x = target_x + math.cos(angle) * radius
+            y = target_y + math.sin(angle) * radius
             heading = angle + math.pi * 0.5
             return x, y, heading, True
 
         if self.air_wing_is_standing_air_mission(wing) and target_tile is not wing.base_tile:
-            angle = now * (1.15 + (wing.id % 3) * 0.18) + wing.id * 0.91
-            radius = 16.0 + (wing.id % 3) * 4.0
-            x = target_tile.center_x + math.cos(angle) * radius
-            y = target_tile.center_y + math.sin(angle) * radius * 0.75
+            angle = now * (AIR_VISUAL_STANDING_ORBIT_SPEED + (wing.id % 3) * 0.12) + wing.id * 0.91 + slot_angle
+            radius = 12.0 + (slot_index % 3) * 5.0
+            x = target_x + math.cos(angle) * radius
+            y = target_y + math.sin(angle) * radius * 0.75
             heading = angle + math.pi * 0.5
             return x, y, heading, False
 
         return None
 
-    def draw_air_wing_flight_icon(self, wing, x, y, heading, active=False):
+    def add_air_impact_decal(self, tile, source_id=0, strength=1.0, color=None):
+        if not tile:
+            return False
+        if not hasattr(self, "air_impact_decals"):
+            self.air_impact_decals = []
+        phase = 41 + len(self.air_impact_decals) + int(getattr(self, "next_air_salvo_id", 1) or 1)
+        marker = type("AirImpactMarker", (), {"id": int(source_id or 0)})()
+        x, y = self.air_visual_tile_point(tile, marker, slot_index=phase, phase=67, scale=0.82)
+        size = max(0.75, min(2.4, float(strength) ** 0.35))
+        self.air_impact_decals.append(
+            AirImpactDecal(
+                tile=tile,
+                x=x,
+                y=y,
+                size=size,
+                color=color or (255, 184, 86),
+            )
+        )
+        overflow = len(self.air_impact_decals) - AIR_IMPACT_DECAL_MAX_COUNT
+        if overflow > 0:
+            del self.air_impact_decals[:overflow]
+        return True
+
+    def update_air_impact_decals(self, delta_time):
+        decals = getattr(self, "air_impact_decals", None)
+        if not decals or delta_time <= 0:
+            return
+        for decal in decals:
+            decal.age = max(0.0, float(getattr(decal, "age", 0.0)) + delta_time)
+        self.air_impact_decals = [
+            decal for decal in decals
+            if decal.age < max(0.05, float(getattr(decal, "duration", AIR_IMPACT_DECAL_DURATION)))
+        ]
+
+    def draw_air_impact_decals(self, visible_keys):
+        for decal in getattr(self, "air_impact_decals", []) or []:
+            tile = getattr(decal, "tile", None)
+            if not tile or self.tile_key(tile) not in visible_keys:
+                continue
+            duration = max(0.05, float(getattr(decal, "duration", AIR_IMPACT_DECAL_DURATION)))
+            t = self.clamp01(float(getattr(decal, "age", 0.0)) / duration)
+            alpha = int(210 * (1.0 - t))
+            if alpha <= 0:
+                continue
+            x = float(getattr(decal, "x", tile.center_x))
+            y = float(getattr(decal, "y", tile.center_y))
+            size = max(0.5, float(getattr(decal, "size", 1.0)))
+            color = tuple((getattr(decal, "color", (255, 184, 86)) or (255, 184, 86))[:3])
+            inner_radius = (4.0 + 8.0 * t) * size
+            outer_radius = (10.0 + 18.0 * t) * size
+            arcade.draw_circle_filled(x, y, outer_radius, (*color, max(18, alpha // 4)))
+            arcade.draw_circle_outline(x, y, outer_radius, (*color, max(32, alpha // 2)), max(1, int(2 * size)))
+            arcade.draw_circle_filled(x, y, inner_radius, (255, 235, 164, max(28, alpha // 2)))
+            for index in range(4):
+                angle = index * math.pi * 0.5 + t * 0.9
+                start = inner_radius * 0.55
+                end = outer_radius * 0.92
+                arcade.draw_line(
+                    x + math.cos(angle) * start,
+                    y + math.sin(angle) * start,
+                    x + math.cos(angle) * end,
+                    y + math.sin(angle) * end,
+                    (*color, max(26, alpha // 2)),
+                    max(1, int(2 * size)),
+                )
+
+    def draw_air_wing_flight_icon(self, wing, x, y, heading, active=False, aircraft_type=None):
         owner_color = tuple((wing.owner.border_color if wing.owner else (190, 205, 220))[:3])
         fill = (*owner_color, 225 if active else 190)
         outline = (245, 250, 255, 230) if wing.id in getattr(self, "selected_air_wing_ids", set()) else (20, 26, 34, 220)
         size = 12 if active else 10
         cos_a = math.cos(heading)
         sin_a = math.sin(heading)
+        aircraft_type = aircraft_type or self.air_wing_visual_aircraft_type(wing)
 
         def rotate(dx, dy):
             return x + dx * cos_a - dy * sin_a, y + dx * sin_a + dy * cos_a
 
-        points = [
-            rotate(size, 0),
-            rotate(-size * 0.55, size * 0.42),
-            rotate(-size * 0.24, size * 0.10),
-            rotate(-size * 0.88, 0),
-            rotate(-size * 0.24, -size * 0.10),
-            rotate(-size * 0.55, -size * 0.42),
-        ]
-        arcade.draw_polygon_filled(points, fill)
-        arcade.draw_line_strip(points + [points[0]], outline, 1)
+        if self.aircraft_type_is_helicopter(aircraft_type):
+            body = [rotate(size * 0.55, 0), rotate(0, size * 0.34), rotate(-size * 0.62, size * 0.24), rotate(-size * 0.74, -size * 0.24), rotate(0, -size * 0.34)]
+            tail_start = rotate(-size * 0.56, 0)
+            tail_end = rotate(-size * 1.28, 0)
+            rotor_a = rotate(-size * 0.05, -size * 0.95)
+            rotor_b = rotate(-size * 0.05, size * 0.95)
+            tail_rotor_a = rotate(-size * 1.35, -size * 0.28)
+            tail_rotor_b = rotate(-size * 1.35, size * 0.28)
+            arcade.draw_polygon_filled(body, fill)
+            arcade.draw_line_strip(body + [body[0]], outline, 1)
+            arcade.draw_line(*tail_start, *tail_end, outline, 2)
+            arcade.draw_line(*rotor_a, *rotor_b, (230, 240, 248, 210), 2)
+            arcade.draw_line(*tail_rotor_a, *tail_rotor_b, (230, 240, 248, 190), 1)
+        else:
+            fuselage = [
+                rotate(size * 0.95, 0),
+                rotate(size * 0.12, size * 0.18),
+                rotate(-size * 0.86, size * 0.13),
+                rotate(-size * 0.98, 0),
+                rotate(-size * 0.86, -size * 0.13),
+                rotate(size * 0.12, -size * 0.18),
+            ]
+            left_wing = [rotate(size * 0.14, size * 0.10), rotate(-size * 0.30, size * 0.88), rotate(-size * 0.12, size * 0.10)]
+            right_wing = [rotate(size * 0.14, -size * 0.10), rotate(-size * 0.30, -size * 0.88), rotate(-size * 0.12, -size * 0.10)]
+            left_tail = [rotate(-size * 0.68, size * 0.08), rotate(-size * 1.02, size * 0.48), rotate(-size * 0.86, size * 0.06)]
+            right_tail = [rotate(-size * 0.68, -size * 0.08), rotate(-size * 1.02, -size * 0.48), rotate(-size * 0.86, -size * 0.06)]
+            for part in (left_wing, right_wing, left_tail, right_tail, fuselage):
+                arcade.draw_polygon_filled(part, fill)
+                arcade.draw_line_strip(part + [part[0]], outline, 1)
         if active and getattr(wing, "mission_state", "") == "attack_run":
             pulse = (time.perf_counter() * 4.0 + wing.id) % 1.0
             if pulse < 0.34:
@@ -12678,17 +13413,21 @@ class Game(arcade.View):
         for wing in getattr(self, "air_wings", []) or []:
             if not wing or wing.ready_count <= 0 or not wing.base_tile:
                 continue
-            visual = self.air_wing_visual_position(wing, now=now)
-            if not visual:
-                continue
-            target_tile = self.air_wing_visual_target_tile(wing)
-            if (
-                self.tile_key(wing.base_tile) not in visible_keys
-                and (not target_tile or self.tile_key(target_tile) not in visible_keys)
-            ):
-                continue
-            x, y, heading, active = visual
-            self.draw_air_wing_flight_icon(wing, x, y, heading, active=active)
+            state = getattr(wing, "mission_state", "returning")
+            package_count = 1 if state in {"approach", "attack_run", "egress", "defensive", "aborted"} else self.air_wing_visual_package_count(wing)
+            for slot_index in range(max(1, package_count)):
+                visual = self.air_wing_visual_position(wing, now=now, slot_index=slot_index, slot_count=package_count)
+                if not visual:
+                    continue
+                target_tile = self.air_wing_visual_target_tile(wing, slot_index=slot_index, now=now)
+                if (
+                    self.tile_key(wing.base_tile) not in visible_keys
+                    and (not target_tile or self.tile_key(target_tile) not in visible_keys)
+                ):
+                    continue
+                x, y, heading, active = visual
+                aircraft_type = self.air_wing_visual_aircraft_type(wing, slot_index=slot_index)
+                self.draw_air_wing_flight_icon(wing, x, y, heading, active=active, aircraft_type=aircraft_type)
 
     def draw_selected_air_defense_ranges(self):
         tile = self.selected_tile
@@ -12867,6 +13606,7 @@ class Game(arcade.View):
         for unit in self.air_defense_units:
             if unit.tile and self.tile_key(unit.tile) in visible_keys:
                 self.draw_air_defense_icon(unit)
+        self.draw_air_impact_decals(visible_keys)
         self.draw_air_wings_in_flight(visible_keys)
 
     def setup_premium_shader(self):
@@ -12978,74 +13718,203 @@ class Game(arcade.View):
                 self.visible_tiles.append(tile)
 
     def on_draw(self):
-        self.sync_cameras_to_window()
-        self.clear()
-        self.begin_ui_text_frame()
-        if not self.premium_shader_enabled and not self.premium_shader_attempted:
-            self.setup_premium_shader()
-        self.world_camera.use()
-        if self.map_overview_dirty and self.use_overview_lod():
-            self.refresh_dirty_map_overview_tiles()
-        if self.use_overview_lod():
-            self.map_overview_sprite_list.draw()
-        else:
-            self.visible_tiles.draw()
-            if not self.construction_placement_mode:
-                self.draw_tile_visual_system()
-            self.draw_construction_placement_labels()
-        self.draw_state_borders()
-        if self.map_layer == "political":
-            self.draw_capital_markers()
-        self.draw_air_assets()
-        if self.selection_border.visible:
-            self.selection_border_sprite_list.draw()
-        self.draw_army_plans()
-        self.draw_divisions()
-        self.draw_premium_shader_overlay()
-        self.gui_camera.use()
-        if not self.paused:
-            self.draw_battle_indicators()
-        self.draw_division_groups()
-        self.draw_division_selection_box()
-        self.draw_air_wing_list_panel()
-        self.draw_division_list_panel()
-        self.draw_top_status_bar()
-        self.draw_top_navigation_bar()
-        self.draw_side_panel()
-        self.draw_hex_info_panel()
-        self.draw_gui()
-        self.draw_army_command_bar()
-        if not self.paused:
-            self.draw_battle_panel()
-        self.draw_time_hud()
-        self.draw_map_layer_control()
-        if self.paused:
-            self.draw_pause_menu()
-        construction_tooltip_data = self.construction_hover_tooltip_data()
-        top_tooltip_active = (
-            self.hovered_population_summary
-            or self.hovered_budget_summary
-            or self.hovered_resource_summary
-            or self.hovered_warning_key
-            or self.hovered_division_detach_button
-            or self.hovered_army_plan_button
-            or self.hovered_air_wing_control
-        )
-        if construction_tooltip_data or top_tooltip_active:
-            self.draw_ui_text_batch()
-            self.begin_tooltip_text_frame()
-            self.draw_construction_hover_tooltip(construction_tooltip_data)
-            self.draw_top_hover_tooltips()
-            self.draw_division_detach_tooltip()
-            self.draw_army_plan_tooltip()
-            self.draw_air_wing_ui_tooltip()
-            self.draw_tooltip_text_batch()
-        else:
-            self.draw_ui_text_batch()
-        self.debug_text.text = f"FPS: {self.fps:.0f} | Zoom: {self.world_camera.zoom:.2f}"
-        self.debug_text.x = self.window.width - 12
-        self.debug_text.y = self.window.height - 8
-        self.debug_text.draw()
+        profiler = self.profiler
+        profiler.begin_phase("draw")
+        with profiler.measure("total"):
+            with profiler.measure("setup"):
+                self.sync_cameras_to_window()
+                self.clear()
+                self.begin_ui_text_frame()
+                if not self.premium_shader_enabled and not self.premium_shader_attempted:
+                    self.setup_premium_shader()
+            with profiler.measure("world_camera"):
+                self.world_camera.use()
+            if self.map_overview_dirty and self.use_overview_lod():
+                with profiler.measure("world_overview_refresh"):
+                    self.refresh_dirty_map_overview_tiles()
+            if self.use_overview_lod():
+                with profiler.measure("world_overview_draw"):
+                    self.map_overview_sprite_list.draw()
+            else:
+                with profiler.measure("world_tiles"):
+                    self.visible_tiles.draw()
+                if not self.construction_placement_mode:
+                    with profiler.measure("world_tile_visuals"):
+                        self.draw_tile_visual_system()
+                with profiler.measure("world_construction_labels"):
+                    self.draw_construction_placement_labels()
+            with profiler.measure("world_state_borders"):
+                self.draw_state_borders()
+            if self.map_layer == "political":
+                with profiler.measure("world_capitals"):
+                    self.draw_capital_markers()
+            with profiler.measure("world_air_assets"):
+                self.draw_air_assets()
+            if self.selection_border.visible:
+                with profiler.measure("world_selection"):
+                    self.selection_border_sprite_list.draw()
+            with profiler.measure("world_army_plans"):
+                self.draw_army_plans()
+            with profiler.measure("world_divisions"):
+                self.draw_divisions()
+            with profiler.measure("world_shader_overlay"):
+                self.draw_premium_shader_overlay()
+            with profiler.measure("gui_camera"):
+                self.gui_camera.use()
+            if not self.paused:
+                with profiler.measure("ui_battle_indicators"):
+                    self.draw_battle_indicators()
+            with profiler.measure("ui_division_groups"):
+                self.draw_division_groups()
+            with profiler.measure("ui_selection_box"):
+                self.draw_division_selection_box()
+            with profiler.measure("ui_air_wing_list"):
+                self.draw_air_wing_list_panel()
+            with profiler.measure("ui_division_list"):
+                self.draw_division_list_panel()
+            with profiler.measure("ui_top_status"):
+                self.draw_top_status_bar()
+            with profiler.measure("ui_top_navigation"):
+                self.draw_top_navigation_bar()
+            with profiler.measure("ui_side_panel"):
+                self.draw_side_panel()
+            with profiler.measure("ui_hex_panel"):
+                self.draw_hex_info_panel()
+            with profiler.measure("ui_gui_stub"):
+                self.draw_gui()
+            with profiler.measure("ui_army_command"):
+                self.draw_army_command_bar()
+            if not self.paused:
+                with profiler.measure("ui_battle_panel"):
+                    self.draw_battle_panel()
+            with profiler.measure("ui_time_hud"):
+                self.draw_time_hud()
+            with profiler.measure("ui_map_layer"):
+                self.draw_map_layer_control()
+            if self.paused:
+                with profiler.measure("ui_pause_menu"):
+                    self.draw_pause_menu()
+            with profiler.measure("ui_tooltip_prepare"):
+                construction_tooltip_data = self.construction_hover_tooltip_data()
+                top_tooltip_active = (
+                    self.hovered_population_summary
+                    or self.hovered_budget_summary
+                    or self.hovered_resource_summary
+                    or self.hovered_warning_key
+                    or self.hovered_division_detach_button
+                    or self.hovered_army_plan_button
+                    or self.hovered_air_wing_control
+                )
+            if construction_tooltip_data or top_tooltip_active:
+                with profiler.measure("ui_text_batch"):
+                    self.draw_ui_text_batch()
+                with profiler.measure("ui_tooltips"):
+                    self.begin_tooltip_text_frame()
+                    self.draw_construction_hover_tooltip(construction_tooltip_data)
+                    self.draw_top_hover_tooltips()
+                    self.draw_division_detach_tooltip()
+                    self.draw_army_plan_tooltip()
+                    self.draw_air_wing_ui_tooltip()
+                    self.draw_tooltip_text_batch()
+            else:
+                with profiler.measure("ui_text_batch"):
+                    self.draw_ui_text_batch()
+        with profiler.measure("debug_text"):
+            self.debug_text.text = f"FPS: {self.fps:.0f} | Zoom: {self.world_camera.zoom:.2f}"
+            self.debug_text.x = self.window.width - 12
+            self.debug_text.y = self.window.height - 8
+            self.debug_text.draw()
+        if self.profiler.visible:
+            with profiler.measure("profiler_overlay"):
+                self.draw_performance_overlay()
+        profiler.end_phase("draw")
+
+    def draw_performance_overlay(self):
+        profiler = self.profiler
+        if not self.window:
+            return
+
+        rows = [
+            ("Профайлер F3", None, None),
+            ("DRAW total", "draw", "total"),
+            ("  карта/тайлы", "draw", "world_tiles"),
+            ("  тайловый визуал", "draw", "world_tile_visuals"),
+            ("  границы", "draw", "world_state_borders"),
+            ("  авиация визуал", "draw", "world_air_assets"),
+            ("  планы армий", "draw", "world_army_plans"),
+            ("  дивизии", "draw", "world_divisions"),
+            ("  списки авиации/дивизий", "draw", ("ui_air_wing_list", "ui_division_list")),
+            ("  верхний UI", "draw", ("ui_top_status", "ui_top_navigation", "ui_time_hud")),
+            ("  боковая/гекс панель", "draw", ("ui_side_panel", "ui_hex_panel")),
+            ("  текст UI", "draw", "ui_text_batch"),
+            ("  сам профайлер", "draw", "profiler_overlay"),
+            ("UPDATE total", "update", "total"),
+            ("  сервер время/команды", "update", "server_clock"),
+            ("  рынок", "update", "server_market"),
+            ("  экономика", "update", "server_economy"),
+            ("  производство", "update", "server_production"),
+            ("  строительство", "update", "server_construction"),
+            ("  население", "update", "server_population"),
+            ("  дивизии логика", "update", "server_divisions"),
+            ("  наземные бои", "update", "server_ground_battles"),
+            ("  ПВО/воздушные атаки", "update", ("server_air_defense", "server_air_attack_salvos")),
+            ("  авиация логика", "update", ("server_air_missions", "server_air_salvos")),
+            ("  планы армий логика", "update", "server_army_plans"),
+            ("  владение/камера/видимость", "update", ("ownership_refresh", "camera", "visible_tiles_refresh")),
+        ]
+
+        line_height = 14
+        panel_width = 360
+        panel_height = 12 + line_height * len(rows)
+        x = 12
+        y = self.window.height - panel_height - 12
+        arcade.draw_lbwh_rectangle_filled(x, y, panel_width, panel_height, (12, 18, 24, 222))
+        arcade.draw_lbwh_rectangle_outline(x, y, panel_width, panel_height, (100, 126, 155, 210), 1)
+
+        now = time.perf_counter()
+        if (
+            not self.performance_overlay_rows
+            or now - self.performance_overlay_last_update >= self.performance_overlay_update_interval
+        ):
+            self.performance_overlay_rows = []
+            for label, phase, names in rows:
+                if phase is None:
+                    text = label
+                    color = (235, 242, 250)
+                else:
+                    if isinstance(names, tuple):
+                        avg_ms = sum(profiler.average_ms(phase, name) for name in names)
+                        last_ms = sum(profiler.latest_ms(phase, name) for name in names)
+                    else:
+                        avg_ms = profiler.average_ms(phase, names)
+                        last_ms = profiler.latest_ms(phase, names)
+                    text = f"{label}: {avg_ms:5.2f} ms  last {last_ms:5.2f}"
+                    color = (206, 218, 230) if avg_ms < 2.0 else (238, 205, 120)
+                    if avg_ms >= 6.0:
+                        color = (242, 142, 118)
+                self.performance_overlay_rows.append((text, color))
+            self.performance_overlay_last_update = now
+
+        text_y = y + panel_height - 18
+        for index, (text, color) in enumerate(self.performance_overlay_rows):
+            if index >= len(self.performance_overlay_texts):
+                self.performance_overlay_texts.append(
+                    arcade.Text("", 0, 0, color, 10, batch=self.performance_overlay_batch)
+                )
+            overlay_text = self.performance_overlay_texts[index]
+            if overlay_text.text != text:
+                overlay_text.text = text
+            overlay_text.x = x + 10
+            overlay_text.y = text_y
+            if overlay_text.color != color:
+                overlay_text.color = color
+            if overlay_text.font_size != 10:
+                overlay_text.font_size = 10
+            text_y -= line_height
+        for overlay_text in self.performance_overlay_texts[len(self.performance_overlay_rows):]:
+            if overlay_text.text:
+                overlay_text.text = ""
+        self.performance_overlay_batch.draw()
 
     def refresh_visible_tiles(self):
         if not self.window or not self.hex_grid:
@@ -16146,6 +17015,26 @@ class Game(arcade.View):
         labels = [self.air_wing_mission_label(mission) for mission in enabled]
         return ", ".join(labels[:3]) + (f" +{len(labels) - 3}" if len(labels) > 3 else "")
 
+    def air_wing_auto_loadout_summary(self, wing):
+        if not wing:
+            return "авто БК: нет"
+        parts = []
+        for mission in self.air_wing_enabled_missions(wing):
+            if mission in {"intercept", "air_superiority", "patrol"}:
+                aircraft_type = self.air_wing_primary_type_for_mission(wing, mission)
+                munition_id = AIR_WING_INTERCEPTOR_LOADOUTS.get(aircraft_type, {}).get("munition_id")
+            else:
+                aircraft_type = self.air_wing_primary_type_for_mission(wing, mission)
+                munition_id = self.air_wing_mission_loadout(aircraft_type, mission)
+            if not aircraft_type or not munition_id:
+                continue
+            mission_label = self.air_wing_mission_label(mission)
+            munition_name = MUNITIONS.get(munition_id, {}).get("name", munition_id)
+            parts.append(f"{mission_label}: {munition_name}")
+        if not parts:
+            return "авто БК: нет"
+        return "авто БК " + "; ".join(parts[:3]) + (f"; +{len(parts) - 3}" if len(parts) > 3 else "")
+
     def air_wing_targets_summary(self, wing):
         priorities = list(getattr(wing, "target_priorities", []) or [])
         if not priorities:
@@ -17767,6 +18656,13 @@ class Game(arcade.View):
                 (184, 202, 218),
                 9,
             )
+            self.draw_ui_text(
+                self.air_wing_auto_loadout_summary(selected_wing),
+                panel_x + 12,
+                controls_y + 33,
+                (154, 176, 196),
+                8,
+            )
             button_defs = [
                 ("mission", "Миссии", 58, "Выбрать автоматические миссии крыла: CAS, перехват, патруль, превосходство или удар."),
                 ("targets", "Цели", 48, "Выбрать категории наземных целей для автоматической миссии Удар."),
@@ -19164,72 +20060,103 @@ class Game(arcade.View):
                 tile.color = base_color
 
     def on_update(self, delta_time):
-        self.shader_time += delta_time
-        self.update_map_layer_menu_animation(delta_time)
-        self.update_side_panel_animation(delta_time)
-        if self.hex_panel_message_timer > 0:
-            self.hex_panel_message_timer = max(0.0, self.hex_panel_message_timer - delta_time)
-            if self.hex_panel_message_timer == 0:
-                self.hex_panel_message = ""
+        profiler = self.profiler
+        profiler.begin_phase("update")
+        try:
+            with profiler.measure("total"):
+                with profiler.measure("ui_animation"):
+                    self.shader_time += delta_time
+                    self.update_map_layer_menu_animation(delta_time)
+                    self.update_side_panel_animation(delta_time)
+                    if self.hex_panel_message_timer > 0:
+                        self.hex_panel_message_timer = max(0.0, self.hex_panel_message_timer - delta_time)
+                        if self.hex_panel_message_timer == 0:
+                            self.hex_panel_message = ""
 
-        if self.paused or self.game_over:
-            return
+                if self.paused or self.game_over:
+                    return
 
-        self.update_division_visual_motion(delta_time)
-        self.fps_frame_count += 1
-        self.fps_timer += delta_time
-        if self.fps_timer >= 0.5:
-            self.fps = self.fps_frame_count / self.fps_timer
-            self.fps_frame_count = 0
-            self.fps_timer = 0
+                with profiler.measure("visual_motion"):
+                    self.update_division_visual_motion(delta_time)
+                    self.update_air_impact_decals(delta_time)
+                with profiler.measure("fps_counter"):
+                    self.fps_frame_count += 1
+                    self.fps_timer += delta_time
+                    if self.fps_timer >= 0.5:
+                        self.fps = self.fps_frame_count / self.fps_timer
+                        self.fps_frame_count = 0
+                        self.fps_timer = 0
 
-        previous_tick_count = self.simulation_client.snapshot.tick_count
-        self.simulation_server.update(delta_time)
-        self.simulation_client.sync_from_server()
-        snapshot = self.simulation_client.snapshot
-        tick_delta = max(0, snapshot.tick_count - previous_tick_count)
-        if tick_delta > 0:
-            elapsed_hours = snapshot.hours_per_tick * tick_delta
-            market_ticks = self.simulation_server.consume_market_ticks()
-            for _market_index in range(market_ticks):
-                self.run_weekly_market_tick()
-            for player in self.players:
-                self.run_economy_tick(player, elapsed_hours)
-                self.run_production_tick(player, elapsed_hours)
-                self.run_construction_tick(player, elapsed_hours)
-                self.run_population_tick(player, elapsed_hours)
-            self.update_divisions(elapsed_hours)
-            self.update_battles(elapsed_hours)
-            self.update_field_helipad_projects(elapsed_hours)
-            self.update_air_defense_units(elapsed_hours)
-            self.update_air_attack_salvos(elapsed_hours)
-            self.update_air_missions(elapsed_hours)
-            self.update_air_salvos(elapsed_hours)
-            self.update_army_plans(elapsed_hours)
-            self.update_economy_month_history(snapshot.current_time)
-            self.last_production_tick_count = snapshot.tick_count
+                previous_tick_count = self.simulation_client.snapshot.tick_count
+                with profiler.measure("server_clock"):
+                    self.simulation_server.update(delta_time)
+                    self.simulation_client.sync_from_server()
+                snapshot = self.simulation_client.snapshot
+                tick_delta = max(0, snapshot.tick_count - previous_tick_count)
+                if tick_delta > 0:
+                    elapsed_hours = snapshot.hours_per_tick * tick_delta
+                    with profiler.measure("server_market"):
+                        market_ticks = self.simulation_server.consume_market_ticks()
+                        for _market_index in range(market_ticks):
+                            self.run_weekly_market_tick()
+                    with profiler.measure("server_economy"):
+                        for player in self.players:
+                            self.run_economy_tick(player, elapsed_hours)
+                    with profiler.measure("server_production"):
+                        for player in self.players:
+                            self.run_production_tick(player, elapsed_hours)
+                    with profiler.measure("server_construction"):
+                        for player in self.players:
+                            self.run_construction_tick(player, elapsed_hours)
+                    with profiler.measure("server_population"):
+                        for player in self.players:
+                            self.run_population_tick(player, elapsed_hours)
+                    with profiler.measure("server_divisions"):
+                        self.update_divisions(elapsed_hours)
+                    with profiler.measure("server_ground_battles"):
+                        self.update_battles(elapsed_hours)
+                    with profiler.measure("server_field_helipads"):
+                        self.update_field_helipad_projects(elapsed_hours)
+                    with profiler.measure("server_air_defense"):
+                        self.update_air_defense_units(elapsed_hours)
+                    with profiler.measure("server_air_attack_salvos"):
+                        self.update_air_attack_salvos(elapsed_hours)
+                    with profiler.measure("server_air_missions"):
+                        self.update_air_missions(elapsed_hours)
+                    with profiler.measure("server_air_salvos"):
+                        self.update_air_salvos(elapsed_hours)
+                    with profiler.measure("server_army_plans"):
+                        self.update_army_plans(elapsed_hours)
+                    with profiler.measure("server_economy_history"):
+                        self.update_economy_month_history(snapshot.current_time)
+                        self.last_production_tick_count = snapshot.tick_count
 
-        self.process_ownership_refresh()
-        self.handle_camera_keys(delta_time)
-        self.clamp_target_camera()
+                with profiler.measure("ownership_refresh"):
+                    self.process_ownership_refresh()
+                with profiler.measure("camera"):
+                    self.handle_camera_keys(delta_time)
+                    self.clamp_target_camera()
 
-        camera_x, camera_y = arcade.math.lerp_2d(
-            self.world_camera.position,
-            (self.target_camera_x, self.target_camera_y),
-            CAMERA_LERP,
-        )
-        self.world_camera.position = self.clamp_camera_position(camera_x, camera_y)
+                    camera_x, camera_y = arcade.math.lerp_2d(
+                        self.world_camera.position,
+                        (self.target_camera_x, self.target_camera_y),
+                        CAMERA_LERP,
+                    )
+                    self.world_camera.position = self.clamp_camera_position(camera_x, camera_y)
 
-        current_time = time.time()
-        if current_time - self.last_visible_update > self.visible_update_interval:
-            if self.use_overview_lod():
-                self.visible_tiles.clear()
-                self.refresh_visible_tiles_signature()
-            else:
-                self.get_visible_tiles()
-                self.refresh_visible_tiles_signature()
-                self.update_draw_list()
-            self.last_visible_update = current_time
+                current_time = time.time()
+                if current_time - self.last_visible_update > self.visible_update_interval:
+                    with profiler.measure("visible_tiles_refresh"):
+                        if self.use_overview_lod():
+                            self.visible_tiles.clear()
+                            self.refresh_visible_tiles_signature()
+                        else:
+                            self.get_visible_tiles()
+                            self.refresh_visible_tiles_signature()
+                            self.update_draw_list()
+                        self.last_visible_update = current_time
+        finally:
+            profiler.end_phase("update")
 
     def handle_camera_keys(self, delta_time):
         move_distance = MOVE_SPEED * 60 * delta_time
@@ -19375,7 +20302,11 @@ class Game(arcade.View):
                     steps = 1
                     if self.shift_modifier_active(modifiers):
                         steps = max(1, round(0.25 / CONSTRUCTION_STEP))
-                    self.enqueue_construction_steps(self.human_player, tile, building_key, steps)
+                    self.submit_player_command("enqueue_construction", {
+                        "tile_key": self.tile_key(tile),
+                        "building_key": building_key,
+                        "steps": steps,
+                    })
                     return
                 return
 
@@ -19457,7 +20388,10 @@ class Game(arcade.View):
                     tile,
                     building_key,
                 ):
-                    self.cancel_queued_construction(self.human_player, tile, building_key)
+                    self.submit_player_command("cancel_construction", {
+                        "tile_key": self.tile_key(tile),
+                        "building_key": building_key,
+                    })
                     return
 
             if button == arcade.MOUSE_BUTTON_RIGHT and self.selected_divisions():
@@ -19750,6 +20684,11 @@ class Game(arcade.View):
         return None
 
     def on_key_press(self, key, modifiers):
+        if key == arcade.key.F3:
+            self.profiler.visible = not self.profiler.visible
+            self.performance_overlay_last_update = 0.0
+            return
+
         if key == arcade.key.ESCAPE:
             if self.army_plan_mode:
                 self.cancel_army_plan_mode()
