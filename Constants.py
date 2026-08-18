@@ -96,8 +96,9 @@ DIVISION_COMBAT_REINFORCEMENT_MULT = 0.22
 DIVISION_FOREIGN_TILE_SUPPLY_MULT = 0.25
 DIVISION_MANPOWER_STRENGTH_LOSS_MULT = 1.0
 DIVISION_EQUIPMENT_STRENGTH_LOSS_MULT = 0.75
+DIVISION_COMBAT_STOCK_STRENGTH_LOSS_MULT = 0.55
 DIVISION_AMMO_ATTACK_FLOOR = 0.35
-DIVISION_LOW_SUPPLY_ATTACK_FLOOR = 0.45
+DIVISION_LOW_SUPPLY_ATTACK_FLOOR = 0.90
 DIVISION_STARTING_ARMY_STOCK_MULT = 2.5
 COMBAT_WIDTH_DEFAULT = 80.0
 COMBAT_WIDTH_EXTRA_DIRECTION = 40.0
@@ -168,6 +169,40 @@ DIVISION_EQUIPMENT_LOSS_KEYS = [
     "spare_parts",
     "field_supplies",
 ]
+DIVISION_COMBAT_STOCK_LOSS_KEYS = [
+    "small_arms_ammo",
+    "light_artillery_ammo",
+    "light_aa_ammo",
+    "autocannon_ammo",
+    "artillery_ammo",
+    "tank_ammo",
+    "anti_air_ammo",
+    "refined_fuel",
+]
+DIVISION_ATTACK_AMMO_SOFT_FACTORS = {
+    "small_arms_ammo": 0.62,
+    "light_artillery_ammo": 0.08,
+    "autocannon_ammo": 0.05,
+}
+DIVISION_ATTACK_AMMO_FRONT_FACTORS = {
+    "old_at_missiles": 0.075,
+    "autocannon_ammo": 0.070,
+    "tank_ammo": 0.095,
+}
+DIVISION_ATTACK_AMMO_TOP_FACTORS = {
+    "light_artillery_ammo": 0.18,
+    "tank_ammo": 0.030,
+}
+DIVISION_ATTACK_FUEL_USE_PER_VEHICLE_SHARE = 2.2
+DIVISION_ATTACK_FIELD_SUPPLY_BASE = 0.35
+DIVISION_ATTACK_FIELD_SUPPLY_PER_WIDTH = 0.22
+DIVISION_ATTACK_FIELD_SUPPLY_PER_ATTACK = 0.010
+AIR_CAS_BREAKTHROUGH_BONUS = 0.10
+AIR_CAS_BREAKTHROUGH_BONUS_HOURS = 6.0
+AIR_SUPERIORITY_BREAKTHROUGH_BONUS = 0.05
+DIVISION_MANPADS_AMMO_PER_TARGET = 1
+DIVISION_SHORT_AA_AMMO_PER_TARGET = 8
+DIVISION_SHORT_AA_GUNS_PER_CHANNEL = 6
 STATE_COLORS = [
     (235, 65, 56),
     (255, 184, 0),
@@ -405,7 +440,70 @@ AIR_SALVO_BUILDING_DAMAGE_PER_WARHEAD = 0.012
 AIR_SALVO_DIVISION_ORG_DAMAGE_PER_WARHEAD = 0.70
 AIR_SALVO_DIVISION_STRENGTH_DAMAGE_PER_WARHEAD = 0.11
 AIR_SALVO_MAX_BUILDING_DAMAGE_PER_IMPACT = 0.32
+AIR_SALVO_CAS_COLLATERAL_BUILDING_DAMAGE_MULT = 0.16
+AIR_SALVO_BUILDING_DAMAGE_MULT_BY_TYPE = {
+    "unguided_rocket": 0.18,
+    "guided_missile": 0.42,
+    "guided_bomb": 0.95,
+    "glide_bomb": 1.05,
+    "cruise_missile": 1.35,
+    "ballistic_missile": 1.65,
+    "heavy_strategic_missile": 2.25,
+    "bunker_buster": 1.85,
+}
+AIR_SALVO_BUILDING_DAMAGE_CAP_BY_TYPE = {
+    "unguided_rocket": 0.035,
+    "guided_missile": 0.080,
+    "guided_bomb": 0.170,
+    "glide_bomb": 0.200,
+    "cruise_missile": 0.290,
+    "ballistic_missile": 0.340,
+    "heavy_strategic_missile": 0.460,
+    "bunker_buster": 0.390,
+}
+AIR_SALVO_BUILDING_HARDNESS = {
+    "city": 1.35,
+    "village": 0.85,
+    "farms": 0.65,
+    "mine": 1.25,
+    "oil_gas_rig": 1.10,
+    "industry": 1.15,
+    "port": 1.25,
+    "warehouse": 0.85,
+    "supply_depot": 0.80,
+    "fuel_storage": 0.72,
+    "refinery": 1.05,
+    "airbase": 1.15,
+    "field_helipad": 0.42,
+}
+AIR_SALVO_BUILDING_VALUE = {
+    "city": 1.15,
+    "village": 0.55,
+    "farms": 0.42,
+    "mine": 0.80,
+    "oil_gas_rig": 1.00,
+    "industry": 1.35,
+    "port": 1.10,
+    "warehouse": 0.90,
+    "supply_depot": 1.25,
+    "fuel_storage": 1.15,
+    "refinery": 1.25,
+    "airbase": 1.45,
+    "field_helipad": 0.70,
+}
+AIR_SALVO_GENERAL_EQUIPMENT_LOSS_MULT = 0.45
+AIR_SALVO_TARGETED_EQUIPMENT_LOSS_MULT = 0.85
+AIR_SALVO_TARGETED_EQUIPMENT_MAX_LOSS_RATIO = 0.045
+AIR_SALVO_EQUIPMENT_FOCUS_MIN = 0.45
+AIR_SALVO_EQUIPMENT_FOCUS_MAX = 1.45
 AIR_CARRIER_EXPOSURE_BASE_LOSS_CHANCE = 0.055
+AIR_ESTIMATE_NORMAL_FIRE_THRESHOLD = 0.35
+AIR_ESTIMATE_DESPERATE_FIRE_THRESHOLD = 0.15
+AIR_ESTIMATE_MINIMAL_FIRE_THRESHOLD = 0.06
+AIR_CARRIER_ABORTED_COOLDOWN_HOURS = 6.0
+AIR_CARRIER_DEFENSIVE_COOLDOWN_HOURS = 2.0
+AIR_CARRIER_DAMAGE_FROM_HIT_CHANCE = 0.58
+AIR_CARRIER_DESTROY_FROM_HIT_CHANCE = 0.32
 AIR_DEFENSE_IMMOBILE_CLASSES = {"missile_silo", "strategic_fixed_radar"}
 FIELD_HELIPAD_HELICOPTER_CAPACITY_PER_COVERAGE = 80
 STARTING_AIRCRAFT_STOCKPILE_RATIO = 0.25
@@ -853,6 +951,78 @@ MUNITIONS = {
         "max_interceptability": 0.72,
         "interception_difficulty": 0.44,
         "target_tags": ["bunker", "airbase", "hardened_shelter"],
+    },
+    "short_air_to_air_missile": {
+        "name": "Ближняя УРВВ",
+        "type": "air_to_air_missile",
+        "max_range": 2.5,
+        "min_range": 0.1,
+        "optimal_range": 1.0,
+        "terminal_range": 0.4,
+        "cruise_speed": 1.9,
+        "terminal_speed": 2.2,
+        "flight_profile": "sustained_motor",
+        "accuracy": 0.62,
+        "warhead": 0.32,
+        "penetration": 0.08,
+        "rcs": 0.08,
+        "infrared_signature": 0.58,
+        "maneuverability": 0.74,
+        "guidance_quality": 0.66,
+        "jamming_resistance": 0.30,
+        "min_interceptability": 0.10,
+        "max_interceptability": 0.44,
+        "interception_difficulty": 0.52,
+        "target_tags": ["aircraft", "helicopters", "cruise_missile", "guided_missile"],
+    },
+    "medium_air_to_air_missile": {
+        "name": "Средняя УРВВ",
+        "type": "air_to_air_missile",
+        "max_range": 5.5,
+        "min_range": 0.4,
+        "optimal_range": 2.8,
+        "terminal_range": 0.7,
+        "cruise_speed": 2.2,
+        "terminal_speed": 2.5,
+        "flight_profile": "sustained_motor",
+        "accuracy": 0.66,
+        "warhead": 0.38,
+        "penetration": 0.10,
+        "rcs": 0.10,
+        "infrared_signature": 0.44,
+        "maneuverability": 0.68,
+        "guidance_quality": 0.72,
+        "jamming_resistance": 0.42,
+        "min_interceptability": 0.12,
+        "max_interceptability": 0.50,
+        "interception_difficulty": 0.58,
+        "target_tags": ["aircraft", "cruise_missile", "guided_missile", "glide_bomb"],
+    },
+}
+AIR_WING_INTERCEPTOR_LOADOUTS = {
+    "light_fighter": {
+        "munition_id": "medium_air_to_air_missile",
+        "ammo_per_aircraft": 4,
+        "fire_channels_per_sortie": 2,
+        "interceptors_per_target": 1,
+    },
+    "multirole_fighter": {
+        "munition_id": "medium_air_to_air_missile",
+        "ammo_per_aircraft": 3,
+        "fire_channels_per_sortie": 2,
+        "interceptors_per_target": 1,
+    },
+    "fighter_bomber": {
+        "munition_id": "short_air_to_air_missile",
+        "ammo_per_aircraft": 1,
+        "fire_channels_per_sortie": 1,
+        "interceptors_per_target": 1,
+    },
+    "cas_aircraft": {
+        "munition_id": "short_air_to_air_missile",
+        "ammo_per_aircraft": 1,
+        "fire_channels_per_sortie": 1,
+        "interceptors_per_target": 1,
     },
 }
 AIR_DEFENSE_CLASSES = {
