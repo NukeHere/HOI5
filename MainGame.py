@@ -32,6 +32,7 @@ from performance import PerformanceProfiler
 from simulation_core import LocalSimulationClient, LocalSimulationServer
 from ui_controls import HudButton, PauseButton, PauseDropdown, PauseSlider
 from ui_panels import UIPanelsMixin
+from country_panel import CountryPanelMixin
 
 
 def create_hex_texture():
@@ -256,7 +257,7 @@ class WorldGenerator:
         return lake_chance > (1 - LAKE_FREQUENCY * 0.7) and is_depression
 
 
-class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanelsMixin, arcade.View):
+class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanelsMixin, arcade.View):
     def __init__(self, difficulty="Normal", bot_count=3, map_size=None):
         super().__init__()
         arcade.set_background_color(arcade.color.BLACK)
@@ -772,6 +773,7 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
         ]
 
     def register_simulation_command_handlers(self):
+        self.simulation_server.register_command_handler("political_action", self.handle_political_command)
         self.simulation_server.register_command_handler("enqueue_construction", self.handle_enqueue_construction_command)
         self.simulation_server.register_command_handler("cancel_construction", self.handle_cancel_construction_command)
 
@@ -961,26 +963,38 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
         social_breakdown = self.monthly_social_expenses_breakdown(player)
         social = social_breakdown["total"]
         infrastructure = self.monthly_infrastructure_expenses(player)
+        political_programs = self.politics.program_expenses(player)
+        _, debt_service = self.politics.monthly_debt_flows(player.id)
         return {
             "army": army,
             "government": government,
             "social": social,
             "social_breakdown": social_breakdown,
             "infrastructure": infrastructure,
-            "total": army + government + social + infrastructure,
+            "political_programs": political_programs,
+            "debt_service": debt_service,
+            "total": army + government + social + infrastructure + political_programs + debt_service,
         }
 
     def recalculate_monthly_balance(self, player):
-        population_income = self.monthly_population_income(player)
-        company_income = self.monthly_company_income(player)
+        population_income = self.monthly_population_income(player) * player.politics.tax_multiplier("population")
+        base_company_income = self.monthly_company_income(player)
+        # The economy has no individual firms yet; keep this proxy explicit.
+        smb_income = base_company_income * 0.65 * player.politics.tax_multiplier("smb")
+        large_income = base_company_income * 0.35 * player.politics.tax_multiplier("large")
+        company_income = smb_income + large_income
         trade_balance = self.estimate_monthly_trade_flows(player)["money_balance"]
         expenses = self.monthly_expenses(player)
-        total_income = population_income + company_income + trade_balance
+        loan_repayments, _ = self.politics.monthly_debt_flows(player.id)
+        total_income = population_income + company_income + trade_balance + loan_repayments
         total_balance = total_income - expenses["total"]
         player.monthly_trade_balance = trade_balance
         player.monthly_income_breakdown = {
             "population": population_income,
             "companies": company_income,
+            "smb": smb_income,
+            "large": large_income,
+            "loan_repayments": loan_repayments,
             "trade": trade_balance,
             "multiplier": 1.0,
             "total": total_income,
@@ -1059,7 +1073,9 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
         company_income = income_breakdown.get("companies", 0.0)
         expenses = player.monthly_expenses_breakdown or self.monthly_expenses(player)
         player.monthly_expenses_breakdown = expenses
-        player.budget += (population_income + company_income - expenses.get("total", 0.0)) * month_fraction
+        # Loan payments are settled on their due dates by the political simulation.
+        operating_expenses = expenses.get("total", 0.0) - expenses.get("debt_service", 0.0)
+        player.budget += (population_income + company_income - operating_expenses) * month_fraction
         self.mark_player_resource_balance_dirty(player)
 
     def run_production_stage(self, player, stage, month_fraction):
@@ -1492,13 +1508,7 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
             max_overcapacity = self.tile_population_max_capacity(tile)
             if population <= 0 or max_population <= 0:
                 continue
-            free_capacity = max(0.0, max_overcapacity - population)
-            if free_capacity <= 0:
-                continue
-            capacity_pressure = 0.1 + 0.9 * ((POPULATION_MAX_OVERCAPACITY * max_population - population) / population)
-            capacity_pressure = max(0.0, capacity_pressure)
-            delta = population * monthly_rate * month_fraction * growth_multiplier * capacity_pressure
-            delta = min(free_capacity, delta)
+            delta = self.tile_population_growth_delta(tile, month_fraction, growth_multiplier)
             if delta <= 0:
                 continue
             tile.population = population + delta
@@ -1527,6 +1537,22 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
             tile.population = max(0.0, population - loss * population / total_population)
         self.sync_player_population_from_tiles(player)
         return -loss
+
+    def tile_population_growth_delta(self, tile, month_fraction, growth_multiplier):
+        population = self.tile_population(tile)
+        capacity = self.tile_population_capacity(tile)
+        free = max(0.0, self.tile_population_max_capacity(tile) - population)
+        if population <= 0 or capacity <= 0 or growth_multiplier <= 0:
+            return 0.0
+        pressure = max(0.0, 0.1 + 0.9 * ((POPULATION_MAX_OVERCAPACITY * capacity - population) / population))
+        return min(free, population * POPULATION_BASE_ANNUAL_GROWTH / 12 * month_fraction * growth_multiplier * pressure)
+
+    def population_monthly_forecast(self, player):
+        multiplier = self.population_growth_multiplier(player)
+        if multiplier > 0:
+            return sum(self.tile_population_growth_delta(tile, 1, multiplier) for tile in player.tiles)
+        population = sum(self.tile_population(tile) for tile in player.tiles)
+        return max(-population, population * POPULATION_BASE_ANNUAL_GROWTH / 12 * multiplier)
 
     def grow_settlements_from_overcrowding(self, player, month_fraction):
         changed = False
@@ -2355,8 +2381,7 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
             return False
         if not division or tile.owner == division.owner:
             return False
-        # Пока дипломатии нет, любая чужая сухопутная клетка считается захватываемой.
-        return True
+        return tile.owner is None or self.countries_hostile(division.owner, tile.owner)
 
     def division_can_path_through_tile(self, division, tile, target_tile):
         if self.division_can_enter_tile(division, tile):
@@ -2472,7 +2497,7 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
             return []
         return [
             division for division in self.divisions
-            if division.tile == tile and division.owner != owner and division.strength > 0
+            if division.tile == tile and self.countries_hostile(division.owner, owner) and division.strength > 0
         ]
 
     def battle_divisions(self, battle, attr):
@@ -2547,6 +2572,8 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
 
     def start_or_join_battle(self, division, target_tile):
         if not target_tile or self.is_water_tile(target_tile):
+            return False
+        if not self.countries_hostile(division.owner, target_tile.owner):
             return False
         battle_key = self.battle_key_for_tile(target_tile)
         battle = self.battles.get(battle_key)
@@ -3303,6 +3330,11 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
                     self.recover_division_organization(division, elapsed_hours)
                     continue
                 next_tile = division.path[0]
+                if next_tile.owner is not None and next_tile.owner is not division.owner and not self.countries_hostile(division.owner, next_tile.owner):
+                    division.path.clear()
+                    division.route_tiles.clear()
+                    division.target_tile = None
+                    continue
                 if next_tile.owner and next_tile.owner != division.owner and self.enemy_divisions_on_tile(next_tile, division.owner):
                     self.start_or_join_battle(division, next_tile)
                     continue
@@ -3318,6 +3350,10 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
                     division.organization - DIVISION_ORG_MOVE_COST_PER_TILE * progress,
                 )
                 while division.path and division.movement_progress >= 1.0:
+                    step_owner = division.path[0].owner
+                    if step_owner is not None and step_owner is not division.owner and not self.countries_hostile(division.owner, step_owner):
+                        division.path.clear()
+                        break
                     division.movement_progress -= 1.0
                     division.visual_movement_progress = self.clamp01(division.movement_progress)
                     division.tile = division.path.pop(0)
@@ -4157,6 +4193,7 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
             self.players.append(player)
 
         self.human_player = self.players[0]
+        self.initialize_politics()
         start_tiles = self.find_state_start_tiles(total_players)
         for player, start_tile in zip(self.players, start_tiles):
             player.capital_tile = start_tile
@@ -6429,9 +6466,12 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
                     or self.hovered_army_plan_button
                     or self.hovered_air_wing_control
                 )
+            with profiler.measure("ui_text_batch"):
+                self.draw_ui_text_batch()
+            if not self.paused:
+                with profiler.measure("ui_country_card"):
+                    self.draw_country_card()
             if construction_tooltip_data or top_tooltip_active:
-                with profiler.measure("ui_text_batch"):
-                    self.draw_ui_text_batch()
                 with profiler.measure("ui_tooltips"):
                     self.begin_tooltip_text_frame()
                     self.draw_construction_hover_tooltip(construction_tooltip_data)
@@ -6440,9 +6480,6 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
                     self.draw_army_plan_tooltip()
                     self.draw_air_wing_ui_tooltip()
                     self.draw_tooltip_text_batch()
-            else:
-                with profiler.measure("ui_text_batch"):
-                    self.draw_ui_text_batch()
         with profiler.measure("debug_text"):
             self.debug_text.text = f"FPS: {self.fps:.0f} | Zoom: {self.world_camera.zoom:.2f}"
             self.debug_text.x = self.window.width - 12
@@ -8401,7 +8438,20 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
 
         panel_x, panel_y, panel_width, panel_height = rect
         current_top = panel_y + panel_height
-        self.division_list_icon_shape_list = arcade.shape_list.ShapeElementList()
+        geometry_key = (
+            rect, self.active_division_list_army_id, self.hovered_division_detach_button,
+            tuple(sorted(self.selected_division_ids)), self.division_list_scroll_index,
+            tuple(sorted(self.division_list_scroll_indices.items(), key=lambda item: str(item[0]))),
+            tuple((group["key"], tuple((d.id, d.template_key) for d in group["rows"])) for group in groups),
+        )
+        rebuild_geometry = geometry_key != getattr(self, "division_list_geometry_key", None)
+        if rebuild_geometry:
+            self.division_list_icon_shape_list = arcade.shape_list.ShapeElementList()
+        shapes = self.division_list_icon_shape_list
+
+        def rectangle(rectangle_rect, fill, border=None, border_width=1):
+            if rebuild_geometry:
+                self.append_trade_rect_shapes(shapes, rectangle_rect, fill, border, border_width)
 
         collapsed_h = 36
         gap = 6
@@ -8424,14 +8474,12 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
 
             fill = (18, 24, 31, 238) if active else (26, 34, 43, 236)
             border = (116, 142, 170) if active else (78, 96, 116)
-            arcade.draw_lbwh_rectangle_filled(*group_rect, fill)
-            arcade.draw_lbwh_rectangle_outline(*group_rect, border, 2 if active else 1)
+            rectangle(group_rect, fill, border, 2 if active else 1)
 
             close_rect = (panel_x + panel_width - 34, group_y + group_height - 30, 24, 22)
             self.division_list_close_rects.append((close_rect, group["key"]))
             close_fill = (70, 50, 54, 235)
-            arcade.draw_lbwh_rectangle_filled(*close_rect, close_fill)
-            arcade.draw_lbwh_rectangle_outline(*close_rect, (116, 136, 156), 1)
+            rectangle(close_rect, close_fill, (116, 136, 156))
             self.draw_ui_text("X", close_rect[0] + close_rect[2] / 2, close_rect[1] + close_rect[3] / 2 + 1,
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
 
@@ -8447,12 +8495,12 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
                 detach_y = close_rect[1] - detach_size - 6
                 self.division_detach_button_rect = (detach_x, detach_y, detach_size, detach_size)
                 detach_fill = (70, 50, 54, 235) if self.hovered_division_detach_button else (38, 48, 58, 230)
-                arcade.draw_lbwh_rectangle_filled(detach_x, detach_y, detach_size, detach_size, detach_fill)
-                arcade.draw_lbwh_rectangle_outline(detach_x, detach_y, detach_size, detach_size, (110, 132, 154), 1)
+                rectangle((detach_x, detach_y, detach_size, detach_size), detach_fill, (110, 132, 154))
                 center_x = detach_x + detach_size / 2
                 center_y = detach_y + detach_size / 2
-                arcade.draw_circle_outline(center_x, center_y, 7, (220, 226, 232), 2)
-                arcade.draw_line(center_x - 8, center_y + 8, center_x + 8, center_y - 8, (224, 70, 70), 3)
+                if rebuild_geometry:
+                    shapes.append(arcade.shape_list.create_ellipse_outline(center_x, center_y, 14, 14, (220, 226, 232), 2))
+                    shapes.append(arcade.shape_list.create_line(center_x - 8, center_y + 8, center_x + 8, center_y - 8, (224, 70, 70), 3))
 
                 rows = group["rows"]
                 org_average = sum(division.organization for division in rows) / max(1, len(rows))
@@ -8483,18 +8531,14 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
                     self.division_list_row_rects.append((row_rect, division))
                     selected = division.id in self.selected_division_ids
                     fill = (54, 84, 58, 220) if selected else (35, 48, 60, 210)
-                    arcade.draw_lbwh_rectangle_filled(*row_rect, fill)
-                    arcade.draw_lbwh_rectangle_outline(*row_rect, (76, 98, 120), 1)
+                    rectangle(row_rect, fill, (76, 98, 120))
                     icon_x = row_rect[0] + 22
                     icon_y = row_rect[1] + row_rect[3] / 2
-                    self.append_division_template_icon(
-                        self.division_list_icon_shape_list,
-                        division.template_key,
-                        icon_x,
-                        icon_y + 2,
-                        27,
-                        (210, 224, 232) if selected else (152, 168, 184),
-                    )
+                    if rebuild_geometry:
+                        self.append_division_template_icon(
+                            shapes, division.template_key, icon_x, icon_y + 2, 27,
+                            (210, 224, 232) if selected else (152, 168, 184),
+                        )
                     text_color = arcade.color.WHITE if selected else (176, 190, 204)
                     self.draw_ui_text(self.division_display_name(division), row_rect[0] + 48, icon_y + 3, text_color, 13, anchor_y="center")
                     org_color = (154, 224, 142) if division.organization >= 45 else (236, 198, 90)
@@ -8507,12 +8551,13 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
                     track_h = list_top - list_bottom
                     thumb_h = max(22, track_h * visible_count / len(rows))
                     thumb_y = track_y + (track_h - thumb_h) * (1 - scroll_index / max(1, max_scroll))
-                    arcade.draw_lbwh_rectangle_filled(track_x, track_y, 4, track_h, (48, 62, 78, 190))
-                    arcade.draw_lbwh_rectangle_filled(track_x, thumb_y, 4, thumb_h, (142, 166, 194, 230))
+                    rectangle((track_x, track_y, 4, track_h), (48, 62, 78, 190))
+                    rectangle((track_x, thumb_y, 4, thumb_h), (142, 166, 194, 230))
 
             current_top = group_y - gap
 
-        self.division_list_icon_shape_list.draw()
+        self.division_list_geometry_key = geometry_key
+        shapes.draw()
 
     def draw_air_wing_list_panel(self):
         rows = self.air_wing_list_rows()
@@ -10054,6 +10099,8 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
                 tick_delta = max(0, snapshot.tick_count - previous_tick_count)
                 if tick_delta > 0:
                     elapsed_hours = snapshot.hours_per_tick * tick_delta
+                    with profiler.measure("server_politics"):
+                        self.advance_politics(elapsed_hours)
                     with profiler.measure("server_market"):
                         market_ticks = self.simulation_server.consume_market_ticks()
                         for _market_index in range(market_ticks):
@@ -10163,6 +10210,8 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
                         return
             return
 
+        if self.handle_country_click(x, y, button):
+            return
         world_x, world_y = self.screen_to_world(x, y)
         if button == arcade.MOUSE_BUTTON_LEFT:
             if self.side_panel_progress > 0:
@@ -10203,7 +10252,7 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
                 if self.hex_resources_toggle_rect and self.point_in_rect(x, y, self.hex_resources_toggle_rect):
                     self.toggle_hex_resources_expanded()
                     return
-                if self.selected_tile_has_industry() and self.point_in_rect(x, y, self.hex_panel_specialization_button_rect()):
+                if self.can_edit_selected_industry() and self.point_in_rect(x, y, self.hex_panel_specialization_button_rect()):
                     self.toggle_hex_specialization_mode()
                     return
                 if self.hex_panel_specialization_mode:
@@ -10381,6 +10430,9 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
                 self.close_hex_panel()
 
     def on_mouse_release(self, x, y, button, modifiers):
+        if self.country_dialog and not self.paused:
+            self.country_slider_drag = False
+            return
         if button == arcade.MOUSE_BUTTON_LEFT:
             self.active_pause_slider = None
             if self.handle_army_plan_map_release(x, y):
@@ -10404,6 +10456,10 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
             self.is_dragging = False
 
     def on_mouse_drag(self, x, y, dx, dy, buttons, modifiers):
+        if self.country_dialog and not self.paused:
+            if self.country_slider_drag:
+                self.set_country_export_slider(x)
+            return
         if self.paused:
             if self.active_pause_slider and buttons & arcade.MOUSE_BUTTON_LEFT:
                 self.active_pause_slider.set_from_mouse(x)
@@ -10429,6 +10485,12 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
             self.clamp_target_camera()
 
     def on_mouse_motion(self, x, y, dx, dy):
+        if self.country_dialog and not self.paused:
+            self.hovered_tile = None
+            return
+        if self.country_panel_contains(x, y) and not self.paused:
+            self.hovered_tile = None
+            return
         if self.paused:
             self.hovered_tile = None
             self.hovered_hex_panel_close = False
@@ -10487,7 +10549,7 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
         )
         self.hovered_hex_specialization_button = (
             bool(over_hex_panel)
-            and self.selected_tile_has_industry()
+            and self.can_edit_selected_industry()
             and self.point_in_rect(x, y, self.hex_panel_specialization_button_rect())
         )
         over_division_list = (
@@ -10575,6 +10637,13 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
             self.last_mouse_check = current_time
 
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
+        if self.country_dialog and not self.paused:
+            self.country_dialog_scroll = max(0, self.country_dialog_scroll - int(scroll_y * 44))
+            return
+        if self.country_panel_contains(x, y) and not self.paused:
+            self.country_card_scroll = max(0, self.country_card_scroll - int(scroll_y * 3))
+            self.country_card_hits = []
+            return
         if self.paused:
             if self.pause_screen == "settings" and self.open_pause_dropdown:
                 for dropdown in self.pause_dropdowns:
@@ -10643,6 +10712,21 @@ class Game(AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanels
         return None
 
     def on_key_press(self, key, modifiers):
+        if self.country_dialog and not self.paused:
+            if key == arcade.key.ESCAPE:
+                self.close_country_dialog()
+                return
+            if self.country_card_action in ("aid", "loan"):
+                self.country_amount_key(key, modifiers)
+            if key not in (arcade.key.F3, arcade.key.SPACE):
+                return
+        if self.active_top_panel_key in ("politics", "diplomacy") and not self.paused:
+            if key == arcade.key.ESCAPE:
+                self.close_country_card()
+                return
+            if self.country_amount_focus and key not in (arcade.key.SPACE, arcade.key.F3):
+                self.country_amount_key(key, modifiers)
+                return
         if key == arcade.key.F3:
             self.profiler.set_visible(not self.profiler.visible)
             self.performance_overlay_last_update = 0.0

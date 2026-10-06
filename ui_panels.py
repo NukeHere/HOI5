@@ -1,4 +1,5 @@
 import arcade
+import textwrap
 import time
 
 from Constants import *
@@ -38,6 +39,9 @@ class UIPanelsMixin:
         x = 10
         for index, text in enumerate(items[:3]):
             item_width = max(88, len(text) * 7 + 22)
+            if index == 0:
+                self.country_summary_rect = (x - 6, y + 5, item_width - 8, TOP_STATUS_BAR_HEIGHT - 10)
+                arcade.draw_lbwh_rectangle_outline(*self.country_summary_rect, (118, 146, 176), 1)
             if index == 1:
                 self.population_summary_rect = (x - 6, y + 5, item_width - 8, TOP_STATUS_BAR_HEIGHT - 10)
                 if self.hovered_population_summary:
@@ -122,6 +126,7 @@ class UIPanelsMixin:
             ("Доходы:", None, arcade.color.WHITE, 12),
             ("Налоги населения", self.format_money_delta(income.get("population", 0.0)), (190, 226, 174), 11),
             ("Компании", self.format_money_delta(income.get("companies", 0.0)), (190, 226, 174), 11),
+            ("Возврат кредитов (прогноз)", self.format_money_delta(income.get("loan_repayments", 0.0)), (190, 226, 174), 11),
             (
                 "Торговля",
                 self.format_money_delta(trade_value),
@@ -138,6 +143,8 @@ class UIPanelsMixin:
             ("  Инвалиды", f"-{self.format_money(social_parts.get('disability', 0.0))}", (206, 178, 168), 10),
             ("  Соцслужбы", f"-{self.format_money(social_parts.get('local_services', 0.0))}", (206, 178, 168), 10),
             ("Инфраструктура", f"-{self.format_money(expenses.get('infrastructure', 0.0))}", (236, 168, 154), 11),
+            ("Программы поддержки", f"-{self.format_money(expenses.get('political_programs', 0.0))}", (236, 168, 154), 11),
+            ("Платежи по кредитам", f"-{self.format_money(expenses.get('debt_service', 0.0))}", (236, 168, 154), 11),
         ]
         text_width = 0
         for row in rows:
@@ -431,6 +438,14 @@ class UIPanelsMixin:
 
     def open_top_panel(self, key):
         previous_key = self.active_top_panel_key
+        self.country_card_action = None
+        self.country_card_scroll = 0
+        self.country_amount_focus = False
+        self.country_card_hits = []
+        self.country_list_open = key == "diplomacy"
+        self.country_card_id = self.human_player.id if key == "politics" and self.human_player else None
+        if key == "politics":
+            self.country_card_tab = "actions"
         self.active_top_panel_key = key
         self.side_panel_target = 1.0
         if self.selected_resource_key and previous_key != key:
@@ -440,6 +455,9 @@ class UIPanelsMixin:
             self.set_construction_placement_mode(False)
 
     def close_top_panel(self):
+        self.country_card_id = None
+        self.country_list_open = False
+        self.country_amount_focus = False
         self.side_panel_target = 0.0
         self.hovered_side_panel_close = False
         if self.active_top_panel_key == "construction":
@@ -468,6 +486,8 @@ class UIPanelsMixin:
             width = 760
         elif self.active_top_panel_key == "construction":
             width = 500
+        elif self.active_top_panel_key in ("politics", "diplomacy"):
+            width = min(560, self.window.width - 24)
         else:
             width = SIDE_PANEL_WIDTH
         x = -width + width * self.side_panel_progress
@@ -1029,6 +1049,8 @@ class UIPanelsMixin:
             getattr(player, "trade_contract_revision", 0),
             round(balance_last_update, 3),
             market_state.revision,
+            self.politics.revision,
+            tuple(p.trade_contract_revision for p in self.players),
         )
         if (
             self.trade_panel_cache
@@ -1044,8 +1066,11 @@ class UIPanelsMixin:
             getattr(player, "trade_contract_revision", 0),
             round(getattr(player, "resource_balance_last_update", 0.0), 3),
             market_state.revision,
+            self.politics.revision,
+            tuple(p.trade_contract_revision for p in self.players),
         )
         trade_flows = self.estimate_monthly_trade_flows(player, contracts=contracts)
+        diagnostics = self.trade_contract_diagnostics(player, contracts, trade_flows)
         contract_amounts = {
             (contract["resource"], contract["mode"]): contract["amount"]
             for contract in contracts
@@ -1071,6 +1096,9 @@ class UIPanelsMixin:
             })
         for row in rows:
             contract_text = "--"
+            mode = "buy" if row["buy"] > 0 else "sell"
+            row["contract_state"], row["contract_status"] = diagnostics.get((row["key"], mode), ("none", ""))
+            contract_color = (236, 148, 132) if row["contract_state"] == "blocked" else (238, 198, 90) if row["contract_state"] == "partial" else (220, 230, 240)
             if row["buy"] > 0:
                 contract_text = f"Покупка {self.format_resource_amount(row['buy'])}"
             elif row["sell"] > 0:
@@ -1079,6 +1107,8 @@ class UIPanelsMixin:
             change_text = f"{row['price_change']:+.0%}"
             change_color = (174, 224, 158) if row["price_change"] >= 0 else (236, 168, 154)
             market_text = f"{self.format_resource_amount(row['market_demand'])}/{self.format_resource_amount(row['market_supply'])}"
+            if market_state.revision == 0:
+                market_text = "--"
             balance_color = (170, 222, 154) if row["balance"] >= 0 else (238, 168, 154)
             row["display_values"] = [
                 (self.resource_display_name(row["key"]), (220, 230, 240), 0),
@@ -1087,7 +1117,7 @@ class UIPanelsMixin:
                 (price_text, (220, 230, 240), 244),
                 (change_text, change_color, 332),
                 (market_text, (190, 210, 224), 378),
-                (contract_text, (220, 230, 240), 466),
+                (contract_text, contract_color, 466),
             ]
         self.trade_panel_cache = {"key": cache_key, "rows": rows, "flows": trade_flows}
         return self.trade_panel_cache
@@ -1099,8 +1129,8 @@ class UIPanelsMixin:
         rows = self.trade_rows()
         panel_x, panel_y, _panel_width, panel_height = self.side_panel_rect()
         table_y = panel_y + panel_height - 254
-        row_height = 28
-        max_rows = max(6, int((table_y - 28 - (panel_y + 28)) / row_height))
+        row_height = 44
+        max_rows = max(1, int((table_y - 28 - (panel_y + 28)) / row_height))
         max_scroll = max(0, len(rows) - max_rows)
         old_index = self.trade_scroll_index
         self.trade_scroll_index = max(0, min(max_scroll, self.trade_scroll_index + int(amount)))
@@ -1118,16 +1148,20 @@ class UIPanelsMixin:
     def rebuild_trade_table_shapes(self, table_x, panel_y, panel_width, table_y, rows, visible_rows, start_y, row_height, max_rows, max_scroll):
         shapes = arcade.shape_list.ShapeElementList()
         actions = []
+        track_x = table_x + panel_width - 36
+        buttons_right = track_x - 12
         for index, row in enumerate(visible_rows):
             row_y = start_y - index * row_height
             row_number = self.trade_scroll_index + index
             fill = (24, 32, 42, 118) if row_number % 2 == 0 else (30, 38, 48, 118)
-            self.append_trade_rect_shapes(shapes, (table_x, row_y - 4, panel_width - 36, row_height), fill)
+            self.append_trade_rect_shapes(shapes, (table_x, row_y - 16, panel_width - 36, row_height), fill)
+            if row["contract_state"] == "blocked":
+                shapes.append(arcade.shape_list.create_line(table_x + 466, row_y + 9, table_x + 574, row_y + 9, (236, 148, 132), 1))
             button_specs = [
-                ("-", "buy", -TRADE_CONTRACT_STEP, table_x + panel_width - 156),
-                ("+", "buy", TRADE_CONTRACT_STEP, table_x + panel_width - 128),
-                ("-", "sell", -TRADE_CONTRACT_STEP, table_x + panel_width - 82),
-                ("+", "sell", TRADE_CONTRACT_STEP, table_x + panel_width - 54),
+                ("-", "buy", -TRADE_CONTRACT_STEP, buttons_right - 126),
+                ("+", "buy", TRADE_CONTRACT_STEP, buttons_right - 98),
+                ("-", "sell", -TRADE_CONTRACT_STEP, buttons_right - 52),
+                ("+", "sell", TRADE_CONTRACT_STEP, buttons_right - 24),
             ]
             for label, mode, delta, button_x in button_specs:
                 rect = (button_x, row_y - 1, 24, 20)
@@ -1140,7 +1174,6 @@ class UIPanelsMixin:
                 if label == "+":
                     shapes.append(arcade.shape_list.create_line(center_x, center_y - 5, center_x, center_y + 5, arcade.color.WHITE, 2))
         if len(rows) > max_rows:
-            track_x = self.side_panel_rect()[0] + self.side_panel_rect()[2] - 18
             track_y = panel_y + 46
             track_height = max(40, table_y - 48 - track_y)
             self.append_trade_rect_shapes(shapes, (track_x, track_y, 4, track_height), (42, 52, 64, 180))
@@ -1160,7 +1193,7 @@ class UIPanelsMixin:
             self.trade_scroll_index,
             max_rows,
             len(rows),
-            tuple(row["key"] for row in visible_rows),
+            tuple((row["key"], row["contract_state"]) for row in visible_rows),
         )
         if self.trade_table_shape_cache_key != shape_key:
             self.rebuild_trade_table_shapes(table_x, panel_y, panel_width, table_y, rows, visible_rows, start_y, row_height, max_rows, max_scroll)
@@ -1190,7 +1223,9 @@ class UIPanelsMixin:
                 f"{self.format_resource_amount(trade_flows['sell_capacity_limit'])} ед./мес"
             )
             money_color = (180, 226, 168) if balance >= 0 else (236, 168, 154)
-            self.draw_trade_text("Внешний рынок", panel_x + 18, panel_y + panel_height - 70, arcade.color.WHITE, 15)
+            market_label = "Торговля: внешний рынок открыт" if player.politics.external_access else "Внешний рынок закрыт. Доступны только сделки со странами"
+            self.draw_trade_text(market_label, panel_x + 18, panel_y + panel_height - 70,
+                                 arcade.color.WHITE if player.politics.external_access else (238, 198, 90), 13)
             self.draw_trade_text(buy_limit_text, panel_x + 18, panel_y + panel_height - 94, (205, 216, 228), 11)
             self.draw_trade_text(sell_limit_text, panel_x + 18, panel_y + panel_height - 112, (205, 216, 228), 11)
             self.draw_trade_text(
@@ -1224,7 +1259,7 @@ class UIPanelsMixin:
             )
             next_execution = self.simulation_server.next_market_execution_time
             next_execution_text = (
-                f"{next_execution.day} {MONTH_NAMES[next_execution.month - 1]} "
+                f"{next_execution.year}-{next_execution.month:02}-{next_execution.day:02} "
                 f"{next_execution.hour:02}:{next_execution.minute:02}"
             )
             self.draw_trade_text(
@@ -1261,9 +1296,9 @@ class UIPanelsMixin:
             for text, offset in headers:
                 self.draw_trade_text(text, table_x + offset, table_y, (150, 166, 184), 10)
 
-        row_height = 28
+        row_height = 44
         y = table_y - 28
-        max_rows = max(6, int((y - (panel_y + 28)) / row_height))
+        max_rows = max(1, int((y - (panel_y + 28)) / row_height))
         max_scroll = max(0, len(rows) - max_rows)
         self.trade_scroll_index = max(0, min(self.trade_scroll_index, max_scroll))
         visible_rows = rows[self.trade_scroll_index:self.trade_scroll_index + max_rows]
@@ -1275,13 +1310,19 @@ class UIPanelsMixin:
                 row_number = self.trade_scroll_index + index
                 for value, color, offset in row["display_values"]:
                     self.draw_trade_text(value, table_x + offset, row_y + 9, color, 10, anchor_y="center")
+                if row["contract_status"]:
+                    color = (236, 148, 132) if row["contract_state"] == "blocked" else (238, 198, 90) if row["contract_state"] == "partial" else (170, 210, 180)
+                    self.draw_trade_text(row["contract_status"], table_x + 4, row_y - 9, color, 9, anchor_y="center")
 
         with self.profiler.measure("trade_buttons"):
             pass
 
         with self.profiler.measure("trade_footer"):
             legend_y = panel_y + 20
-            self.draw_trade_text("Цена: покупка/продажа. Лимит зависит от портов, складов, логистики и снабжения.",
+            footer = "Спрос/предложение: итоги последних торгов. Объём контракта не гарантирован."
+            if self.simulation_server.market_state.revision == 0:
+                footer = "Спрос/предложение появятся после первых торгов. Контракты ожидают исполнения."
+            self.draw_trade_text(footer,
                                  panel_x + 18, legend_y, (160, 176, 192), 10)
             self.clear_unused_trade_text()
 
@@ -1790,6 +1831,8 @@ class UIPanelsMixin:
             y -= button_h + 8
 
     def draw_side_panel(self):
+        if self.active_top_panel_key in ("politics", "diplomacy"):
+            return
         if not self.active_top_panel_key and self.side_panel_progress <= 0:
             return
 
@@ -2372,10 +2415,21 @@ class UIPanelsMixin:
         self.rebuild_selection_borders()
 
     def toggle_hex_specialization_mode(self):
+        if not self.can_edit_selected_industry():
+            self.hex_panel_specialization_mode = False
+            return
         self.hex_panel_specialization_mode = not self.hex_panel_specialization_mode
         self.hex_panel_message = ""
 
+    def can_edit_selected_industry(self):
+        tiles = self.selected_hex_tiles()
+        return bool(self.human_player and tiles and self.selected_industry_tiles()
+                    and all(tile.owner is self.human_player for tile in tiles))
+
     def set_selected_tile_industry_sector(self, sector):
+        if sector not in INDUSTRY_SECTOR_LABELS or not self.can_edit_selected_industry():
+            self.hex_panel_specialization_mode = False
+            return False
         industry_tiles = self.selected_industry_tiles()
         if not industry_tiles:
             return
@@ -2516,6 +2570,7 @@ class UIPanelsMixin:
         return snapshot
 
     def draw_hex_info_panel(self):
+        self.hex_country_rect = None
         tiles = self.selected_hex_tiles()
         if not tiles:
             return
@@ -2593,6 +2648,9 @@ class UIPanelsMixin:
             ("Снабжение", self.format_percent(supply_score)),
         ]
         for label, value in info_rows:
+            if label == "Владелец" and tile.owner and not multi_selected and visible_y(y, top_margin=0):
+                self.hex_country_rect = (panel_x + 12, y - 5, panel_width - 24, 18)
+                arcade.draw_lbwh_rectangle_outline(*self.hex_country_rect, (118, 146, 176), 1)
             panel_text(label, panel_x + 16, y, (150, 166, 184), 11)
             panel_text(value, panel_x + 122, y, (224, 234, 244), 12)
             y -= 18
@@ -2783,7 +2841,7 @@ class UIPanelsMixin:
                 panel_text(f"{label}: {share:.0%}", panel_x + 16, y, (206, 218, 230), 11)
                 y -= 16
 
-            if self.hex_panel_specialization_mode:
+            if self.hex_panel_specialization_mode and self.can_edit_selected_industry():
                 y -= 6
                 panel_text("Выбор категории", panel_x + 16, y, (150, 166, 184), 10)
                 y -= 18
@@ -2826,7 +2884,7 @@ class UIPanelsMixin:
             arcade.draw_lbwh_rectangle_filled(track_x, track_y, 4, track_height, (48, 62, 78, 180))
             arcade.draw_lbwh_rectangle_filled(track_x, thumb_y, 4, thumb_height, (132, 156, 184, 220))
 
-        if self.selected_tile_has_industry():
+        if self.can_edit_selected_industry():
             spec_x, spec_y, spec_width, spec_height = self.hex_panel_specialization_button_rect()
             spec_fill = (64, 92, 118) if self.hovered_hex_specialization_button else (38, 50, 66)
             spec_border = (165, 195, 230) if self.hovered_hex_specialization_button else (95, 118, 145)

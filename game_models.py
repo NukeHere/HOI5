@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime
+from politics_system import PoliticalState
 
 from Constants import *
 
@@ -80,6 +81,7 @@ class StatePlayer:
     stability: float = 0.72
     legitimacy: float = 0.61
     war_support: float = 0.50
+    politics: PoliticalState = field(default_factory=PoliticalState)
 
     def __post_init__(self):
         if self.tiles is None:

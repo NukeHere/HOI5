@@ -631,7 +631,7 @@ class AirSystemMixin:
             return False
         for side in ("attacker", "defender"):
             for division in self.battle_side_present(battle, side):
-                if division.owner is not owner and division.strength > 0:
+                if self.countries_hostile(division.owner, owner) and division.strength > 0:
                     return True
         return False
 
@@ -1668,7 +1668,7 @@ class AirSystemMixin:
             return []
         fixed_units = [
             unit for unit in getattr(self, "air_defense_units", []) or []
-            if unit.owner is not owner
+            if self.countries_hostile(unit.owner, owner)
             and unit.tile
             and unit.fire_range_cells > 0
             and unit.readiness > 0
@@ -2001,7 +2001,7 @@ class AirSystemMixin:
             }
         candidates = []
         for interceptor_wing in getattr(self, "air_wings", []) or []:
-            if interceptor_wing is target_wing or interceptor_wing.owner is target_wing.owner:
+            if interceptor_wing is target_wing or not self.countries_hostile(interceptor_wing.owner, target_wing.owner):
                 continue
             mission = self.air_wing_salvo_intercept_mission_for_tile(interceptor_wing, exposure_tile)
             if not mission:
@@ -2316,7 +2316,7 @@ class AirSystemMixin:
         launcher = self.air_wing_by_id(salvo.launcher_air_wing_id)
         if salvo.target_air_salvo_id is not None:
             target_salvo = self.air_salvo_by_id(salvo.target_air_salvo_id)
-            if not target_salvo or target_salvo.count <= 0:
+            if not target_salvo or target_salvo.count <= 0 or not self.countries_hostile(salvo.owner, target_salvo.owner):
                 return False
             engaged_count = min(salvo.count, target_salvo.count)
             hits = min(target_salvo.count, int(engaged_count * self.clamp01(salvo.hit_chance) + 0.5))
@@ -2331,7 +2331,7 @@ class AirSystemMixin:
 
         if salvo.target_air_wing_id is not None:
             target_wing = self.air_wing_by_id(salvo.target_air_wing_id)
-            if not target_wing or target_wing.ready_count <= 0:
+            if not target_wing or target_wing.ready_count <= 0 or not self.countries_hostile(salvo.owner, target_wing.owner):
                 return False
             target_type = salvo.target_aircraft_type or target_wing.aircraft_type
             target_sorties = salvo.target_sorties or self.air_wing_ready_count_for_type(target_wing, target_type)
@@ -2426,14 +2426,14 @@ class AirSystemMixin:
         return tags
 
     def air_mission_tile_is_hostile(self, owner, tile):
-        return bool(owner and tile and tile.owner is not None and tile.owner is not owner)
+        return bool(tile and self.countries_hostile(owner, tile.owner))
 
     def air_salvo_has_hostile_division_target(self, salvo):
         if not salvo or not getattr(salvo, "owner", None):
             return False
         if getattr(salvo, "target_unit_id", None):
             target = self.division_by_id(salvo.target_unit_id)
-            return bool(target and target.owner is not salvo.owner and target.strength > 0)
+            return bool(target and self.countries_hostile(target.owner, salvo.owner) and target.strength > 0)
         return bool(self.enemy_divisions_on_tile(getattr(salvo, "target_tile", None), salvo.owner))
 
     def air_salvo_target_is_still_valid(self, salvo):
@@ -2757,7 +2757,7 @@ class AirSystemMixin:
         if not battle or not owner:
             return False
         for defender in self.battle_side_present(battle, "defender"):
-            if defender.owner is not owner and self.division_air_ground_suppressed_by(defender, owner):
+            if self.countries_hostile(defender.owner, owner) and self.division_air_ground_suppressed_by(defender, owner):
                 return True
         return False
 
@@ -2774,7 +2774,7 @@ class AirSystemMixin:
     def resolve_air_salvo_division_impact(self, salvo):
         munition = self.munition_data(salvo.munition_type)
         target = self.division_by_id(salvo.target_unit_id) if salvo.target_unit_id else None
-        if target and (target.owner is salvo.owner or target.strength <= 0):
+        if target and (not self.countries_hostile(target.owner, salvo.owner) or target.strength <= 0):
             return False
         if not target:
             candidates = self.enemy_divisions_on_tile(salvo.target_tile, salvo.owner)
@@ -2923,7 +2923,7 @@ class AirSystemMixin:
         intercepted_total = 0
         defenders = [
             unit for unit in getattr(self, "air_defense_units", []) or []
-            if unit.owner is not salvo.owner
+            if self.countries_hostile(unit.owner, salvo.owner)
             and unit.tile
             and unit.fire_range_cells > 0
             and unit.readiness > 0
@@ -2986,7 +2986,7 @@ class AirSystemMixin:
             return 0
         candidates = []
         for wing in getattr(self, "air_wings", []) or []:
-            if wing.owner is salvo.owner or not wing.base_tile or wing.ready_count <= 0:
+            if not self.countries_hostile(wing.owner, salvo.owner) or not wing.base_tile or wing.ready_count <= 0:
                 continue
             mission = self.air_wing_salvo_intercept_mission_for_tile(wing, current_tile)
             if not mission:
@@ -3082,7 +3082,7 @@ class AirSystemMixin:
         if not current_tile:
             return False
         return any(
-            unit.owner is not salvo.owner
+            self.countries_hostile(unit.owner, salvo.owner)
             and unit.tile
             and unit.fire_range_cells > 0
             and unit.readiness > 0
@@ -3210,7 +3210,7 @@ class AirSystemMixin:
             return 0
         radius = 0
         for unit in getattr(self, "air_defense_units", []) or []:
-            if unit.owner is owner or not unit.tile or unit.fire_range_cells <= 0:
+            if not self.countries_hostile(unit.owner, owner) or not unit.tile or unit.fire_range_cells <= 0:
                 continue
             if self.hex_distance(unit.tile, target_tile) <= unit.fire_range_cells + 1:
                 radius = max(radius, unit.fire_range_cells)
@@ -3380,7 +3380,7 @@ class AirSystemMixin:
         for side in ("attacker", "defender"):
             active_ids = set(getattr(battle, f"active_{side}s", []) or [])
             for division in self.battle_side_present(battle, side):
-                if division.owner is wing.owner or division.strength <= 0:
+                if not self.countries_hostile(division.owner, wing.owner) or division.strength <= 0:
                     continue
                 enemy_count += 1
                 if division.id in active_ids:

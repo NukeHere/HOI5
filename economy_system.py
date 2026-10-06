@@ -1595,10 +1595,11 @@ class EconomySystemMixin:
         return capacity * self.trade_mode_capacity_multiplier(mode)
 
     def trade_capacity_per_month(self, player, mode=None):
-        return min(
+        capacity = min(
             self.trade_logistics_capacity_per_month(player, mode),
             self.trade_max_capacity_per_month(player, mode),
         )
+        return capacity * (player.politics.export_capacity_factor if mode == "sell" else 1.0)
 
     def estimate_monthly_trade_flows(self, player, contracts=None):
         contracts = self.normalized_trade_contracts(getattr(player, "trade_contracts", [])) if contracts is None else contracts
@@ -1606,46 +1607,24 @@ class EconomySystemMixin:
             "buy": self.trade_capacity_per_month(player, "buy"),
             "sell": self.trade_capacity_per_month(player, "sell"),
         }
-        remaining_capacity = dict(capacity_limits)
         imports = {}
         exports = {}
         buy_cost = 0.0
         sell_income = 0.0
-        capacity, used, _overflow = self.ensure_player_storage(player)
-        storage_free = {
-            category_key: max(0.0, capacity.get(category_key, 0.0) - used.get(category_key, 0.0))
-            for category_key in STORAGE_CATEGORIES
-        }
-
-        for contract in contracts:
-            resource_key = contract["resource"]
-            mode = contract["mode"]
-            if remaining_capacity.get(mode, 0.0) <= 0:
-                continue
-            amount = min(contract["amount"], remaining_capacity.get(mode, 0.0))
-            if mode == "sell":
-                amount = min(amount, self.stockpile_amount(player, resource_key))
-                storage_key = self.storage_bucket_for_resource(resource_key)
-                storage_free[storage_key] = storage_free.get(storage_key, 0.0) + amount
-            else:
-                storage_key = self.storage_bucket_for_resource(resource_key)
-                amount = min(amount, storage_free.get(storage_key, 0.0))
-            if amount <= 0:
-                continue
-            price = self.trade_unit_price(player, resource_key, mode)
-            if mode == "buy":
-                imports[resource_key] = imports.get(resource_key, 0.0) + amount
-                buy_cost += amount * price
-                storage_free[storage_key] = max(0.0, storage_free.get(storage_key, 0.0) - amount)
-            else:
-                exports[resource_key] = exports.get(resource_key, 0.0) + amount
-                sell_income += amount * price
-            remaining_capacity[mode] = max(0.0, remaining_capacity.get(mode, 0.0) - amount)
-
-        capacity_used = {
-            mode: max(0.0, capacity_limits[mode] - remaining_capacity.get(mode, 0.0))
-            for mode in ("buy", "sell")
-        }
+        orders = []
+        for participant in self.players:
+            orders.extend(self.collect_player_market_orders(
+                participant, 1.0, contracts=contracts if participant.id == player.id else None))
+        fills, _ = self.plan_market_orders(orders, 1.0)
+        for fill in fills:
+            key, amount = fill["resource"], fill["amount"]
+            if fill["buyer"] is player:
+                imports[key] = imports.get(key, 0) + amount
+                buy_cost += amount * fill["price"]
+            if fill["seller"] is player:
+                exports[key] = exports.get(key, 0) + amount
+                sell_income += amount * fill["price"]
+        capacity_used = {"buy": sum(imports.values()), "sell": sum(exports.values())}
 
         return {
             "imports": imports,
@@ -1667,15 +1646,56 @@ class EconomySystemMixin:
             "sell_max_capacity_limit": self.trade_max_capacity_per_month(player, "sell"),
         }
 
+    def trade_contract_diagnostics(self, player, contracts, flows):
+        counterparties = {}
+        for other in self.players:
+            if other is player:
+                continue
+            for contract in self.normalized_trade_contracts(other.trade_contracts):
+                counterparties.setdefault((contract["resource"], contract["mode"]), []).append(other)
+        result = {}
+        for contract in contracts:
+            key, mode, requested = contract["resource"], contract["mode"], contract["amount"]
+            filled = flows["imports" if mode == "buy" else "exports"].get(key, 0)
+            if filled >= requested - 1e-6:
+                result[(key, mode)] = ("ready", "К исполнению")
+                continue
+            reasons = []
+            if not player.politics.external_access:
+                reasons.append("Внешний рынок закрыт")
+            if mode == "buy" and player.budget <= 0:
+                reasons.append("Нет средств")
+            elif mode == "buy" and self.storage_free_capacity_for_resource(player, key) <= 0:
+                reasons.append("Нет места на складе")
+            elif mode == "sell" and self.stockpile_amount(player, key) <= 0:
+                reasons.append("Нет товара на складе")
+            elif self.trade_capacity_per_month(player, mode) <= 0:
+                reasons.append("Нет торговой пропускной способности")
+            elif mode == "sell" and player.politics.export_restricted:
+                reasons.append("Экспорт ограничен")
+            else:
+                partners = counterparties.get((key, "sell" if mode == "buy" else "buy"), [])
+                eligible = [other for other in partners if self.politics.trade_allowed(player.id, other.id)]
+                if not player.politics.external_access and not eligible:
+                    reasons.append("Война / эмбарго с контрагентами" if partners else "Нет встречных заявок стран")
+                elif mode == "buy" and player.budget < requested * self.trade_unit_price(player, key, mode):
+                    reasons.append("Недостаточно средств на весь объём")
+                else:
+                    reasons.append("Недостаточно доступного объёма / лимита")
+            state = "partial" if filled > 1e-6 else "blocked"
+            prefix = f"Частично ({self.format_resource_amount(filled)}): " if state == "partial" else "Не исполняется: "
+            result[(key, mode)] = (state, prefix + "; ".join(reasons))
+        return result
+
     def trade_weekly_capacity_limits(self, player):
         return {
             "buy": self.trade_capacity_per_month(player, "buy") * TRADE_WEEKLY_FRACTION,
             "sell": self.trade_capacity_per_month(player, "sell") * TRADE_WEEKLY_FRACTION,
         }
 
-    def collect_player_market_orders(self, player, weekly_fraction=TRADE_WEEKLY_FRACTION, enforce_budget=True):
-        contracts = self.normalize_trade_contracts(player)
-        remaining_capacity = self.trade_weekly_capacity_limits(player)
+    def collect_player_market_orders(self, player, weekly_fraction=TRADE_WEEKLY_FRACTION, enforce_budget=True, contracts=None):
+        contracts = self.normalized_trade_contracts(player.trade_contracts if contracts is None else contracts)
+        remaining_capacity = {mode: self.trade_capacity_per_month(player, mode) * weekly_fraction for mode in ("buy", "sell")}
         capacity, used, _overflow = self.ensure_player_storage(player)
         storage_free = {
             category_key: max(0.0, capacity.get(category_key, 0.0) - used.get(category_key, 0.0))
@@ -1801,32 +1821,46 @@ class EconomySystemMixin:
                 del history[:-MARKET_HISTORY_LIMIT]
         market_state.revision += 1
 
+    def plan_market_orders(self, orders, fraction=TRADE_WEEKLY_FRACTION):
+        from market_clearing import clear_market
+
+        if not orders:
+            return [], []
+        total_capacity = sum(self.trade_capacity_per_month(p) * TRADE_WEEKLY_FRACTION for p in self.players)
+        quotas = {
+            order["resource"]: self.external_market_volume_for_resource(order["resource"], total_capacity)
+            * fraction / TRADE_WEEKLY_FRACTION for order in orders
+        }
+        return clear_market(
+            orders, allowed=self.politics.trade_allowed, priority=self.politics.trade_priority,
+            price=self.market_current_price,
+            external_price=lambda key, mode: self.market_base_price(key) * (
+                TRADE_BUY_PRICE_MARKUP if mode == "buy" else TRADE_SELL_PRICE_MARKDOWN),
+            external_supply=quotas, external_demand=quotas,
+            stock=self.stockpile_amount, free_storage=self.storage_free_capacity_for_resource,
+            bucket=self.storage_bucket_for_resource,
+            external_access=lambda player: player.politics.external_access,
+            rotation=self.simulation_server.market_tick_count,
+        )
+
     def execute_market_orders(self, orders):
+        fills, remaining = self.plan_market_orders(orders)
         money_by_player = {}
-        for order in orders:
-            player = order["player"]
-            resource_key = order["resource"]
-            mode = order["mode"]
-            amount = order["amount"]
-            price = self.trade_unit_price(player, resource_key, mode)
-            if mode == "buy":
-                amount = min(amount, self.storage_free_capacity_for_resource(player, resource_key))
-                cost = amount * price
-                if cost > player.budget and cost > 0:
-                    amount *= max(0.0, player.budget / cost)
-                    cost = amount * price
-                accepted = self.add_to_stockpile(player, resource_key, amount)
-                cost = accepted * price
-                player.budget -= cost
-                money_by_player[player.id] = money_by_player.get(player.id, 0.0) - cost
-            else:
-                amount = min(amount, self.stockpile_amount(player, resource_key))
-                sold = self.consume_from_stockpile(player, resource_key, amount)
-                income = sold * price
-                player.budget += income
-                money_by_player[player.id] = money_by_player.get(player.id, 0.0) + income
+        for fill in fills:
+            buyer, seller = fill["buyer"], fill["seller"]
+            key, amount, price = fill["resource"], fill["amount"], fill["price"]
+            if seller:
+                self.consume_from_stockpile(seller, key, amount)
+                seller.budget += amount * price
+                money_by_player[seller.id] = money_by_player.get(seller.id, 0) + amount * price
+            if buyer:
+                self.add_to_stockpile(buyer, key, amount)
+                buyer.budget -= amount * price
+                money_by_player[buyer.id] = money_by_player.get(buyer.id, 0) - amount * price
+        self.last_market_fills = fills
+        self.last_market_unfilled = [dict(order, amount=amount) for order, amount in zip(orders, remaining) if amount > 1e-6]
         for player in self.players:
-            if money_by_player.get(player.id, 0.0) != 0.0:
+            if player.id in money_by_player:
                 self.mark_player_resource_balance_dirty(player)
         return money_by_player
 
