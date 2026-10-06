@@ -9,7 +9,7 @@ import arcade
 from pyglet.graphics import Batch
 
 from country_power import power_ranking, relative_power
-from politics_system import ACTIONS, GROUPS, SOCIAL_GROUPS, FACTIONS, SUPPORT_GROUPS
+from politics_system import ACTIONS, GROUPS, SOCIAL_GROUPS, FACTIONS, SUPPORT_GROUPS, PROGRAM_TERMS
 
 INK = (224, 234, 244)
 MUTED = (163, 184, 202)
@@ -39,6 +39,7 @@ class CountryDialogMixin:
         self.country_dialog_views = OrderedDict()
         self.country_slider_drag = False
         self.country_export_percent = 100
+        self.country_program_term = "ongoing"
         self.country_dialog_error = ""
 
     def country_dialog_rect(self):
@@ -55,6 +56,8 @@ class CountryDialogMixin:
         self.country_dialog = section
         self.country_dialog_scroll = 0
         self.country_card_action = action
+        if action and action.startswith("support:"):
+            self.country_program_term = "ongoing"
         self.country_amount_focus = action in ("aid", "loan")
         self.country_dialog_cache = None
         self.country_dialog_error = ""
@@ -64,6 +67,7 @@ class CountryDialogMixin:
         if action == "exports":
             self.country_export_percent = round(player.politics.export_capacity_factor * 100)
         self.is_dragging = False
+        self.keys_pressed.clear()
         self.division_selection_drag_active = False
         self.pending_map_click = None
         self.hovered_budget_summary = False
@@ -84,12 +88,10 @@ class CountryDialogMixin:
         self.country_dialog_cache = None
         self.country_dialog_error = ""
 
-    def country_export_slider_rect(self):
-        x, y, width, height = self.country_dialog_rect()
-        return (x + 28, y + height - 210 - self.country_dialog_scroll, width - 56, 24)
-
     def set_country_export_slider(self, x):
-        left, _, width, _ = self.country_export_slider_rect()
+        left, _, width, _ = self.country_dialog_rect()
+        left += 28
+        width -= 56
         self.country_export_percent = int(round(max(0, min(1, (x - left) / width)) * 20)) * 5
 
     def handle_country_dialog_click(self, x, y, button):
@@ -113,13 +115,16 @@ class CountryDialogMixin:
                 self.set_country_export_slider(x)
             elif kind == "export_step":
                 self.country_export_percent = max(0, min(100, self.country_export_percent + value))
+            elif kind == "program_term":
+                self.country_program_term = value
             elif kind == "confirm":
                 amount = self.country_export_percent if value == "exports" else self.country_amount() if value in ("aid", "loan") else None
-                reason = self.politics.reason(self.human_player.id, self.country_card_id, value, amount)
+                reason = self.politics.reason(self.human_player.id, self.country_card_id, value, amount, self.country_program_term)
                 if reason:
                     self.country_dialog_error = reason
                 else:
-                    self.submit_player_command("political_action", {"target": self.country_card_id, "action": value, "amount": amount})
+                    self.submit_player_command("political_action", {"target": self.country_card_id, "action": value, "amount": amount,
+                                                                  "program_term": self.country_program_term})
                     self.close_country_dialog()
             self.country_dialog_hits = []
             return True
@@ -179,7 +184,7 @@ class CountryDialogMixin:
                 for key, label in groups.items():
                     support = state.support[key]
                     target = self.politics.rules.support_target(self.politics, player, key)
-                    rows.append(DetailRow("bar", label, f"{support:.0%}  /  ожидаемо {target:.0%}", support, GREEN if target >= support else GOLD))
+                    rows.append(DetailRow("bar", label, f"{support:.1%}  /  ориентир {target:.1%}", support, GREEN if target >= support else GOLD))
         elif kind == "taxes":
             rows.append(DetailRow("text", "Изменение относительно базовых налоговых поступлений. Это не процентная ставка налога.", color=MUTED))
             for group, label in GROUPS.items():
@@ -193,11 +198,36 @@ class CountryDialogMixin:
                     active = group in player.politics.programs
                     key = f"{'stop' if active else 'support'}:{group}"
                     quote = self.politics.quote(self.human_player.id, player.id, key)
-                    value = (f"До {self.politics.date_text(player.politics.programs[group])}" if active else f"{self.format_money(quote.program_monthly_cost)}/мес.")
+                    value = f"{self.format_money(quote.program_monthly_cost)}/мес."
+                    if active:
+                        end = player.politics.programs[group]
+                        term = "До отмены" if end is None else f"До {self.politics.date_text(end)}"
+                        value = f"{term} | {self.format_money(player.politics.program_costs[group])}/мес."
+                        funding = player.politics.program_funding.get(group, 1)
+                        if funding < .999:
+                            value += f" | финансирование {funding:.0%}"
                     rows.append(DetailRow("program", name, value, color=GREEN if active else MUTED, action=("action", key)))
         elif kind == "action":
             key = self.country_card_action
-            if key == "exports":
+            if key.startswith("support:"):
+                group = key.split(":")[1]
+                quote = self.politics.quote(self.human_player.id, player.id, key, program_term=self.country_program_term)
+                effect = self.politics.rules.program_support_effect(player, group, quote.program_monthly_cost)
+                end = None if quote.program_days is None else self.politics.day + self.politics.hours / 24 + quote.program_days
+                term = "До ручного завершения" if end is None else f"Завершится {self.politics.date_text(end)}"
+                rows.extend([DetailRow("metric", "Бюджет программы", f"{self.format_money(quote.program_monthly_cost)}/мес.", color=GOLD),
+                             DetailRow("section", "Срок действия"),
+                             DetailRow("duration", ""),
+                             DetailRow("text", term, color=BLUE),
+                             DetailRow("section", "Ожидаемый эффект"),
+                             DetailRow("metric", "Текущая поддержка группы", f"{player.politics.support[group]:.1%}", color=GREEN),
+                             DetailRow("text", f"При полном финансировании: до +{effect * 100:.2f} п.п. к долгосрочному ориентиру."),
+                             DetailRow("text", "Изменения накапливаются месяцами. Эффект зависит от размера страны и группы, финансирования, снабжения и легитимности.", color=MUTED),
+                             DetailRow("text", "Расходы списываются за время действия. При нехватке средств финансирование снижается; программа не исчезает.", color=MUTED)])
+                reason = self.politics.reason(self.human_player.id, player.id, key, program_term=self.country_program_term)
+                rows.append(DetailRow("text" if reason else "button", reason or "Начать программу", color=GOLD,
+                                      action=None if reason else ("confirm", key)))
+            elif key == "exports":
                 current = round(player.politics.export_capacity_factor * 100)
                 rows.extend([DetailRow("metric", "Текущий лимит", f"{current}% базовой мощности", color=MUTED),
                              DetailRow("metric", "Новый лимит", f"{self.country_export_percent}%", color=GOLD),
@@ -228,19 +258,23 @@ class CountryDialogMixin:
         while len(self.country_dialog_views) > 16:
             _, (_, labels) = self.country_dialog_views.popitem(last=False)
             for label in labels:
-                label.delete()
+                label.label.delete()
         batch, pool = self.country_dialog_views[view_key]
         cursor = 0
 
         def text(value, tx, ty, color=INK, size=12, anchor="left"):
             nonlocal cursor
+            color = (*color, 255) if len(color) == 3 else color
             if cursor == len(pool):
                 pool.append(arcade.Text("", 0, 0, batch=batch))
             label = pool[cursor]
             cursor += 1
-            with label:
-                for attr, val in (("text", str(value)), ("x", tx), ("y", ty), ("font_size", size), ("color", color), ("anchor_x", anchor), ("anchor_y", "center")):
-                    if getattr(label, attr) != val:
+            changes = [(attr, val) for attr, val in
+                       (("text", str(value)), ("x", tx), ("y", ty), ("font_size", size), ("color", color), ("anchor_x", anchor), ("anchor_y", "center"))
+                       if getattr(label, attr) != val]
+            if changes:
+                with label:
+                    for attr, val in changes:
                         setattr(label, attr, val)
 
         self.country_dialog_hits = []
@@ -263,13 +297,13 @@ class CountryDialogMixin:
         arcade.draw_line(x + 20, top - 78, x + width - 20, top - 78, (70, 91, 108), 1)
         cache_key = (view_key, self.country_card_id, width, self.politics.revision,
                      int(time.monotonic() * 2), self.country_export_percent, self.country_amount_text,
-                     self.country_amount_focus, tuple(p.trade_contract_revision for p in self.players))
+                     self.country_amount_focus, self.country_program_term, tuple(p.trade_contract_revision for p in self.players))
         if self.country_dialog_cache is None or self.country_dialog_cache[0] != cache_key:
             layout = []
             for row in self.country_dialog_rows(player):
                 lines = textwrap.wrap(row.label, max(20, int((width - 56) / 7))) or [""]
                 row_height = {"hero": 66, "section": 44, "metric": 32, "bar": 53, "slider": 56,
-                              "tax": 40, "program": 66}.get(row.kind, max(36, len(lines) * 19 + 12))
+                              "tax": 40, "program": 66, "duration": 44}.get(row.kind, max(36, len(lines) * 19 + 12))
                 layout.append((row, lines, row_height))
             self.country_dialog_cache = (cache_key, layout)
         layout = self.country_dialog_cache[1]
@@ -293,6 +327,11 @@ class CountryDialogMixin:
                     if row.kind == "bar":
                         arcade.draw_lbwh_rectangle_filled(left, row_top - 38, width - 56, 7, (43, 60, 71))
                         arcade.draw_lbwh_rectangle_filled(left, row_top - 38, (width - 56) * max(0, min(1, row.ratio)), 7, row.color)
+                elif row.kind == "duration":
+                    segment = (width - 56) / len(PROGRAM_TERMS)
+                    for index, (key, (label, _)) in enumerate(PROGRAM_TERMS.items()):
+                        button(label, (left + index * segment, bottom + 6, segment - 6, 30),
+                               ("program_term", key), GREEN if key == self.country_program_term else MUTED)
                 elif row.kind == "tax":
                     text(row.value, left, row_top - 18, row.color)
                     for label, delta, offset in (("-", -1, 94), ("+", 1, 42)):
@@ -304,8 +343,6 @@ class CountryDialogMixin:
                     button("Завершить" if active else "Начать", (right - 96, bottom + 15, 96, 28), row.action, GOLD if active else GREEN)
                 elif row.kind == "slider":
                     rect = (left, row_top - 40, width - 56, 24)
-                    # Geometry is shared with pointer handling, including scrolling.
-                    self.country_slider_rect = rect
                     arcade.draw_lbwh_rectangle_filled(left, rect[1] + 9, rect[2], 6, (61, 78, 92))
                     arcade.draw_lbwh_rectangle_filled(left, rect[1] + 9, rect[2] * self.country_export_percent / 100, 6, GOLD)
                     arcade.draw_circle_filled(left + rect[2] * self.country_export_percent / 100, rect[1] + 12, 8, GOLD)

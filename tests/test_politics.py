@@ -31,6 +31,17 @@ class PoliticsTests(unittest.TestCase):
         self.assertEqual(self.a.budget, 100_000_000)
         self.assertFalse(self.system.pending)
 
+    def test_export_limits_validate_and_preserve_legacy_toggle(self):
+        for invalid in (-1, 101, True, float("nan"), "50"):
+            self.assertFalse(self.system.execute(0, 0, "exports", invalid)[0])
+        self.assertFalse(self.system.execute(0, 0, "exports", 100)[0])
+        self.assertFalse(self.a.politics.cooldowns)
+        self.assertTrue(self.system.execute(0, 0, "exports", 0)[0])
+        self.assertEqual(self.a.politics.export_capacity_factor, 0)
+        self.system.advance(7 * 24)
+        self.assertTrue(self.system.execute(0, 0, "exports")[0])
+        self.assertEqual(self.a.politics.export_capacity_factor, 1)
+
     def test_tax_direction_shares_cooldown_and_support_is_delayed(self):
         self.assertTrue(self.system.execute(0, 0, "tax:smb:1")[0])
         self.assertFalse(self.system.execute(0, 0, "tax:smb:-1")[0])
@@ -53,7 +64,7 @@ class PoliticsTests(unittest.TestCase):
         self.assertAlmostEqual(sum(self.a.politics.faction_shares.values()), 1)
         before = self.a.politics.government_support
         for key in (*SOCIAL_GROUPS, *FACTIONS):
-            self.assertTrue(self.system.execute(0, 0, f"support:{key}")[0])
+            self.assertTrue(self.system.execute(0, 0, f"support:{key}", program_term="month")[0])
         self.system.advance(24)
         self.assertGreater(self.a.politics.government_support, before)
         self.assertGreater(self.a.politics.support["workers"], .61)
@@ -63,10 +74,73 @@ class PoliticsTests(unittest.TestCase):
         self.assertEqual(self.system.program_expenses(self.a), 0)
 
     def test_program_expires_and_stops_cost(self):
-        self.assertTrue(self.system.execute(0, 0, "support:smb")[0])
+        self.assertTrue(self.system.execute(0, 0, "support:smb", program_term="month")[0])
         self.assertEqual(self.system.program_expenses(self.a), 1_000_000)
         self.system.advance(90 * 24)
         self.assertEqual(self.system.program_expenses(self.a), 0)
+
+    def test_program_duration_costs_and_partial_hour_start(self):
+        from politics_system import PROGRAM_TERMS
+        for term, (_, days) in PROGRAM_TERMS.items():
+            with self.subTest(term=term):
+                a = player(0)
+                system = PoliticsSystem([a])
+                system.advance(6)
+                self.assertTrue(system.execute(0, 0, "support:population", program_term=term)[0])
+                duration = days or 400
+                system.advance(duration * 24 - 1)
+                self.assertIn("population", a.politics.programs)
+                system.advance(1)
+                self.assertAlmostEqual(a.budget, 100_000_000 - duration / 30 * 1_000_000, places=4)
+                self.assertEqual("population" in a.politics.programs, days is None)
+                if days is None:
+                    system.execute(0, 0, "stop:population")
+                budget = a.budget
+                system.advance(48)
+                self.assertEqual(a.budget, budget)
+
+    def test_support_changes_slowly_and_scales_with_conditions(self):
+        self.system.execute(0, 0, "support:population")
+        self.system.advance(72)
+        self.assertLess(self.a.politics.support["population"] - .61, .0015)
+        self.assertAlmostEqual(self.a.budget, 99_900_000, places=5)
+        small_effect = self.system.rules.program_support_effect(self.a, "population")
+        self.a.population = 100_000_000
+        self.assertLess(self.system.rules.program_support_effect(self.a, "population"), small_effect)
+        self.a.supply_summary = {"average": 0}
+        self.assertEqual(self.system.rules.program_support_effect(self.a, "population"), 0)
+
+    def test_program_not_deleted_when_funds_run_out(self):
+        self.system.execute(0, 0, "support:population")
+        self.a.budget = 100
+        self.system.advance(72)
+        self.assertIn("population", self.a.politics.programs)
+        self.assertEqual(self.a.budget, 0)
+        self.assertEqual(self.a.politics.program_funding["population"], 0)
+        self.a.budget = 1_000_000
+        self.system.advance(24)
+        self.assertEqual(self.a.politics.program_funding["population"], 1)
+
+    def test_program_term_validation_and_weekly_renewal(self):
+        for term in ("bad", None, [], True):
+            self.assertFalse(self.system.execute(0, 0, "support:population", program_term=term)[0])
+        self.assertEqual(self.a.budget, 100_000_000)
+        self.assertFalse(self.a.politics.programs)
+        self.system.execute(0, 0, "support:population", program_term="week")
+        self.system.advance(7 * 24)
+        self.assertTrue(self.system.execute(0, 0, "support:population", program_term="week")[0])
+
+    def test_program_batch_and_hourly_advance_match(self):
+        a, b = player(0), player(0)
+        one, many = PoliticsSystem([a]), PoliticsSystem([b])
+        for system in (one, many):
+            system.execute(0, 0, "support:workers", program_term="week")
+        one.advance(9 * 24)
+        for _ in range(9 * 24):
+            many.advance(1)
+        self.assertAlmostEqual(a.budget, b.budget, places=4)
+        self.assertAlmostEqual(a.politics.support["workers"], b.politics.support["workers"])
+        self.assertEqual(a.politics.programs, b.politics.programs)
 
     def test_diplomatic_access_and_truce(self):
         self.assertTrue(self.system.trade_allowed(0, 1))

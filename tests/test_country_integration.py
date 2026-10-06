@@ -75,8 +75,42 @@ class CountryIntegrationTests(unittest.TestCase):
         self.assertEqual(self.a.monthly_expenses_breakdown["political_programs"], 1_000_000)
         balance = self.a.budget
         from Constants import PRODUCTION_MONTH_HOURS
+        self.game.advance_politics(PRODUCTION_MONTH_HOURS)
         game.run_economy_tick(self.a, PRODUCTION_MONTH_HOURS)
-        self.assertAlmostEqual(self.a.budget - balance, self.a.monthly_balance)
+        self.assertAlmostEqual(self.a.budget - balance, self.a.monthly_balance, places=5)
+
+    def test_program_duration_control_reaches_simulation(self):
+        game = self.game
+        game.open_country_card(self.a)
+        game.open_country_dialog("action", "support:population")
+        self.assertEqual(game.country_program_term, "ongoing")
+        self.click("program_term", "week")
+        self.click("confirm", "support:population")
+        self.assertEqual(self.a.politics.programs["population"], game.politics.day + game.politics.hours / 24 + 7)
+        game.advance_politics(72)
+        self.assertIn("population", self.a.politics.programs)
+        self.assertLess(self.a.politics.support["population"] - .61, .0015)
+
+    def test_program_clock_matches_calendar_at_fast_speed(self):
+        game = self.game
+        server = game.simulation_server
+        old_speed, old_paused = server.speed_level, server.paused
+        start = server.current_time
+        start_day, start_hours = game.politics.day, game.politics.hours
+        game.submit_player_command("political_action", {"target": self.a.id, "action": "support:population", "program_term": "week"})
+        try:
+            server.accumulator = 0
+            server.set_speed_level(5)
+            server.set_paused(False)
+            for _ in range(3):
+                game.on_update(.25)
+            hours = (server.current_time - start).total_seconds() / 3600
+            self.assertEqual(hours, 72)
+            self.assertEqual((game.politics.day - start_day) * 24 + game.politics.hours - start_hours, hours)
+            self.assertIn("population", self.a.politics.programs)
+        finally:
+            server.set_speed_level(old_speed)
+            server.set_paused(old_paused)
 
     def test_peace_war_gate_ground_and_air(self):
         game = self.game
@@ -121,27 +155,34 @@ class CountryIntegrationTests(unittest.TestCase):
         game = self.game
         game.open_country_card(self.a)
         self.click("tab", "summary")
-        self.click("tab", "budget")
-        self.assertIn("Налоги населения", str(game.country_rows(self.a)))
-        self.click("tab", "summary")
+        self.click("panel", "economy")
+        self.assertEqual(game.active_top_panel_key, "economy")
+        game.open_country_card(self.a)
+        game.country_card_tab = "summary"
         self.click("tab", "population")
-        self.assertIn("Военнообязанные", str(game.country_rows(self.a)))
+        self.assertEqual(game.country_card_tab, "summary")
+        self.assertEqual(game.country_dialog, "population")
+        self.assertIn("Военнообязанные", str(game.country_dialog_rows(self.a)))
+        self.click("dialog_close")
         self.click("tab", "actions")
         self.assertEqual(len(game.country_rows(self.a)), 4)
         self.click("tab", "taxes")
         self.click("action", "tax:population:-1")
         self.click("confirm", "tax:population:-1")
         self.assertEqual(self.a.politics.taxes["population"], -1)
+        self.assertEqual(game.country_dialog, "taxes")
+        self.click("dialog_close")
         self.click("tab", "actions")
         self.click("tab", "programs")
         self.click("action", "support:population")
         self.click("confirm", "support:population")
-        actions = [action for _, action in game.country_rows(self.a)]
+        actions = [row.action for row in game.country_dialog_rows(self.a)]
         self.assertIn(("action", "stop:population"), actions)
         self.assertNotIn(("action", "support:population"), actions)
         self.click("action", "stop:population")
         self.click("confirm", "stop:population")
         self.assertNotIn("population", self.a.politics.programs)
+        self.click("dialog_close")
         for key in ("exports", "external"):
             label = game.country_action_label(self.a, key)
             game.submit_player_command("political_action", {"target": self.a.id, "action": key})
@@ -155,6 +196,130 @@ class CountryIntegrationTests(unittest.TestCase):
         game.open_country_card(self.b)
         self.assertEqual(game.country_card_tab, "summary")
         self.assertIn("Военная угроза", str(game.country_rows(self.b)))
+
+    def test_country_dialog_preserves_tab_scroll_and_map(self):
+        game = self.game
+        game.open_country_card(self.a)
+        game.country_card_tab = "summary"
+        game.country_card_scroll = 2
+        game.open_country_dialog("population")
+        zoom = game.world_camera.zoom
+        game.on_mouse_scroll(self.window.width - 5, 200, 0, -2)
+        self.assertEqual(game.world_camera.zoom, zoom)
+        game.on_mouse_press(self.window.width - 5, 200, self.arcade.MOUSE_BUTTON_LEFT, 0)
+        self.assertEqual(game.country_dialog, "population")
+        game.on_key_press(self.arcade.key.ESCAPE, 0)
+        self.assertIsNone(game.country_dialog)
+        self.assertEqual(game.country_card_tab, "summary")
+        self.assertEqual(game.country_card_scroll, 2)
+        self.assertEqual(game.country_card_id, self.a.id)
+
+    def test_export_slider_is_applied_only_on_confirmation(self):
+        game = self.game
+        game.open_country_card(self.a)
+        game.open_country_dialog("action", "exports")
+        game.update_side_panel_animation(1)
+        game.on_draw()
+        rect = next(rect for rect, kind, _ in game.country_dialog_hits if kind == "export_slider")
+        x, y, width, height = rect
+        game.on_mouse_press(x + width * .25, y + height / 2, self.arcade.MOUSE_BUTTON_LEFT, 0)
+        game.on_mouse_release(x + width * .25, y + height / 2, self.arcade.MOUSE_BUTTON_LEFT, 0)
+        self.assertEqual(game.country_export_percent, 25)
+        self.assertEqual(self.a.politics.export_capacity_factor, 1)
+        before = game.trade_capacity_per_month(self.a, "sell")
+        self.click("confirm", "exports")
+        self.assertEqual(self.a.politics.export_capacity_factor, .25)
+        self.assertAlmostEqual(game.trade_capacity_per_month(self.a, "sell"), before * .25)
+        self.assertIsNone(game.country_dialog)
+
+    def test_country_idle_text_is_not_relaid_out_and_views_are_reused(self):
+        from unittest.mock import patch
+        from contextlib import ExitStack
+        game = self.game
+        game.open_country_card(self.a)
+        game.country_card_tab = "society"
+        game.update_side_panel_animation(1)
+        game.on_draw()
+        pool = game.country_text_pool
+        with ExitStack() as stack:
+            updates = [stack.enter_context(patch.object(label.label, "end_update", wraps=label.label.end_update)) for label in pool]
+            game.on_draw()
+            self.assertEqual(sum(mock.call_count for mock in updates), 0)
+        game.country_card_tab = "summary"
+        game.on_draw()
+        game.country_card_tab = "society"
+        game.on_draw()
+        self.assertIs(game.country_text_pool, pool)
+        game.open_country_dialog("power")
+        game.on_draw()
+        modal_pool = game.country_dialog_views[("power", None)][1]
+        with ExitStack() as stack:
+            updates = [stack.enter_context(patch.object(label.label, "end_update", wraps=label.label.end_update)) for label in modal_pool]
+            game.on_draw()
+            self.assertEqual(sum(mock.call_count for mock in updates), 0)
+
+    def test_country_navigation_does_not_rebuild_inactive_resource_map(self):
+        from unittest.mock import patch
+        game = self.game
+        game.open_top_panel("resources")
+        game.selected_resource_key = "coal"
+        with patch.object(game, "create_map_overview") as overview, patch.object(game, "refresh_visible_tiles"):
+            game.open_top_panel("politics")
+            self.assertEqual(overview.call_count, 1)
+            game.open_top_panel("diplomacy")
+            game.open_country_card(self.b)
+            game.open_top_panel("economy")
+            self.assertEqual(overview.call_count, 1)
+
+    def test_population_forecast_matches_growth_without_mutating_tiles(self):
+        from unittest.mock import patch
+        game = self.game
+        before = [tile.population for tile in self.a.tiles]
+        with patch.object(game, "population_growth_multiplier", return_value=1):
+            forecast = game.population_monthly_forecast(self.a)
+        self.assertEqual(before, [tile.population for tile in self.a.tiles])
+        try:
+            actual = game.apply_positive_population_growth(self.a, 1, 1)
+            self.assertAlmostEqual(forecast, actual)
+        finally:
+            for tile, population in zip(self.a.tiles, before):
+                tile.population = population
+            game.sync_player_population_from_tiles(self.a)
+
+    def test_country_dialog_bounds_scrolling_and_bounded_text_cache(self):
+        from politics_system import ACTIONS
+        game = self.game
+        game.open_country_card(self.a)
+        try:
+            for width, height in ((1280, 800), (800, 600)):
+                self.window.set_size(width, height)
+                game.update_side_panel_animation(1)
+                for section in ("population", "power", "support", "taxes", "programs"):
+                    game.open_country_dialog(section)
+                    for scroll in (0, 88, 10000):
+                        game.country_dialog_scroll = scroll
+                        game.on_draw()
+                        x, y, w, h = game.country_dialog_rect()
+                        for rect, _, _ in game.country_dialog_hits:
+                            self.assertGreaterEqual(rect[0], x)
+                            self.assertGreaterEqual(rect[1], y)
+                            self.assertLessEqual(rect[0] + rect[2], x + w)
+                            self.assertLessEqual(rect[1] + rect[3], y + h)
+                        for label in game.country_dialog_views[(section, None)][1]:
+                            if label.text:
+                                left = label.x - (label.content_width if label.anchor_x == "right" else label.content_width / 2 if label.anchor_x == "center" else 0)
+                                self.assertGreaterEqual(left, x)
+                                self.assertLessEqual(left + label.content_width, x + w)
+                    game.close_country_dialog()
+            for key, action in ACTIONS.items():
+                if action.domestic:
+                    game.open_country_dialog("action", key)
+                    game.on_draw()
+                    game.close_country_dialog()
+            self.assertLessEqual(len(game.country_dialog_views), 16)
+        finally:
+            game.close_country_dialog()
+            self.window.set_size(1280, 800)
 
     def test_trade_country_summary_and_all_detail_views_render(self):
         game = self.game

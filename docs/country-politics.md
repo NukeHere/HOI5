@@ -107,6 +107,40 @@ the mutation handler rechecks ownership independently of button visibility.
 
 ## Verification
 
+Support programs default to ongoing and may instead run for 7, 30 or 365 game
+days. Their deadlines include the start hour. Expiry and cancellation stop future
+charges. The political clock settles program-hours at monthly cost / 720; the
+economy tick excludes this cost from cash settlement to avoid double charging.
+The budget breakdown still shows the planned monthly allocation. Insufficient
+cash proportionally reduces funding across active programs without deleting them.
+Restarting after expiry has no arbitrary 90-day cooldown.
+
+Base allocation remains equal across groups. Effectiveness scales with country
+population, group share relative to its reference share, actual funding, supply
+and legitimacy. Maximum direct target uplift is 4 percentage points, not an
+instant bonus. Support approaches its target with a 180-day time constant and
+a 0.05 percentage-point daily cap. The preview distinguishes the current support
+from its long-term target. Neither fixed costs nor these tuning values claim
+to be a final economic balance.
+
+Country details now open in centered windows while preserving the underlying
+tab and scroll position. Budget links go directly to Economy. Population uses
+the simulation's shared tile-growth calculation for a non-mutating monthly
+forecast; combat and border changes are excluded. Power is shown as category
+bars relative to each category leader, with weights and limitations separated.
+Tax changes and support programs have dedicated controls and confirmation.
+Export limits accept 0-100 percent (UI steps of 5), validated server-side; old
+commands without an amount retain the 50/100 toggle. Cancellation never applies
+the slider. No-op limits do not consume the action cooldown.
+
+Country and dialog text batches are cached per view with bounded eviction.
+RGB colors are normalized before comparison with Arcade's RGBA values, avoiding
+unnecessary text layout rebuilds. Data refresh is bounded to twice per second
+with immediate political/contract revision invalidation. Leaving resource views
+updates the map overlay; subsequent unrelated country navigation does not rebuild
+it. These changes address measured UI stalls, not an unverified fullscreen or
+OS-level Alt-Tab issue.
+
 Run `.venv\Scripts\python.exe -m unittest discover -s tests -v` for model tests.
 Set `RUN_ARCADE_TESTS=1` to include actual hidden-window Arcade integration tests:
 card input/rendering, budget effects, market settlement and ground/air war gates.

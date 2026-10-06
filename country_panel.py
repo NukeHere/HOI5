@@ -1,14 +1,17 @@
 """Country card and simulation-command adapter."""
 
 import textwrap
+import time
+from collections import OrderedDict
 import arcade
 from pyglet.graphics import Batch
 
 from politics_system import ACTIONS, GROUPS, SOCIAL_GROUPS, FACTIONS, SUPPORT_GROUPS, TREATIES, OFFERS, PoliticsSystem
 from country_power import power_ranking, relative_power
+from country_dialog import CountryDialogMixin
 
 
-class CountryPanelMixin:
+class CountryPanelMixin(CountryDialogMixin):
     def initialize_politics(self):
         self.politics = PoliticsSystem(self.players, start_time=self.simulation_server.current_time)
         self.country_card_id = None
@@ -28,6 +31,8 @@ class CountryPanelMixin:
         self.country_text_pool = []
         self.country_text_cursor = 0
         self.country_lines_cache = None
+        self.country_text_views = OrderedDict()
+        self.initialize_country_dialog()
 
     def countries_hostile(self, a, b):
         return bool(a is not None and b is not None and self.politics.hostile(a.id, b.id))
@@ -68,7 +73,8 @@ class CountryPanelMixin:
             success = True
         else:
             success, self.country_card_message = self.politics.execute(
-                command.player_id, payload.get("target"), payload.get("action"), payload.get("amount"))
+                command.player_id, payload.get("target"), payload.get("action"), payload.get("amount"),
+                payload.get("program_term", "ongoing"))
         if success:
             self.enforce_diplomatic_peace()
             self.recalculate_all_monthly_balances()
@@ -107,6 +113,8 @@ class CountryPanelMixin:
                 and self.point_in_rect(x, y, self.country_panel_rect()))
 
     def handle_country_click(self, x, y, button):
+        if self.handle_country_dialog_click(x, y, button):
+            return True
         if self.country_panel_contains(x, y):
             if button == arcade.MOUSE_BUTTON_LEFT:
                 for rect, kind, value in self.country_card_hits:
@@ -119,15 +127,20 @@ class CountryPanelMixin:
                     elif kind == "countries":
                         self.open_top_panel("diplomacy")
                     elif kind == "tab":
-                        self.country_card_tab = value
-                        self.country_card_scroll = 0
-                        self.country_card_action = None
+                        if value in ("population", "power", "taxes", "programs"):
+                            self.open_country_dialog(value)
+                        elif value == "budget":
+                            self.open_top_panel("economy")
+                        else:
+                            self.country_card_tab = value
+                            self.country_card_scroll = 0
+                            self.country_card_action = None
+                    elif kind == "dialog":
+                        self.open_country_dialog(value)
                     elif kind == "panel":
                         self.open_top_panel(value)
                     elif kind == "action":
-                        self.country_card_action = value
-                        self.country_amount_focus = value in ("aid", "loan")
-                        self.country_card_scroll = 0
+                        self.open_country_dialog("action", value)
                     elif kind == "amount":
                         self.country_amount_focus = True
                     elif kind == "amount_step":
@@ -240,7 +253,9 @@ class CountryPanelMixin:
                     action = f"{'stop' if active else 'support'}:{key}"
                     rows.append((self.country_action_label(player, action), ("action", action)))
                     if active:
-                        rows.append((f"До {self.politics.date_text(player.politics.programs[key])}; {self.format_money(player.politics.program_costs.get(key, 0))}/мес.", None))
+                        end = player.politics.programs[key]
+                        term = "До отмены" if end is None else f"До {self.politics.date_text(end)}"
+                        rows.append((f"{term}; {self.format_money(player.politics.program_costs.get(key, 0))}/мес.", None))
         elif section == "power":
             return self.country_power_rows(player)
         return rows
@@ -273,10 +288,10 @@ class CountryPanelMixin:
                          (self.country_threat(player), None)])
         return rows
 
-    def country_rows(self, player):
+    def country_rows(self, player, action_preview=False):
         own = player.id == self.human_player.id
         rows = []
-        if self.country_card_action:
+        if self.country_card_action and (not self.country_dialog or action_preview):
             action = ACTIONS[self.country_card_action]
             description = action.description
             if action.key == "exports":
@@ -298,7 +313,8 @@ class CountryPanelMixin:
             if action.key == "peace":
                 rows.append((f"Перемирие: {quote.truce_days} дн.", None))
             if action.key.startswith("support:"):
-                rows.append((f"{self.format_money(quote.program_monthly_cost)}/мес. до {self.politics.date_text(self.politics.day + quote.program_days)}", None))
+                term = "до отмены" if quote.program_days is None else f"на {quote.program_days} дней"
+                rows.append((f"{self.format_money(quote.program_monthly_cost)}/мес., {term}", None))
                 group = action.key.split(":")[1]
                 rows.append((f"Поддержка правительства группой: {player.politics.support[group]:.0%}. Программа постепенно повышает её лояльность; это регулярные расходы бюджета.", None))
             if action.key.startswith("stop:"):
@@ -315,9 +331,9 @@ class CountryPanelMixin:
             rows.append((f"Население: {self.format_population(player.population or 0)}", ("tab", "population") if own else None))
             if own:
                 rows.extend([
-                    (f"Бюджет: {self.format_money(player.budget)}", ("tab", "budget")),
+                    ("Бюджет", ("panel", "economy")),
                     (f"Баланс: {self.format_money_delta(player.monthly_balance)}/мес", None),
-                    (f"Поддержка правительства: {player.politics.government_support:.0%}", ("tab", "society")),
+                    (f"Поддержка правительства: {player.politics.government_support:.0%}", ("dialog", "support")),
                     (f"Устойчивость: {player.stability:.0%}; легитимность: {player.legitimacy:.0%}", None),
                 ])
                 if player.monthly_balance < 0:
@@ -334,7 +350,7 @@ class CountryPanelMixin:
                              ("Договоры: " + (", ".join(TREATIES[k] for k in sorted(relation.treaties)) or "нет"), None),
                              ("Внутренняя поддержка и бюджет: нет достоверных сведений", None)])
             rating = power_ranking(self.players)[player.id]
-            rows.append((f"Мощь: {rating['total']:.0f}/100; место {rating['rank']} из {len(self.players)}", ("tab", "power")))
+            rows.append((f"Мощь государства: место {rating['rank']} из {len(self.players)}", ("tab", "power")))
             if not own:
                 rows.append((self.country_threat(player), None))
         elif self.country_card_tab == "society":
@@ -344,7 +360,7 @@ class CountryPanelMixin:
                 rows.append(("Нет достоверных сведений о настроениях групп", None))
         elif self.country_card_tab == "trade":
             rows.append(("Внешний рынок: " + ("открыт" if player.politics.external_access else "закрыт"), None))
-            rows.append(("Экспорт: " + ("лимит сокращён на 50%" if player.politics.export_restricted else "без ограничений"), None))
+            rows.append((f"Экспорт: {player.politics.export_capacity_factor:.0%} базовой мощности", None))
             if not own:
                 allowed = self.politics.trade_allowed(self.human_player.id, player.id)
                 rows.append(("Прямая торговля: " + ("разрешена" if allowed else "заблокирована"), None))
@@ -403,19 +419,33 @@ class CountryPanelMixin:
         return rows or [("Нет событий", None)]
 
     def draw_country_text(self, text, x, y, color=(224, 234, 244), font_size=12, anchor_x="left", anchor_y="baseline"):
+        color = (*color, 255) if len(color) == 3 else color
         index = self.country_text_cursor
         self.country_text_cursor += 1
         if index == len(self.country_text_pool):
             self.country_text_pool.append(arcade.Text("", 0, 0, batch=self.country_text_batch))
         label = self.country_text_pool[index]
-        for name, value in (("text", str(text)), ("x", x), ("y", y), ("color", color),
-                            ("font_size", font_size), ("anchor_x", anchor_x), ("anchor_y", anchor_y)):
-            if getattr(label, name) != value:
-                setattr(label, name, value)
+        changes = [(name, value) for name, value in
+                   (("text", str(text)), ("x", x), ("y", y), ("color", color),
+                    ("font_size", font_size), ("anchor_x", anchor_x), ("anchor_y", anchor_y))
+                   if getattr(label, name) != value]
+        if changes:
+            with label:
+                for name, value in changes:
+                    setattr(label, name, value)
 
     def draw_country_card(self):
         if self.active_top_panel_key not in ("politics", "diplomacy") or self.side_panel_progress <= 0:
             return
+        view_key = (self.country_list_open, self.country_card_tab)
+        if view_key not in self.country_text_views:
+            self.country_text_views[view_key] = (Batch(), [])
+        self.country_text_views.move_to_end(view_key)
+        while len(self.country_text_views) > 12:
+            _, (_, labels) = self.country_text_views.popitem(last=False)
+            for label in labels:
+                label.label.delete()
+        self.country_text_batch, self.country_text_pool = self.country_text_views[view_key]
         self.country_text_cursor = 0
         player = self.player_by_id(self.country_card_id)
         x, y, width, height = self.country_panel_rect()
@@ -446,7 +476,7 @@ class CountryPanelMixin:
                 arcade.draw_line(rect[0], rect[1], rect[0] + rect[2], rect[1], (110, 210, 155), 2)
         cache_key = (self.country_card_id, self.country_list_open, self.country_card_tab, self.country_card_action, self.country_amount_text,
                      self.country_amount_focus, width, self.politics.revision,
-                     self.simulation_server.tick_count, self.simulation_server.market_state.revision,
+                     int(time.monotonic() * 2), self.simulation_server.market_state.revision,
                      tuple(p.trade_contract_revision for p in self.players))
         if self.country_lines_cache is None or self.country_lines_cache[0] != cache_key:
             lines = []
@@ -470,10 +500,11 @@ class CountryPanelMixin:
             elif player:
                 rows = self.country_rows(player)
             for text, action in rows:
+                if not action and text in ("Экономические группы", "Социальные группы населения", "Политические фракции", "Последние исполненные сделки:"):
+                    if lines and lines[-1][0]:
+                        lines.append(("", None))
                 wrapped = textwrap.wrap(text, max(20, int((width - 40) / 7.5))) or [""]
                 lines.extend((line, action) for line in wrapped)
-                if action:
-                    lines.append(("", None))
             self.country_lines_cache = (cache_key, lines)
         lines = self.country_lines_cache[1]
         visible = max(1, int((height - 132) // 23))
@@ -502,3 +533,4 @@ class CountryPanelMixin:
             if label.text:
                 label.text = ""
         self.country_text_batch.draw()
+        self.draw_country_dialog()

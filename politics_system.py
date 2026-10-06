@@ -1,7 +1,7 @@
 """Political state and deterministic actions, independent of rendering."""
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 import math
 
@@ -14,6 +14,8 @@ FACTIONS = {"nationalists": "Националисты", "socialists": "Соци�
 SUPPORT_GROUPS = {**GROUPS, **SOCIAL_GROUPS, **FACTIONS}
 TREATIES = {"trade": "Торговый договор", "peace": "Мирный договор", "alliance": "Союз"}
 OFFERS = {**TREATIES, "loan": "Кредит"}
+PROGRAM_TERMS = {"week": ("Неделя", 7), "month": ("Месяц: 30 дней", 30),
+                 "year": ("Год: 365 дней", 365), "ongoing": ("До отмены", None)}
 
 
 @dataclass
@@ -24,6 +26,8 @@ class PoliticalState:
     taxes: dict = field(default_factory=lambda: dict.fromkeys(GROUPS, 0))
     programs: dict = field(default_factory=dict)
     program_costs: dict = field(default_factory=dict)
+    program_funding: dict = field(default_factory=dict)
+    program_funded_hours: dict = field(default_factory=dict)
     cooldowns: dict = field(default_factory=dict)
     export_restricted: bool = False
     export_limit: float = 1.0
@@ -90,10 +94,10 @@ for _group, _label in SUPPORT_GROUPS.items():
     _description = ("Финансирование политического представительства интересов фракции. Повышает её поддержку правительства постепенно."
                     if _group in FACTIONS else "Бюджетная программа в интересах выбранной социальной или деловой группы. Повышает её поддержку правительства постепенно.")
     ACTIONS[_key] = PoliticalAction(_key, f"Поддержка: {_label.lower()}", True,
-        _description, cooldown=90)
+        _description, cooldown=0)
     _key = f"stop:{_group}"
     ACTIONS[_key] = PoliticalAction(_key, f"Завершить поддержку: {_label.lower()}", True,
-        "Прекращает регулярные расходы; поддержка группы постепенно меняется.")
+        "Прекращает регулярные расходы; поддержка группы постепенно меняется.", cooldown=0)
 
 
 @dataclass
@@ -116,7 +120,7 @@ class ActionQuote:
     opinion_delta: float
     trust_delta: float
     cooldown_days: int
-    program_days: int = 90
+    program_days: int | None = None
     program_monthly_cost: float = 1_000_000
     loan_annual_rate: float = 0.05
     loan_term_months: int = 12
@@ -157,12 +161,32 @@ class PoliticalRules:
         politics = player.politics
         tax_group = group if group in GROUPS else "population"
         target = 0.61 - politics.taxes[tax_group] * 0.04
-        target += 0.08 if group in politics.programs else 0
+        target += self.program_support_effect(player, group)
         if group not in GROUPS and "population" in politics.programs:
-            target += 0.04
+            target += self.program_support_effect(player, "population") * 0.5
         target -= 0.12 if player.budget < 0 else 0
         target -= 0.03 if group in ("smb", "large") and politics.export_restricted else 0
         return max(0, min(1, target))
+
+    def program_support_effect(self, player, group, monthly_cost=None):
+        politics = player.politics
+        if group not in politics.programs and monthly_cost is None:
+            return 0.0
+        relative_size = 1.0
+        if group in SOCIAL_WEIGHTS:
+            relative_size = politics.social_shares[group] / SOCIAL_WEIGHTS[group]
+        elif group in FACTIONS:
+            relative_size = politics.faction_shares[group] / 0.25
+        need = max(1_000_000, (player.population or 0) * 0.1 * relative_size)
+        intensity = min(1.0, (politics.program_costs.get(group, 0) if monthly_cost is None else monthly_cost) / need)
+        funding = politics.program_funding.get(group, 1.0) if monthly_cost is None else 1.0
+        legitimacy = max(0, min(1, getattr(player, "legitimacy", 0.61)))
+        supply = max(0, min(1, (getattr(player, "supply_summary", None) or {}).get("average", 1)))
+        return 0.04 * intensity * funding * (0.5 + legitimacy * 0.5) * supply
+
+    def daily_support_change(self, current, target):
+        # A six-month response time prevents short, cheap opinion spikes.
+        return max(-0.0005, min(0.0005, (target - current) * -math.expm1(-1 / 180)))
 
 
 class PoliticsSystem:
@@ -217,25 +241,32 @@ class PoliticsSystem:
                 incoming += payment
         return incoming, outgoing
 
-    def quote(self, actor_id, target_id, key, amount=None):
-        return self.rules.quote(self, self.players[actor_id], self.players[target_id], ACTIONS[key], amount)
+    def quote(self, actor_id, target_id, key, amount=None, program_term="ongoing"):
+        quote = self.rules.quote(self, self.players[actor_id], self.players[target_id], ACTIONS[key], amount)
+        if key.startswith("support:"):
+            quote = replace(quote, program_days=PROGRAM_TERMS[program_term][1])
+        return quote
 
-    def reason(self, actor_id, target_id, key, amount=None):
+    def reason(self, actor_id, target_id, key, amount=None, program_term="ongoing"):
         action = ACTIONS.get(key)
         if not action or actor_id not in self.players or target_id not in self.players:
             return "Неизвестное действие или государство"
         if action.domestic != (actor_id == target_id):
             return "Действие недоступно для этой страны"
         actor = self.players[actor_id]
+        if key.startswith("support:") and (not isinstance(program_term, str) or program_term not in PROGRAM_TERMS):
+            return "Выберите срок программы"
         if key == "exports" and amount is not None:
             if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount) or not 0 <= amount <= 100:
                 return "Выберите лимит экспорта от 0 до 100%"
+            if abs(actor.politics.export_capacity_factor * 100 - amount) < 1e-6:
+                return "Лимит не изменён"
         if key in ("aid", "loan"):
             if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount) or not 1_000 <= amount <= 1_000_000_000_000:
                 return "Введите сумму от 1 тыс. до 1 трлн"
             if actor.budget < amount:
                 return "Недостаточно средств для выбранной суммы"
-        quote = self.quote(actor_id, target_id, key, amount)
+        quote = self.quote(actor_id, target_id, key, amount, program_term)
         if not actor.tiles or not self.players[target_id].tiles:
             return "Государство не контролирует территорию"
         cooldown_key = (key if not key.startswith("tax:") else key.rsplit(":", 1)[0], target_id)
@@ -273,13 +304,13 @@ class PoliticsSystem:
     def record(self, player, message):
         player.politics.history.appendleft((self.day, message))
 
-    def execute(self, actor_id, target_id, key, amount=None):
-        reason = self.reason(actor_id, target_id, key, amount)
+    def execute(self, actor_id, target_id, key, amount=None, program_term="ongoing"):
+        reason = self.reason(actor_id, target_id, key, amount, program_term)
         if reason:
             return False, reason
         actor = self.players[actor_id]
         action = ACTIONS[key]
-        quote = self.quote(actor_id, target_id, key, amount)
+        quote = self.quote(actor_id, target_id, key, amount, program_term)
         actor.budget -= quote.cost
         cooldown_key = (key if not key.startswith("tax:") else key.rsplit(":", 1)[0], target_id)
         actor.politics.cooldowns[cooldown_key] = self.day + quote.cooldown_days
@@ -288,12 +319,16 @@ class PoliticsSystem:
             actor.politics.taxes[group] += int(delta)
         elif key.startswith("support:"):
             group = key.split(":")[1]
-            actor.politics.programs[group] = self.day + quote.program_days
+            actor.politics.programs[group] = None if quote.program_days is None else self.day + self.hours / 24 + quote.program_days
             actor.politics.program_costs[group] = quote.program_monthly_cost
+            actor.politics.program_funding[group] = 1.0
+            actor.politics.program_funded_hours[group] = 0.0
         elif key.startswith("stop:"):
             group = key.split(":")[1]
             del actor.politics.programs[group]
             actor.politics.program_costs.pop(group, None)
+            actor.politics.program_funding.pop(group, None)
+            actor.politics.program_funded_hours.pop(group, None)
         elif key == "exports":
             limit = amount / 100 if amount is not None else (1.0 if actor.politics.export_restricted else 0.5)
             actor.politics.export_limit = limit
@@ -325,7 +360,8 @@ class PoliticsSystem:
                 relation.trust = max(0, min(1, relation.trust + quote.trust_delta))
                 relation.opinions[target_id] = max(-100, min(100, relation.opinions[target_id] + quote.opinion_delta))
             self.record(target, f"{actor.name}: {action.label}" + (f" ({amount:,.0f})" if key in ("aid", "loan") else ""))
-        self.record(actor, action.label + (f" ({amount:,.0f})" if key in ("aid", "loan") else ""))
+        event_label = f"Лимит экспорта: {actor.politics.export_capacity_factor:.0%}" if key == "exports" else action.label
+        self.record(actor, event_label + (f" ({amount:,.0f})" if key in ("aid", "loan") else ""))
         self.revision += 1
         return True, "Решение принято"
 
@@ -385,22 +421,38 @@ class PoliticsSystem:
                     self.record(player, "Кредит полностью погашен")
 
     def advance(self, hours):
-        self.hours += max(0, hours)
-        days = int(self.hours // 24)
-        self.hours -= days * 24
-        for _ in range(days):
+        remaining = max(0.0, hours)
+        while remaining > 1e-9:
+            step = min(24 - self.hours, remaining)
+            now = self.day + self.hours / 24
+            for player in self.players.values():
+                state = player.politics
+                active_hours = {group: step if end is None else min(step, max(0, (end - now) * 24))
+                                for group, end in state.programs.items()}
+                required = sum(state.program_costs.get(group, 0) * span / 720 for group, span in active_hours.items())
+                funded = min(required, max(0, player.budget))
+                ratio = funded / required if required > 0 else 0
+                player.budget -= funded
+                for group, span in active_hours.items():
+                    state.program_funding[group] = ratio
+                    state.program_funded_hours[group] = state.program_funded_hours.get(group, 0) + span * ratio
+            self.hours += step
+            remaining -= step
+            if self.hours < 24 - 1e-9:
+                self.expire_programs()
+                continue
             self.day += 1
+            self.hours = 0.0
             self.service_loans()
             for player in self.players.values():
                 politics = player.politics
-                for group, end in list(politics.programs.items()):
-                    if end <= self.day or player.budget < 0:
-                        del politics.programs[group]
-                        politics.program_costs.pop(group, None)
-                        self.record(player, f"Программа завершена: {SUPPORT_GROUPS[group]}")
+                for group in politics.programs:
+                    politics.program_funding[group] = min(1, politics.program_funded_hours.get(group, 0) / 24)
+                    politics.program_funded_hours[group] = 0.0
                 for group in SUPPORT_GROUPS:
                     target = self.rules.support_target(self, player, group)
-                    politics.support[group] += (max(0, min(1, target)) - politics.support[group]) * 0.04
+                    politics.support[group] += self.rules.daily_support_change(politics.support[group], max(0, min(1, target)))
+            self.expire_programs()
             for offer in list(self.pending):
                 a, b, key, due = offer
                 if due > self.day or self.players[b].is_human:
@@ -408,3 +460,16 @@ class PoliticsSystem:
                 accept = self.rules.accepts(self, offer)
                 self.resolve_offer(offer, accept)
             self.revision += 1
+
+    def expire_programs(self):
+        now = self.day + self.hours / 24
+        for player in self.players.values():
+            state = player.politics
+            for group, end in list(state.programs.items()):
+                if end is not None and end <= now + 1e-9:
+                    del state.programs[group]
+                    state.program_costs.pop(group, None)
+                    state.program_funding.pop(group, None)
+                    state.program_funded_hours.pop(group, None)
+                    self.record(player, f"Программа завершена по сроку: {SUPPORT_GROUPS[group]}")
+                    self.revision += 1

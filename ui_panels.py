@@ -437,6 +437,9 @@ class UIPanelsMixin:
         return None
 
     def open_top_panel(self, key):
+        self.country_dialog = None
+        self.country_dialog_stack = []
+        self.country_slider_drag = False
         previous_key = self.active_top_panel_key
         self.country_card_action = None
         self.country_card_scroll = 0
@@ -448,13 +451,17 @@ class UIPanelsMixin:
             self.country_card_tab = "actions"
         self.active_top_panel_key = key
         self.side_panel_target = 1.0
-        if self.selected_resource_key and previous_key != key:
+        if (self.selected_resource_key and previous_key != key
+                and (previous_key in ("resources", "construction") or key in ("resources", "construction"))):
             self.create_map_overview()
             self.refresh_visible_tiles()
         if previous_key == "construction" and key != "construction":
             self.set_construction_placement_mode(False)
 
     def close_top_panel(self):
+        self.country_dialog = None
+        self.country_dialog_stack = []
+        self.country_slider_drag = False
         self.country_card_id = None
         self.country_list_open = False
         self.country_amount_focus = False

@@ -1073,8 +1073,9 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
         company_income = income_breakdown.get("companies", 0.0)
         expenses = player.monthly_expenses_breakdown or self.monthly_expenses(player)
         player.monthly_expenses_breakdown = expenses
-        # Loan payments are settled on their due dates by the political simulation.
-        operating_expenses = expenses.get("total", 0.0) - expenses.get("debt_service", 0.0)
+        # Political simulation settles loans and actual funded program-hours.
+        operating_expenses = (expenses.get("total", 0.0) - expenses.get("debt_service", 0.0)
+                              - expenses.get("political_programs", 0.0))
         player.budget += (population_income + company_income - operating_expenses) * month_fraction
         self.mark_player_resource_balance_dirty(player)
 
@@ -10092,13 +10093,14 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
                         self.fps_timer = 0
 
                 previous_tick_count = self.simulation_client.snapshot.tick_count
+                previous_time = self.simulation_server.current_time
                 with profiler.measure("server_clock"):
                     self.simulation_server.update(delta_time)
                     self.simulation_client.sync_from_server()
                 snapshot = self.simulation_client.snapshot
                 tick_delta = max(0, snapshot.tick_count - previous_tick_count)
                 if tick_delta > 0:
-                    elapsed_hours = snapshot.hours_per_tick * tick_delta
+                    elapsed_hours = (snapshot.current_time - previous_time).total_seconds() / 3600
                     with profiler.measure("server_politics"):
                         self.advance_politics(elapsed_hours)
                     with profiler.measure("server_market"):
