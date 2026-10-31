@@ -13,7 +13,9 @@ from country_dialog import CountryDialogMixin
 
 class CountryPanelMixin(CountryDialogMixin):
     def initialize_politics(self):
-        self.politics = PoliticsSystem(self.players, start_time=self.simulation_server.current_time)
+        self.politics = PoliticsSystem(self.players, start_time=self.simulation_server.current_time,
+                                      news_seed=self.world_seed)
+        self.initialize_news_ui()
         self.country_card_id = None
         self.country_list_open = False
         self.country_card_tab = "summary"
@@ -98,7 +100,46 @@ class CountryPanelMixin(CountryDialogMixin):
 
     def advance_politics(self, hours):
         previous = self.politics.revision
+        previous_day = self.politics.day
+        if self.politics.hours + hours >= 24:
+            market = self.simulation_server.market_state
+            oil_supply = market.supply.get("oil", 0)
+            oil_demand = market.demand.get("oil", 0)
+            exporters = sorted(self.players,
+                key=lambda player: self.production_amount_for_key(player, "oil", "outputs"), reverse=True)
+            major_exporter = exporters[0] if exporters else None
+            major_output = self.production_amount_for_key(major_exporter, "oil", "outputs") if major_exporter else 0
+            self.politics.news.world_context = {
+                "oil_pressure": oil_demand / max(1, oil_supply) if market.revision else 1.0,
+                "major_oil_exporter_restricted": bool(major_output > 0 and major_exporter.politics.export_capacity_factor < .1),
+            }
+            food_price = self.market_current_price("food") / self.market_base_price("food")
+            goods_price = self.market_current_price("consumer_goods") / self.market_base_price("consumer_goods")
+            for player in self.players:
+                player.politics.living_conditions = {
+                    "food": self.population_resource_ratio(player, "food"),
+                    "goods": self.population_resource_ratio(player, "consumer_goods"),
+                    "food_price": food_price,
+                    "goods_price": goods_price,
+                }
         self.politics.advance(hours)
+        if self.politics.day != previous_day:
+            for player in self.players:
+                state = player.politics
+                checks = (
+                    ("radicalization_blocks_war", max(state.faction_radicalization[g] for g in ("liberals", "socialists")) >= .7, "Фракции блокируют подготовку войны", "Радикализация либералов или социалистов достигла 70%. Проверьте их требования и поддержку.", "Радикализация фракций больше не блокирует войну"),
+                    ("political_capital_low", state.political_capital < 20, "Политический капитал на исходе", "Осталось менее 20 единиц политического капитала. Часть решений недоступна.", "Политический капитал восстановился до 20"),
+                    ("storage_overflow", any(v > 0 for v in (player.storage_overflow or {}).values()), "Склады переполнены", "Объём запасов превышает доступное хранилище. Проверьте вместимость складов и экспорт.", "Переполнение складов устранено"),
+                    ("budget_deficit", player.monthly_balance < 0, "Бюджет исполняется с дефицитом", "Текущие расходы превышают доходы. Проверьте бюджет.", "Бюджет вышел из дефицита"),
+                    ("food_shortage", state.living_conditions.get("food", 1) < .5, "Населению не хватает продовольствия", "Обеспечение продовольствием ниже половины потребности. Проверьте производство и импорт.", "Обеспечение продовольствием улучшилось"),
+                    ("goods_shortage", state.living_conditions.get("goods", 1) < .5, "Нехватка потребительских товаров", "Обеспечение населения товарами ниже половины потребности.", "Обеспечение потребительскими товарами улучшилось"),
+                    ("government_support_low", state.government_support < .45, "Низкая поддержка правительства", "Поддержка власти ниже 45%. Часть политических решений может быть недоступна.", "Поддержка правительства восстановилась до 45%"),
+                    ("legitimacy_low", player.legitimacy < .45, "Легитимность власти снизилась", "Легитимность ниже 45%. Проверьте доступность политических решений.", "Легитимность восстановилась до 45%"),
+                    ("army_supply_low", any(d.last_supply_ratio < .5 for d in player.divisions), "Перебои снабжения войск", "Часть дивизий обеспечена менее чем наполовину. Проверьте склады и снабжение.", "Снабжение войск улучшилось"),
+                    ("program_underfunded", any(state.program_funding.get(g, 1) < .9 for g in state.programs), "Программы поддержки недофинансированы", "На действующие программы не хватает средств. Их эффект снижен.", "Финансирование программ поддержки восстановлено"),
+                )
+                for key, active, title, body, recovery in checks:
+                    self.politics.news.alert(self.politics.day, player, key, active, title, body, recovery)
         if self.politics.revision != previous:
             self.enforce_diplomatic_peace()
             self.recalculate_all_monthly_balances()
@@ -203,6 +244,10 @@ class CountryPanelMixin(CountryDialogMixin):
         rows = [(f"Поддержка правительства: {state.government_support:.0%}", None),
                 (f"Устойчивость: {player.stability:.0%}; легитимность: {player.legitimacy:.0%}", None),
                 (f"Поддержка войны: {player.war_support:.0%}", None),
+                (f"Политический капитал: {state.political_capital:.1f}/100; репутация: {state.reputation:.0%}; надёжность: {state.reliability:.0%}", None),
+                (f"Обеспеченность: еда {state.living_conditions['food']:.0%}; товары {state.living_conditions['goods']:.0%}", None),
+                (f"Цены к базовым: еда {state.living_conditions['food_price']:.0%}; товары {state.living_conditions['goods_price']:.0%}", None),
+                (f"Налоговая отдача компаний: {self.politics.rules.company_tax_yield_factor(player):.0%}", None),
                 ("Демография", ("tab", "population")), ("Программы поддержки", ("tab", "programs"))]
         for title, groups, shares in (("Экономические группы", GROUPS, {}),
                                       ("Социальные группы населения", SOCIAL_GROUPS, state.social_shares),
@@ -211,6 +256,11 @@ class CountryPanelMixin(CountryDialogMixin):
             for key, name in groups.items():
                 share = f"; оценочная доля {shares[key]:.0%}" if key in shares else ""
                 rows.append((f"{name}: поддержка {state.support[key]:.0%}{share}", None))
+                if key in FACTIONS:
+                    demand, met = self.politics.rules.faction_demand(player, key,
+                        any(relation.at_war for pair, relation in self.politics.relations.items() if player.id in pair))
+                    rows.append((f"  Требование: {demand} — {'выполнено' if met else 'не выполнено'}", None))
+                    rows.append((f"  Терпение {state.faction_patience[key]:.0%}; радикализация {state.faction_radicalization[key]:.0%}", None))
         return rows
 
     def country_detail_rows(self, player, section):
@@ -233,6 +283,7 @@ class CountryPanelMixin(CountryDialogMixin):
                          ("Доходы и торговый баланс за месяц", None)])
             for key, name in (("population", "Налоги населения"), ("companies", "Налоги компаний"), ("trade", "Торговля (прогноз)"), ("loan_repayments", "Возврат кредитов (прогноз)")):
                 rows.append((f"{name}: {self.format_money_delta(income.get(key, 0))}", None))
+            rows.append((f"Налоговая отдача компаний с учётом устойчивости: {income.get('company_yield_factor', 1):.0%}", None))
             rows.append(("Расходы за месяц", None))
             for key, name in (("army", "Армия"), ("government", "Правительство"), ("social", "Социальное обеспечение"), ("infrastructure", "Инфраструктура"), ("political_programs", "Программы поддержки"), ("debt_service", "Платежи по кредитам")):
                 rows.append((f"{name}: {self.format_money(expenses.get(key, 0))}", None))
@@ -304,6 +355,8 @@ class CountryPanelMixin(CountryDialogMixin):
                 rows.append((f"Сумма: {self.country_amount_text or '0'}" + (" |" if self.country_amount_focus else ""), ("amount", None)))
             quote = self.politics.quote(self.human_player.id, player.id, action.key, amount)
             rows.append((f"Расход сейчас: {self.format_money(quote.cost)}; повтор с {self.politics.date_text(self.politics.day + quote.cooldown_days)}", None))
+            if quote.political_cost:
+                rows.append((f"Политический капитал: −{quote.political_cost:g}; сейчас {self.human_player.politics.political_capital:.1f}/100", None))
             if quote.opinion_delta or quote.trust_delta:
                 rows.append((f"Отношение: {quote.opinion_delta:+g}; доверие: {quote.trust_delta:+.0%}", None))
             if action.key == "loan":
@@ -312,6 +365,10 @@ class CountryPanelMixin(CountryDialogMixin):
                 rows.append((f"Ожидаемый ответ: {self.politics.date_text(self.politics.day + quote.response_days)}", None))
             if action.key == "peace":
                 rows.append((f"Перемирие: {quote.truce_days} дн.", None))
+            if action.key == "justify":
+                rows.append((f"Завершение подготовки: {self.politics.date_text(self.politics.day + 30)}", None))
+            if action.key == "war":
+                rows.append(("Война ухудшит репутацию и отношение другой страны.", None))
             if action.key.startswith("support:"):
                 term = "до отмены" if quote.program_days is None else f"на {quote.program_days} дней"
                 rows.append((f"{self.format_money(quote.program_monthly_cost)}/мес., {term}", None))
@@ -348,7 +405,15 @@ class CountryPanelMixin(CountryDialogMixin):
                 rows.extend([(f"Статус: {status}", None),
                              (f"Отношение к нам: {relation.opinions[player.id]:+.0f}; доверие: {relation.trust:.0%}", None),
                              ("Договоры: " + (", ".join(TREATIES[k] for k in sorted(relation.treaties)) or "нет"), None),
+                             (f"Проход наших войск: {'разрешён' if self.politics.can_transit(self.human_player.id, player.id) else 'запрещён'}", None),
+                             (f"Проход их войск: {'разрешён' if self.politics.can_transit(player.id, self.human_player.id) else 'запрещён'}", None),
+                             (f"Претензии к нам: {relation.grievances[player.id]:.0f}/100; страх: {relation.fear[player.id]:.0f}/100; уважение: {relation.respect[player.id]:.0f}/100", None),
+                             (f"Дипломатическая напряжённость: {relation.crisis_level:.0f}/100", None),
+                             (f"Идеологическое расхождение: {self.politics.rules.ideology_distance(self.human_player, player):.0%}; их репутация: {player.politics.reputation:.0%}; надёжность: {player.politics.reliability:.0%}", None),
                              ("Внутренняя поддержка и бюджет: нет достоверных сведений", None)])
+                goal = self.politics.war_goals.get((self.human_player.id, player.id))
+                if goal is not None:
+                    rows.append((f"Цель войны: {'готова' if self.politics.day >= goal else 'готовится'} с {self.politics.date_text(goal)}; действует до {self.politics.date_text(goal + 180)}", None))
             rating = power_ranking(self.players)[player.id]
             rows.append((f"Мощь государства: место {rating['rank']} из {len(self.players)}", ("tab", "power")))
             if not own:

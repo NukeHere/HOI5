@@ -296,6 +296,9 @@ class AirSystemMixin:
             wing.aircraft_count = max(0, wing.aircraft_count - destroyed)
             wing.ready_count = max(0, wing.ready_count - destroyed)
             wing.destroyed_count = max(0, int(getattr(wing, "destroyed_count", 0))) + destroyed
+            self.politics.news.notice(self.politics.day, wing.owner, "aircraft_losses", "Потери авиации",
+                f"Авиакрыло потеряло {destroyed} самолётов или вертолётов. Проверьте состав и условия выполнения задач.",
+                important=True, cooldown=1)
         if damaged > 0:
             damaged = min(damaged, max(0, wing.ready_count))
             wing.ready_count = max(0, wing.ready_count - damaged)

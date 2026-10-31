@@ -33,6 +33,7 @@ from simulation_core import LocalSimulationClient, LocalSimulationServer
 from ui_controls import HudButton, PauseButton, PauseDropdown, PauseSlider
 from ui_panels import UIPanelsMixin
 from country_panel import CountryPanelMixin
+from news_panel import NewsPanelMixin
 
 
 def create_hex_texture():
@@ -257,7 +258,7 @@ class WorldGenerator:
         return lake_chance > (1 - LAKE_FREQUENCY * 0.7) and is_depression
 
 
-class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanelsMixin, arcade.View):
+class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanelsMixin, arcade.View):
     def __init__(self, difficulty="Normal", bot_count=3, map_size=None):
         super().__init__()
         arcade.set_background_color(arcade.color.BLACK)
@@ -978,7 +979,8 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
 
     def recalculate_monthly_balance(self, player):
         population_income = self.monthly_population_income(player) * player.politics.tax_multiplier("population")
-        base_company_income = self.monthly_company_income(player)
+        company_yield_factor = self.politics.rules.company_tax_yield_factor(player)
+        base_company_income = self.monthly_company_income(player) * company_yield_factor
         # The economy has no individual firms yet; keep this proxy explicit.
         smb_income = base_company_income * 0.65 * player.politics.tax_multiplier("smb")
         large_income = base_company_income * 0.35 * player.politics.tax_multiplier("large")
@@ -994,6 +996,7 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
             "companies": company_income,
             "smb": smb_income,
             "large": large_income,
+            "company_yield_factor": company_yield_factor,
             "loan_repayments": loan_repayments,
             "trade": trade_balance,
             "multiplier": 1.0,
@@ -1077,6 +1080,9 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
         operating_expenses = (expenses.get("total", 0.0) - expenses.get("debt_service", 0.0)
                               - expenses.get("political_programs", 0.0))
         player.budget += (population_income + company_income - operating_expenses) * month_fraction
+        self.politics.news.alert(self.politics.day, player, "treasury_empty", player.budget <= 0,
+            "Казна исчерпана", "Средств в казне нет. Проверьте расходы, программы поддержки и обязательства.",
+            "В казне снова появились средства")
         self.mark_player_resource_balance_dirty(player)
 
     def run_production_stage(self, player, stage, month_fraction):
@@ -1145,7 +1151,14 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
         if month_fraction <= 0:
             return
         for stage in PRODUCTION_STAGES:
-            self.run_production_stage(player, stage, month_fraction)
+            ratio = self.run_production_stage(player, stage, month_fraction)
+            if stage != "agriculture" and ratio is not None:
+                label = {"raw": "сырьё", "semi_finished": "полуфабрикаты",
+                         "finished": "готовая продукция", "upkeep": "содержание населения"}.get(stage, stage)
+                self.politics.news.alert(self.politics.day, player, f"production_shortage:{stage}", ratio < .5,
+                    "Производство ограничено нехваткой ресурсов",
+                    f"{player.name}: этап «{label}» обеспечен ресурсами менее чем наполовину. Проверьте ресурсы и торговлю.",
+                    "Снабжение производства сырьём восстановлено")
         self.mark_player_resource_balance_dirty(player)
 
     @staticmethod
@@ -2373,9 +2386,10 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
         return tiles
 
     def division_can_enter_tile(self, division, tile):
-        if not tile or self.is_water_tile(tile):
+        if not division or not tile or self.is_water_tile(tile):
             return False
-        return tile.owner == division.owner
+        return (tile.owner == division.owner or
+                tile.owner is not None and self.politics.can_transit(division.owner.id, tile.owner.id))
 
     def division_can_capture_tile(self, division, tile):
         if not tile or self.is_water_tile(tile):
@@ -2387,9 +2401,18 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
     def division_can_path_through_tile(self, division, tile, target_tile):
         if self.division_can_enter_tile(division, tile):
             return True
-        if target_tile and target_tile.owner != division.owner:
+        if self.division_can_withdraw_through_tile(division, tile, target_tile):
+            return True
+        if target_tile and self.division_can_capture_tile(division, target_tile):
             return self.division_can_capture_tile(division, tile)
         return False
+
+    def division_can_withdraw_through_tile(self, division, tile, target_tile):
+        return bool(division and division.tile and tile and target_tile
+            and target_tile.owner is division.owner
+            and tile.owner is division.tile.owner and tile.owner is not division.owner
+            and tile.owner is not None and not self.is_water_tile(tile)
+            and not self.countries_hostile(division.owner, tile.owner))
 
     def division_path_expansion_limit(self, start_tile, target_tile):
         distance = self.hex_distance(start_tile, target_tile)
@@ -2480,7 +2503,7 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
                 division.path = path
                 division.movement_progress = 0.0
                 division.visual_movement_progress = 0.0
-            division.route_mode = "attack" if target_tile.owner and target_tile.owner != division.owner else "move"
+            division.route_mode = "attack" if self.division_can_capture_tile(division, target_tile) else "move"
             division.route_tiles = [division.tile] + list(division.path)
             ordered = True
         if ordered:
@@ -2727,6 +2750,10 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
         return org_damage, strength_damage
 
     def destroy_division(self, division):
+        if division.owner and division in self.divisions:
+            self.politics.news.notice(self.politics.day, division.owner, "division_destroyed",
+                "Потеря дивизии", f"Соединение «{getattr(division, 'name', division.id)}» потеряно. Проверьте обстановку на фронте.",
+                important=True, cooldown=1)
         if division.owner and division in division.owner.divisions:
             division.owner.divisions.remove(division)
         if division in self.divisions:
@@ -3003,6 +3030,12 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
                 battle.last_defender_org_damage += org_damage
                 battle.last_defender_strength_damage += strength_damage
 
+        self.politics.news.record_battle_losses(
+            self.politics.day, battle,
+            battle.last_defender_strength_damage,
+            battle.last_attacker_strength_damage,
+        )
+
         with self.profiler.measure("battle_collateral"):
             self.apply_battle_collateral_damage(battle, elapsed_hours, attackers, defenders)
 
@@ -3233,6 +3266,16 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
         self.propagate_water_ownership_from_land(tile)
         self.refresh_after_ownership_change()
         self.update_air_assets_after_tile_owner_change(tile, old_owner, new_owner)
+        if old_owner:
+            self.politics.news.notice(self.politics.day, old_owner, "territory_lost", "Потеря территории",
+                f"Участок ({tile.q}, {tile.r}) перешёл под контроль {new_owner.name if new_owner else 'другой стороны'}.",
+                important=True, cooldown=1)
+            if not old_owner.tiles:
+                self.politics.news.publish(self.politics.day, "country_defeated", f"{old_owner.name} потеряла всю территорию",
+                    f"У страны {old_owner.name} больше нет подконтрольных участков карты.", "critical")
+        if new_owner:
+            self.politics.news.notice(self.politics.day, new_owner, "territory_gained", "Получен контроль над территорией",
+                f"Наши силы контролируют участок ({tile.q}, {tile.r}).", cooldown=1)
         if new_owner:
             self.enqueue_tile_repairs(new_owner, tile)
         return True
@@ -3280,7 +3323,9 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
     def destroy_stranded_enemy_division(self, division):
         if not division.tile or not division.owner:
             return False
-        if division.tile.owner == division.owner:
+        if division.tile.owner == division.owner or division.tile.owner is None:
+            return False
+        if not self.countries_hostile(division.owner, division.tile.owner):
             return False
         if division.battle_id or division.route_mode == "retreat":
             return False
@@ -3331,7 +3376,9 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
                     self.recover_division_organization(division, elapsed_hours)
                     continue
                 next_tile = division.path[0]
-                if next_tile.owner is not None and next_tile.owner is not division.owner and not self.countries_hostile(division.owner, next_tile.owner):
+                if not (self.division_can_enter_tile(division, next_tile)
+                        or self.division_can_capture_tile(division, next_tile)
+                        or self.division_can_withdraw_through_tile(division, next_tile, division.target_tile)):
                     division.path.clear()
                     division.route_tiles.clear()
                     division.target_tile = None
@@ -3351,8 +3398,10 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
                     division.organization - DIVISION_ORG_MOVE_COST_PER_TILE * progress,
                 )
                 while division.path and division.movement_progress >= 1.0:
-                    step_owner = division.path[0].owner
-                    if step_owner is not None and step_owner is not division.owner and not self.countries_hostile(division.owner, step_owner):
+                    next_step = division.path[0]
+                    if not (self.division_can_enter_tile(division, next_step)
+                            or self.division_can_capture_tile(division, next_step)
+                            or self.division_can_withdraw_through_tile(division, next_step, division.target_tile)):
                         division.path.clear()
                         break
                     division.movement_progress -= 1.0
@@ -3363,7 +3412,8 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
                     if division.route_mode == "retreat" and division.tile.owner != division.owner:
                         self.destroy_division(division)
                         break
-                    if division.route_mode != "retreat" and division.tile.owner != division.owner and division.owner:
+                    if (division.route_mode != "retreat" and division.owner
+                            and self.division_can_capture_tile(division, division.tile)):
                         self.transfer_tile_owner(division.tile, division.owner)
                     division.route_tiles = [division.tile] + list(division.path)
                 if division not in self.divisions:
@@ -6472,6 +6522,8 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
             if not self.paused:
                 with profiler.measure("ui_country_card"):
                     self.draw_country_card()
+                with profiler.measure("ui_news"):
+                    self.draw_news_overlay()
             if construction_tooltip_data or top_tooltip_active:
                 with profiler.measure("ui_tooltips"):
                     self.begin_tooltip_text_frame()
@@ -8074,7 +8126,7 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
             target_tile = path[-1]
         division.path = path
         division.target_tile = target_tile
-        division.route_mode = "attack" if target_tile.owner and target_tile.owner != division.owner else "move"
+        division.route_mode = "attack" if self.division_can_capture_tile(division, target_tile) else "move"
         division.route_tiles = [division.tile] + list(path)
         division.movement_progress = 0.0
         division.visual_movement_progress = 0.0
@@ -10073,6 +10125,7 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
                     self.shader_time += delta_time
                     self.update_map_layer_menu_animation(delta_time)
                     self.update_side_panel_animation(delta_time)
+                    self.update_news_ui(delta_time)
                     if self.hex_panel_message_timer > 0:
                         self.hex_panel_message_timer = max(0.0, self.hex_panel_message_timer - delta_time)
                         if self.hex_panel_message_timer == 0:
@@ -10212,6 +10265,8 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
                         return
             return
 
+        if self.handle_news_click(x, y, button):
+            return
         if self.handle_country_click(x, y, button):
             return
         world_x, world_y = self.screen_to_world(x, y)
@@ -10639,6 +10694,8 @@ class Game(CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSy
             self.last_mouse_check = current_time
 
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
+        if self.handle_news_scroll(x, y, scroll_y):
+            return
         if self.country_dialog and not self.paused:
             self.country_dialog_scroll = max(0, self.country_dialog_scroll - int(scroll_y * 44))
             return

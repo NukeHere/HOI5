@@ -98,6 +98,8 @@ class ConstructionSystemMixin:
         if changed:
             owner = getattr(tile, "owner", None)
             self.refresh_tile_after_building_health_change(tile, owner)
+            self.politics.news.record_logistics_damage(
+                self.politics.day, owner, tile, building_key, old_health, new_health)
             if queue_repair and owner:
                 self.enqueue_auto_repair(owner, tile, building_key)
         return changed
@@ -836,6 +838,16 @@ class ConstructionSystemMixin:
         project["status_reason"] = "; ".join(reasons) if reasons else self.construction_project_status_label(status)
         project["missing_money"] = max(0.0, missing_money)
         project["missing_resources"] = dict(missing_resources)
+        owner = getattr(project.get("tile"), "owner", None)
+        if owner and hasattr(self, "politics"):
+            tile = project["tile"]
+            building = project.get("building", "объект")
+            label = BUILDING_DISPLAY_NAMES.get(building, building)
+            self.politics.news.alert(self.politics.day, owner,
+                f"construction_stalled:{tile.q}:{tile.r}:{building}",
+                status in ("waiting_money", "waiting_resources", "waiting_power"),
+                f"Строительство остановлено: {label}", project["status_reason"],
+                f"Сняты ограничения строительства: {label}")
 
     def construction_project_progress_delta(self, player, project, month_fraction=1.0, build_power=None):
         cost = self.sync_construction_project_fields(project)
@@ -1030,6 +1042,10 @@ class ConstructionSystemMixin:
         building_key = project.get("building") or cost.get("building")
         if not tile or not building_key:
             return
+        label = BUILDING_DISPLAY_NAMES.get(building_key, building_key)
+        self.politics.news.notice(self.politics.day, player, "construction_complete",
+            f"{'Ремонт завершён' if project.get('project_type') == 'repair' else 'Строительство завершено'}: {label}",
+            f"Работы на участке ({tile.q}, {tile.r}) завершены.")
         if project.get("project_type") == "repair":
             self.set_building_health(tile, building_key, cost.get("target_health", 1.0))
             self.refresh_tile_after_building_health_change(tile, player)

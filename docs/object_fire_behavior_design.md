@@ -1,177 +1,169 @@
-# Division Object Fire Behavior
+# Поведение дивизии при обстреле объектов
 
-This note preserves the planned future layer for deliberate division fire against infrastructure and other damageable objects. It is intentionally separate from passive combat collateral damage and from aviation/munition salvos.
+Этот документ описывает запланированный прицельный огонь дивизий по инфраструктуре и другим разрушаемым объектам. Он отделён от случайных разрушений в бою, а также от авиационных и ракетно-артиллерийских залпов.
 
-## Separate Settings
+## Две отдельные настройки
 
-Do not merge these two concepts into one flag:
+Эти понятия не следует объединять в один переключатель:
 
-- `target_priority_policy` answers what the division prefers to target.
-- `object_fire_behavior` answers when and how willingly the division spends combat resources on those targets.
+- `target_priority_policy` определяет, каким целям дивизия отдаёт предпочтение.
+- `object_fire_behavior` определяет, когда и насколько охотно дивизия тратит боевые ресурсы на эти цели.
 
-Passive combat collateral damage still applies even when deliberate object fire is forbidden.
+Случайные разрушения в бою возможны даже при запрете прицельного огня по объектам.
 
-## object_fire_behavior
+## `object_fire_behavior`
 
-### forbidden / Запрещено
+### `forbidden` — запрещено
 
-The division does not deliberately fire at infrastructure or objects.
+Дивизия не ведёт прицельный огонь по инфраструктуре и объектам.
 
-- Attacks enemy divisions only.
-- Passive collateral damage may still happen.
-- Minimal extra ammunition/resource spend against objects.
-- Useful when the player wants to preserve captured territory.
+- Атакует только вражеские дивизии.
+- Случайные разрушения по-прежнему возможны.
+- Дополнительный расход боеприпасов и ресурсов на объекты минимален.
+- Полезно, если игрок хочет сохранить захватываемую территорию.
 
-### conserve / Экономить
+### `conserve` — экономить
 
-The division fires at objects only when supply conditions are good.
+Дивизия обстреливает объекты только при хорошем снабжении.
 
-Conditions:
+Условия:
 
-- field supplies/ammunition above roughly 50%;
-- no serious supply penalty;
-- organization above the accepted threshold;
-- at least one target matching `target_priority_policy`.
+- полевые запасы и боеприпасы составляют примерно больше 50%;
+- нет серьёзного штрафа к снабжению;
+- организация выше допустимого порога;
+- есть хотя бы одна цель, подходящая под `target_priority_policy`.
 
-Behavior:
+Поведение:
 
-- moderate object damage;
-- limited supply/ammunition spend;
-- stops deliberate object fire when supply/ammo drops below threshold.
+- умеренный урон объектам;
+- ограниченный расход запасов и боеприпасов;
+- при падении снабжения или боеприпасов ниже порога прицельный огонь прекращается.
 
-### opportunistic / По возможности
+### `opportunistic` — по возможности
 
-The division fires at objects when a valid target exists and resources are available.
+Дивизия обстреливает объекты, когда есть подходящая цель и доступные ресурсы.
 
-Conditions:
+Условия:
 
-- at least one target matching `target_priority_policy`;
-- ammunition/supplies are not empty;
-- organization is not critical;
-- preferably no severe supply shortage.
+- есть хотя бы одна цель, подходящая под `target_priority_policy`;
+- боеприпасы и запасы не исчерпаны;
+- организация не на критическом уровне;
+- желательно отсутствие серьёзного дефицита снабжения.
 
-Behavior:
+Поведение:
 
-- likely default for offensive operations;
-- can damage logistics, depots, defenses, air assets, industry, and city infrastructure according to priorities;
-- noticeable but not maximum resource spend.
+- возможный стандартный режим для наступления;
+- по заданным приоритетам может повреждать логистику, склады, оборонительные сооружения, авиационные объекты, промышленность и городскую инфраструктуру;
+- расход ресурсов заметен, но не максимален.
 
-### destructive / Максимальное разрушение
+### `destructive` — максимальное разрушение
 
-The division deliberately damages objects whenever it can.
+Дивизия стремится повреждать объекты при любой возможности.
 
-Conditions:
+Условия:
 
-- usable weapons/supplies remain;
-- target from priority list or any valuable target exists;
-- can continue under imperfect supply unless completely impossible.
+- остаётся пригодное вооружение и снабжение;
+- есть цель из списка приоритетов или любой ценный объект;
+- огонь может продолжаться при неполном снабжении, если это ещё возможно.
 
-Behavior:
+Поведение:
 
-- increased object damage;
-- increased ammunition, fuel, and/or organization spend;
-- may reduce damage dealt to enemy divisions because part of combat power is diverted;
-- should be an explicit player order, not the default.
+- повышенный урон объектам;
+- повышенный расход боеприпасов, топлива и/или организации;
+- возможное снижение урона вражеским дивизиям, поскольку часть боевой мощи отвлечена;
+- режим должен включаться явным приказом игрока и не быть стандартным.
 
-## target_priority_policy Categories
+## Категории `target_priority_policy`
 
-This should be a list of enabled categories, not a single exclusive switch.
+Настройка должна хранить список разрешённых категорий, а не один взаимоисключающий вариант.
 
-1. `logistics` / Снабжение
-   - depots, warehouses;
-   - roads, rail, bridges;
-   - supply hubs later.
+1. `logistics` — снабжение:
+   - склады и хранилища;
+   - дороги, железные дороги, мосты;
+   - в будущем — узлы снабжения.
+2. `defenses` — оборона:
+   - форты и полевые укрепления;
+   - ПВО и радары;
+   - укреплённые позиции.
+3. `industry` — промышленность:
+   - заводы;
+   - энергетические объекты;
+   - ресурсные постройки;
+   - городские предприятия.
+4. `air_and_strike_assets` — авиация и ударные средства:
+   - авиабазы;
+   - полевые вертолётные площадки;
+   - ангары;
+   - замеченные на земле самолёты;
+   - в будущем — ракетные и артиллерийские позиции.
+5. `enemy_units` — войска:
+   - дивизии;
+   - бронетехника;
+   - артиллерия;
+   - штатная ПВО дивизии;
+   - тыловые подразделения и части обеспечения.
+6. `urban_infrastructure` — городская инфраструктура:
+   - городские здания;
+   - местная инфраструктура;
+   - в будущем возможны политические и экономические последствия.
+7. `command_support` — командование и обеспечение (в будущем):
+   - штабы;
+   - связь;
+   - логистические подразделения и части обеспечения;
+   - командные пункты.
 
-2. `defenses` / Оборона
-   - forts, field fortifications;
-   - air defense, radar;
-   - hardened positions.
+## Будущий алгоритм выбора цели
 
-3. `industry` / Промышленность
-   - factories;
-   - power;
-   - resource buildings;
-   - city industry.
-
-4. `air_and_strike_assets` / Авиация и ударные средства
-   - airbase;
-   - field helipad;
-   - hangars;
-   - aircraft on ground if spotted;
-   - missile/artillery positions later.
-
-5. `enemy_units` / Войска
-   - divisions;
-   - armor;
-   - artillery;
-   - organic division AA;
-   - rear/support elements.
-
-6. `urban_infrastructure` / Городская инфраструктура
-   - city structures;
-   - local infrastructure;
-   - may have political/economic consequences later.
-
-7. `command_support` / Командование и поддержка later
-   - HQs;
-   - communications;
-   - logistics/support companies;
-   - command posts.
-
-## Future Target Selection Helper
-
-Suggested flow:
+Предлагаемая последовательность:
 
 ```text
-available_targets = find_damageable_targets_near_battle(division, battle_or_tile)
-filtered_targets = targets matching target_priority_policy
-scored_targets = score by priority, intel, value, hardness, current health, mission context
-selected_target = best scored target
+доступные_цели = найти_разрушаемые_цели_рядом_с_боем(дивизия, бой_или_клетка)
+подходящие_цели = отобрать_по(target_priority_policy)
+оценённые_цели = оценить_по(приоритет, разведданные, ценность, защищённость, состояние, задача)
+выбранная_цель = цель_с_лучшей_оценкой
 ```
 
-Scoring should consider:
+При оценке нужно учитывать:
 
-- category order and enabled categories in `target_priority_policy`;
-- visibility/global intel;
-- value for current battle or logistics;
-- weapon suitability against target type and hardness;
-- current health, to avoid wasting fire on nearly destroyed targets;
-- `object_fire_behavior`, which limits willingness and spend.
+- порядок и включённые категории в `target_priority_policy`;
+- видимость и общие разведданные;
+- ценность цели для текущего боя или логистики;
+- пригодность вооружения против данного типа цели и её защищённости;
+- текущее состояние цели, чтобы не тратить огонь на почти уничтоженные объекты;
+- `object_fire_behavior`, ограничивающий готовность стрелять и расход ресурсов.
 
-## Costs And Tradeoffs
+## Цена решения и компромиссы
 
-Deliberate object fire must not be free.
+Прицельный огонь по объектам не должен быть бесплатным. Возможные затраты и последствия:
 
-Possible costs/effects:
+- расход полевых запасов и боеприпасов;
+- расход топлива техникой и артиллерией;
+- небольшая потеря организации или замедление её восстановления;
+- отвлечение части боевой мощи от вражеских дивизий;
+- в режиме `destructive` возрастают и урон, и затраты.
 
-- field supplies and ammunition spend;
-- fuel spend for vehicles/artillery;
-- small organization cost or slower recovery;
-- part of combat power diverted from enemy divisions;
-- `destructive` mode amplifies both damage and tradeoff.
+## Разведка и маскировка
 
-## Recon And Camouflage
+Общие разведданные определяют, известны ли вообще небольшие и скрытые объекты.
 
-Global intel determines whether small/hidden objects are known at all.
+Показатели `recon` дивизии и `camouflage` противника влияют только на выбор тактических целей в бою:
 
-Division `recon` and enemy `camouflage` affect only tactical combat targeting:
+- высокая разница `recon - camouflage` повышает шанс обнаружить и поразить тыловые средства: артиллерию, ПВО, части обеспечения и логистику;
+- низкая или отрицательная разница снижает эффективность дальнего огня и точного выбора целей: урон немного уменьшается, потери немного растут.
 
-- high `recon - camouflage`: better chance to find and damage rear assets such as artillery, AA, support, and logistics;
-- low/negative value: long-range fire and precise target selection become less effective, with slightly lower damage and slightly higher losses.
+Разведка и маскировка дивизии не должны превращаться в глобальный «туман войны».
 
-Do not turn division recon/camouflage into global fog of war.
+## План интерфейса
 
-## UI Plan
+Когда появится этот слой интерфейса, нужны два отдельных элемента управления:
 
-When UI work reaches this layer, expose two separate controls:
+- `target_priority_policy`: снабжение, оборона, промышленность, авиация и ударные средства, войска, городская инфраструктура, в будущем — командование и обеспечение;
+- `object_fire_behavior`: запрещено, экономить, по возможности, максимальное разрушение.
 
-- `target_priority_policy`: Logistics, Defenses, Industry, Air/Strike Assets, Enemy Units, Urban Infrastructure, Command/Support later.
-- `object_fire_behavior`: Forbidden, Conserve, Opportunistic, Destructive.
+Настройки можно сначала хранить у дивизии и/или как стандартные настройки армии. Позже боевые планы смогут наследовать или переопределять их.
 
-Storage can start on division and/or army defaults. Battle plans can inherit or override later.
+Безопасные стандартные варианты:
 
-Safer defaults:
-
-- `forbidden` or `conserve` for preservation-focused behavior;
-- `opportunistic` for normal offensive behavior if balance supports it;
-- never `destructive` by default.
+- `forbidden` или `conserve`, если важно сохранить объекты;
+- `opportunistic` для обычного наступления, если это допускает баланс;
+- `destructive` никогда не включается по умолчанию.

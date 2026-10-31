@@ -17,6 +17,119 @@ class PoliticsTests(unittest.TestCase):
         self.a, self.b = player(0), player(1)
         self.system = PoliticsSystem([self.a, self.b])
 
+    def prepare_war(self):
+        self.assertTrue(self.system.execute(0, 1, "justify")[0])
+        self.assertFalse(self.system.execute(0, 1, "war")[0])
+        self.system.advance(30 * 24)
+        self.assertTrue(self.system.execute(0, 1, "war")[0])
+
+    def test_pact_and_transit_are_directional(self):
+        self.assertFalse(self.system.can_transit(0, 1))
+        self.assertTrue(self.system.execute(0, 1, "transit")[0])
+        self.assertTrue(self.system.resolve_offer(self.system.pending[0], True))
+        self.assertTrue(self.system.can_transit(0, 1))
+        self.assertFalse(self.system.can_transit(1, 0))
+        self.assertTrue(self.system.execute(1, 0, "revoke_transit")[0])
+        self.assertFalse(self.system.can_transit(0, 1))
+        self.assertTrue(self.system.execute(0, 1, "nonaggression")[0])
+        self.assertTrue(self.system.resolve_offer(self.system.pending[0], True))
+        self.assertFalse(self.system.execute(0, 1, "justify")[0])
+        self.assertTrue(self.system.execute(0, 1, "break")[0])
+        self.assertTrue(self.system.execute(0, 1, "justify")[0])
+
+    def test_war_requires_preparation_and_political_readiness(self):
+        self.assertFalse(self.system.execute(0, 1, "war")[0])
+        self.assertTrue(self.system.execute(0, 1, "justify")[0])
+        self.assertEqual(self.a.politics.political_capital, 35)
+        self.system.advance(30 * 24)
+        self.a.legitimacy = .3
+        self.assertFalse(self.system.execute(0, 1, "war")[0])
+        self.a.legitimacy = .61
+        self.assertTrue(self.system.execute(0, 1, "war")[0])
+        self.assertGreater(self.system.relation(0, 1).grievances[1], 40)
+        self.assertLess(self.a.politics.reputation, .5)
+
+    def test_political_capital_is_previewed_and_checked_for_domestic_decisions(self):
+        quote = self.system.quote(0, 0, "tax:population:1")
+        self.assertEqual(quote.political_cost, 2)
+        self.a.politics.political_capital = 1
+        self.assertFalse(self.system.execute(0, 0, "tax:population:1")[0])
+        self.assertEqual(self.a.politics.taxes["population"], 0)
+        self.a.politics.political_capital = 2
+        self.assertTrue(self.system.execute(0, 0, "tax:population:1")[0])
+        self.assertEqual(self.a.politics.political_capital, 0)
+
+    def test_faction_demands_affect_patience_and_ideology(self):
+        rules = self.system.rules
+        self.assertFalse(rules.faction_demand(self.a, "socialists")[1])
+        self.system.advance(180 * 24)
+        self.assertLess(self.a.politics.faction_patience["socialists"], .5)
+        self.assertGreater(self.a.politics.faction_radicalization["socialists"], 0)
+        self.assertTrue(self.system.execute(0, 0, "support:workers")[0])
+        self.assertTrue(rules.faction_demand(self.a, "socialists")[1])
+        self.b.politics.support["nationalists"] = .2
+        self.assertGreater(rules.ideology_distance(self.a, self.b), 0)
+
+    def test_war_goal_expires_and_radicals_can_block_declaration(self):
+        self.assertTrue(self.system.execute(0, 1, "justify")[0])
+        self.system.advance(30 * 24)
+        self.a.politics.faction_radicalization["liberals"] = .75
+        self.assertFalse(self.system.execute(0, 1, "war")[0])
+        self.a.politics.faction_radicalization["liberals"] = 0
+        self.system.advance(181 * 24)
+        self.assertFalse(self.system.execute(0, 1, "war")[0])
+        self.assertNotIn((0, 1), self.system.war_goals)
+
+    def test_cancelled_war_goal_ends_diplomatic_crisis(self):
+        self.assertTrue(self.system.execute(0, 1, "justify")[0])
+        relation = self.system.relation(0, 1)
+        self.assertEqual(relation.crisis_level, 25)
+        self.system.advance(10 * 24)
+        self.assertGreater(relation.crisis_level, 25)
+        self.assertTrue(self.system.execute(0, 1, "cancel_justify")[0])
+        self.assertEqual(relation.crisis_level, 0)
+        self.assertFalse(self.system.execute(0, 1, "war")[0])
+
+    def test_nonaggression_pact_cancels_pending_war_goal(self):
+        self.assertTrue(self.system.execute(0, 1, "justify")[0])
+        self.assertTrue(self.system.execute(0, 1, "nonaggression")[0])
+        self.assertTrue(self.system.resolve_offer(self.system.pending[0], True))
+        self.assertEqual(self.system.relation(0, 1).crisis_level, 0)
+        self.assertNotIn((0, 1), self.system.war_goals)
+        self.assertFalse(self.system.execute(0, 1, "war")[0])
+
+    def test_bot_can_accept_peace_after_war_weariness(self):
+        self.b.is_human = False
+        self.b.war_support = .5
+        self.prepare_war()
+        self.system.advance(90 * 24)
+        self.assertLess(self.b.war_support, .5)
+        self.assertTrue(self.system.execute(0, 1, "peace")[0])
+        self.system.advance(3 * 24)
+        self.assertFalse(self.system.hostile(0, 1))
+
+    def test_shortage_and_prices_lower_support_gradually_and_recover(self):
+        self.a.stability = .72
+        self.a.legitimacy = .61
+        self.a.politics.living_conditions = {
+            "food": .2, "goods": .4, "food_price": 1.5, "goods_price": 1.25}
+        self.assertLess(self.system.rules.support_target(self.system, self.a, "population"), .61)
+        self.system.advance(24)
+        self.assertLess(self.a.politics.support["population"], .61)
+        self.assertGreater(self.a.politics.support["population"], .609)
+        self.assertLess(self.a.stability, .72)
+        self.assertLess(self.a.legitimacy, .61)
+        self.assertLess(self.system.rules.company_tax_yield_factor(self.a), 1)
+        self.system.advance(450 * 24)
+        self.assertFalse(self.a.politics.unrest_active)
+        self.assertFalse(self.a.politics.crisis_flags)
+        crisis_support = self.a.politics.support["population"]
+        self.a.politics.living_conditions = {
+            "food": 1.0, "goods": 1.0, "food_price": 1.0, "goods_price": 1.0}
+        self.system.advance(365 * 24)
+        self.assertGreater(self.a.politics.support["population"], crisis_support)
+        self.assertFalse(self.a.politics.unrest_active)
+
     def test_aid_amount_is_conserved_and_cannot_repeat(self):
         self.assertTrue(self.system.execute(0, 1, "aid", 123_456)[0])
         self.assertEqual(self.a.budget, 100_000_000 - 123_456)
@@ -148,7 +261,7 @@ class PoliticsTests(unittest.TestCase):
         self.assertFalse(self.system.trade_allowed(1, 0))
         self.system.advance(7 * 24)
         self.system.execute(0, 1, "embargo")
-        self.system.execute(0, 1, "war")
+        self.prepare_war()
         self.assertTrue(self.system.hostile(0, 1))
         self.assertFalse(self.system.trade_allowed(0, 1))
         self.system.execute(0, 1, "peace")
@@ -159,7 +272,7 @@ class PoliticsTests(unittest.TestCase):
 
     def test_bankrupt_country_can_propose_peace_and_cancel_program(self):
         self.system.execute(0, 0, "support:smb")
-        self.system.execute(0, 1, "war")
+        self.prepare_war()
         self.a.budget = -100
         self.assertTrue(self.system.execute(0, 1, "peace")[0])
         self.assertTrue(self.system.execute(0, 0, "stop:smb")[0])

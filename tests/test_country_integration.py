@@ -31,6 +31,9 @@ class CountryIntegrationTests(unittest.TestCase):
         for player in (self.a, self.b):
             player.politics = PoliticalState()
             player.budget = 100_000_000
+            player.stability = .72
+            player.legitimacy = .61
+            player.war_support = .50
             player.trade_contracts.clear()
         self.game.initialize_politics()
         self.game.close_top_panel()
@@ -79,6 +82,27 @@ class CountryIntegrationTests(unittest.TestCase):
         game.run_economy_tick(self.a, PRODUCTION_MONTH_HOURS)
         self.assertAlmostEqual(self.a.budget - balance, self.a.monthly_balance, places=5)
 
+    def test_instability_reduces_company_tax_forecast(self):
+        game = self.game
+        self.a.stability = .72
+        self.a.politics.unrest_active = False
+        game.recalculate_monthly_balance(self.a)
+        normal = self.a.monthly_income_breakdown["companies"]
+        self.a.stability = .4
+        game.recalculate_monthly_balance(self.a)
+        self.assertAlmostEqual(self.a.monthly_income_breakdown["company_yield_factor"], .84)
+        self.assertAlmostEqual(self.a.monthly_income_breakdown["companies"], normal * .84)
+
+    def test_daily_politics_reads_live_supply_and_prices(self):
+        game = self.game
+        expected_food = game.population_resource_ratio(self.a, "food")
+        expected_goods = game.population_resource_ratio(self.a, "consumer_goods")
+        game.advance_politics(24)
+        living = self.a.politics.living_conditions
+        self.assertAlmostEqual(living["food"], expected_food)
+        self.assertAlmostEqual(living["goods"], expected_goods)
+        self.assertAlmostEqual(living["food_price"], game.market_current_price("food") / game.market_base_price("food"))
+
     def test_program_duration_control_reaches_simulation(self):
         game = self.game
         game.open_country_card(self.a)
@@ -118,6 +142,8 @@ class CountryIntegrationTests(unittest.TestCase):
         target = self.b.capital_tile
         self.assertFalse(game.division_can_capture_tile(division, target))
         self.assertFalse(game.air_mission_tile_is_hostile(self.a, target))
+        game.submit_player_command("political_action", {"target": self.b.id, "action": "justify"})
+        game.advance_politics(30 * 24)
         game.submit_player_command("political_action", {"target": self.b.id, "action": "war"})
         self.assertTrue(game.division_can_capture_tile(division, target))
         self.assertTrue(game.air_mission_tile_is_hostile(self.a, target))
@@ -126,6 +152,116 @@ class CountryIntegrationTests(unittest.TestCase):
         game.enforce_diplomatic_peace()
         self.assertFalse(game.division_can_capture_tile(division, target))
         self.assertFalse(game.air_mission_tile_is_hostile(self.a, target))
+
+    def test_military_transit_does_not_capture_and_revocation_blocks_new_routes(self):
+        game = self.game
+        division = self.a.divisions[0]
+        origin = division.tile
+        neighbor = next(tile for tile in game.neighbor_tiles(origin) if not game.is_water_tile(tile))
+        former_owner = neighbor.owner
+        second = next(tile for tile in game.neighbor_tiles(neighbor)
+                      if game.hex_distance(tile, origin) == 2 and not game.is_water_tile(tile))
+        second_former_owner = second.owner
+        neighbor.owner = self.b
+        try:
+            self.assertFalse(game.find_division_path(division, neighbor))
+            self.assertFalse(game.division_can_capture_tile(division, neighbor))
+            self.assertTrue(game.politics.execute(self.a.id, self.b.id, "transit")[0])
+            self.assertTrue(game.politics.resolve_offer(game.politics.pending[0], True))
+            self.assertEqual(game.find_division_path(division, neighbor), [neighbor])
+            division.path = [neighbor]
+            division.movement_progress = 1
+            game.update_divisions(.01)
+            self.assertIs(division.tile, neighbor)
+            self.assertIs(neighbor.owner, self.b)
+            self.assertTrue(game.politics.execute(self.b.id, self.a.id, "revoke_transit")[0])
+            self.assertTrue(game.find_division_path(division, origin))
+            self.assertFalse(game.find_division_path(self.a.divisions[0], neighbor, start_tile=origin))
+            second.owner = self.b
+            division.target_tile = origin
+            division.path = [second]
+            division.movement_progress = 1
+            game.update_divisions(.01)
+            self.assertIs(division.tile, second)
+            self.assertIs(second.owner, self.b)
+            self.assertTrue(game.find_division_path(division, origin))
+            neighbor.owner = None
+            self.assertTrue(game.division_can_capture_tile(division, neighbor))
+        finally:
+            neighbor.owner = former_owner
+            second.owner = second_former_owner
+            division.tile = origin
+            division.x, division.y = origin.center_x, origin.center_y
+            division.path = []
+            division.route_tiles = []
+            division.target_tile = None
+            division.movement_progress = 0
+
+    def test_country_card_renders_war_preparation_status(self):
+        game = self.game
+        self.assertTrue(game.politics.execute(self.a.id, self.b.id, "justify")[0])
+        game.open_country_card(self.b)
+        game.country_card_tab = "summary"
+        game.update_side_panel_animation(1)
+        game.on_draw()
+        lines = [line for line, _ in game.country_lines_cache[1]]
+        self.assertTrue(any("Цель войны" in line for line in lines))
+        self.assertTrue(any("напряжённость" in line for line in lines))
+
+    def test_world_news_ticker_archive_and_popup_do_not_block_map(self):
+        game = self.game
+        item = game.politics.news.publish(0, "world_test", "Важная мировая новость",
+            "Подробное описание события. " * 35, "critical")
+        game.update_news_ui(.1)
+        self.assertEqual(game.news_popup_id, item.id)
+        game.on_draw()
+        px, py, pw, ph = game.news_popup_rect()
+        self.assertTrue(game.handle_news_scroll(px + 20, py + 60, -1))
+        self.assertGreater(game.news_popup_scroll, 0)
+        self.assertFalse(game.handle_news_click(400, 400, self.arcade.MOUSE_BUTTON_LEFT))
+        self.assertTrue(game.handle_news_click(px + pw - 20, py + ph - 20, self.arcade.MOUSE_BUTTON_LEFT))
+        self.assertIsNone(game.news_popup_id)
+        tx, ty, tw, th = game.news_ticker_rect()
+        self.assertTrue(game.handle_news_click(tx + 10, ty + 10, self.arcade.MOUSE_BUTTON_LEFT))
+        self.assertTrue(game.news_archive_open)
+        game.on_draw()
+        ax, ay, aw, ah = game.news_archive_rect()
+        self.assertTrue(game.handle_news_click(ax + 25, ay + ah - 68, self.arcade.MOUSE_BUTTON_LEFT))
+        self.assertEqual(game.news_popup_id, item.id)
+
+    def test_descriptive_oil_crisis_does_not_change_market_or_budget(self):
+        game = self.game
+        before_budgets = [player.budget for player in game.players]
+        before_prices = dict(game.simulation_server.market_state.current_prices)
+        game.politics.news.trigger_template("oil_crisis", game.politics.day,
+            {"oil_pressure": 2, "major_oil_exporter_restricted": True})
+        self.assertEqual([player.budget for player in game.players], before_budgets)
+        self.assertEqual(game.simulation_server.market_state.current_prices, before_prices)
+
+    def test_real_logistics_damage_reaches_owner_news(self):
+        game = self.game
+        tile = self.a.tiles[0]
+        old_coverage = dict(tile.building_coverage)
+        old_health = dict(game.building_health_map(tile))
+        try:
+            tile.building_coverage["supply_depot"] = 1.0
+            game.building_health_map(tile).pop("supply_depot", None)
+            self.assertTrue(game.damage_building(tile, "supply_depot", .6, queue_repair=False))
+            self.assertEqual(game.politics.news.visible(self.a.id)[0].key, "logistics_damage")
+            self.assertEqual(len(game.politics.news.visible(self.b.id)), 0)
+            cost = game.repair_cost(self.a, tile, "supply_depot")
+            project = {"project_type": "repair", "tile": tile, "building": "supply_depot", "cost": cost}
+            game.apply_repair_project_progress(self.a, project, 0, .2)
+            self.assertNotIn("construction_complete", [item.key for item in game.politics.news.items])
+            game.complete_construction_project(self.a, project)
+            self.assertEqual(game.politics.news.visible(self.a.id)[0].key, "construction_complete")
+            self.assertAlmostEqual(game.building_health(tile, "supply_depot"), 1)
+        finally:
+            tile.building_coverage.clear()
+            tile.building_coverage.update(old_coverage)
+            tile.building_health.clear()
+            tile.building_health.update(old_health)
+            game.refresh_tile_after_building_health_change(tile, self.a)
 
     def test_real_market_and_forecast_respect_embargo(self):
         game = self.game

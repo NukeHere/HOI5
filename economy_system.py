@@ -1870,7 +1870,23 @@ class EconomySystemMixin:
             orders.extend(self.collect_player_market_orders(player, TRADE_WEEKLY_FRACTION, enforce_budget=True))
         self.update_market_prices_from_orders(orders)
         money_by_player = self.execute_market_orders(orders)
+        for fill in self.last_market_fills:
+            self.politics.news.record_trade_fill(self.politics.day, fill,
+                self.resource_display_name(fill["resource"]))
         for player in self.players:
+            contracts = self.normalized_trade_contracts(player.trade_contracts)
+            incomplete = []
+            for contract in contracts:
+                side = "buyer" if contract["mode"] == "buy" else "seller"
+                actual = sum(fill["amount"] for fill in self.last_market_fills
+                    if fill.get(side) is player and fill["resource"] == contract["resource"])
+                if actual + 1e-6 < contract["amount"] * TRADE_WEEKLY_FRACTION:
+                    incomplete.append(self.resource_display_name(contract["resource"]))
+            self.politics.news.alert(self.politics.day, player, "trade_incomplete", bool(incomplete),
+                "Торговые заявки исполнены не полностью",
+                "Последние недельные поставки ниже заявленных: " + ", ".join(incomplete)
+                + ". Проверьте доступ к рынку, лимиты, бюджет, склады и встречные заявки.",
+                "Торговые заявки снова исполняются полностью")
             self.recalculate_monthly_balance(player)
             self.mark_player_resource_balance_dirty(player)
         self.trade_panel_cache = None

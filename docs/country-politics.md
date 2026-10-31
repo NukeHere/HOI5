@@ -1,147 +1,105 @@
-# Country politics foundation
+# Основа внутренней политики и дипломатии HOI5
 
-## Entry points
+## Как открыть карточку страны
 
-Click the country name in the top status bar to open your country. Select a hex
-and click its owner to open another country. The Diplomacy navigation button
-opens a country list; the Domestic Politics button opens your decisions. The
-card's Countries button returns to the list. Tabs retain their selection across
-countries. Cards use the existing animated side panel. Escape closes the card;
-Space controls simulation time. Mouse wheel scrolls only when over the panel;
-camera zoom, dragging and unit orders remain available on the rest of the map.
-Cooldowns, offer dates, program expirations, loan payments and history use the
-simulation calendar (YYYY-MM-DD), including leap years.
+Нажмите название страны в верхней строке состояния, чтобы открыть свою страну. Выберите гекс и нажмите на его владельца, чтобы открыть чужую страну. Кнопка «Дипломатия» открывает список стран, кнопка «Внутренняя политика» — решения своего государства. Кнопка «Страны» в карточке возвращает к списку. При переключении стран выбранная вкладка сохраняется.
 
-Aid and loan previews have an editable amount and +/- one-million steppers.
-Ctrl+A or Delete clears the amount; Backspace removes a digit. Aid transfers
-immediately; a loan requires acceptance. Decisions go through the existing
-simulation command queue and are validated again at execution.
+Карточки используют существующую анимированную боковую панель. Escape закрывает карточку, пробел управляет ходом времени. Колёсико прокручивает карточку только при наведении на неё; за пределами панели остаются доступны масштабирование и перетаскивание карты, а также приказы войскам. Перезарядки действий, даты ответов, завершение программ, платежи по кредитам и история используют игровой календарь в формате `YYYY-MM-DD`, включая високосные годы.
 
-## State and extensible rules
+При подготовке помощи или кредита можно изменить сумму в поле ввода либо кнопками `+` и `−` с шагом в миллион. Ctrl+A или Delete очищает поле, Backspace удаляет цифру. Помощь перечисляется сразу; кредит требует согласия другой страны. Решения проходят через существующую очередь команд симуляции и повторно проверяются перед исполнением.
 
-`politics_system.py` contains the renderer-independent model. `PoliticalState`
-belongs to `StatePlayer`. `PoliticsSystem` owns bilateral relations, offers,
-active loans, and the daily political clock. History is capped at 40 events.
+## Состояние и расширяемые правила
 
-`PoliticalRules.quote(system, actor, target, action, amount)` is the extension
-point for dynamic action costs, relationship/trust changes, cooldowns, response
-times, program costs/durations, truce durations and loan terms. Its inputs
-include current countries and the whole political context. Current values are
-balancing placeholders, not calibrated simulation coefficients.
+В `politics_system.py` находится политическая модель, не зависящая от отрисовки. `PoliticalState` принадлежит `StatePlayer`. `PoliticsSystem` хранит двусторонние отношения, предложения, действующие кредиты и счётчик политического времени. История ограничена 40 событиями.
 
-The UI reads `ActionQuote`; execution uses the same rules boundary. Pending
-offers retain their quote, so changing rules never silently rewrites an offered
-loan. Funding and diplomatic eligibility are checked again at acceptance.
-`PoliticalRules.accepts` owns bot decisions, and `support_target` owns social
-response. Tests replace the rules to verify this boundary.
+`PoliticalRules.quote(system, actor, target, action, amount)` — точка расширения для динамической стоимости действий, изменения отношения и доверия, перезарядок, времени ответа, стоимости и сроков программ, перемирий и условий кредита. Правила получают текущие государства и весь политический контекст. Нынешние коэффициенты служат временной настройкой баланса, а не откалиброванной моделью.
 
-## Implemented decisions
+Интерфейс читает `ActionQuote`; исполнение использует ту же границу правил. Ожидающее предложение сохраняет свои условия: последующая смена правил не перепишет молча предложенный кредит. При принятии ещё раз проверяются деньги и дипломатические условия. `PoliticalRules.accepts` определяет ответ бота, `support_target` — реакцию общества. В тестах правила подменяются, чтобы проверить эту границу.
 
-- Separate population, small/medium business, and large business support/taxes.
-- Tax changes and temporary support programs affect the existing budget.
-- Diplomatic missions, selectable aid, selectable loan offers, embargoes.
-- Trade treaties, alliances, declarations of war, peace offers and termination.
-- Export-volume restrictions and access to the external market.
-- Daily social response, delayed bot answers, incoming human accept/reject.
-- Loans with interest on remaining principal, monthly installments, partial
-  payments and arrears. No automatic debt forgiveness or negative-budget payment.
+## Реализованные решения
 
-Loan cash movements settle on due dates. Monthly budget forecasts include debt
-service and expected receipts without settling them a second time in economy
-ticks. Fixed financial months are 30 days; the initial loan terms are 12 months
-at 5% annual interest. Expected receipts are not guaranteed when a debtor lacks cash.
+- Отдельные налоги и показатели поддержки для населения, малого и среднего бизнеса, крупного бизнеса.
+- Изменение налогов и программы поддержки влияют на действующий бюджет.
+- Дипломатическая миссия, безвозмездная помощь и предложение кредита с выбранной суммой, эмбарго.
+- Торговый договор, союз, пакт о ненападении, разрешение на проход войск, подготовка цели войны, объявление войны, предложение мира и разрыв договоров.
+- Лимит экспорта и доступ к внешнему рынку.
+- Ежедневная реакция общества, отложенные ответы ботов, принятие и отклонение входящих предложений игроком.
+- Кредиты с процентами на остаток долга, ежемесячными взносами, частичными платежами и просрочкой. Автоматического списания долга и платежей при отрицательном бюджете нет.
 
-## Market settlement
+Переводы денег по кредитам выполняются в даты платежей. Прогноз месячного бюджета учитывает обслуживание долга и ожидаемые поступления, не проводя их повторно при экономическом тике. Финансовый месяц фиксирован и равен 30 дням; начальные условия кредита — 12 месяцев под 5% годовых. Ожидаемое поступление не гарантировано, если должнику не хватит денег.
 
-`market_clearing.py` plans transactions without mutating countries. Direct deals
-require an eligible buyer AND seller; money and goods are conserved between them.
-War or either country's embargo blocks direct trading in both directions.
-Alliance and trade treaties establish matching priority; equal-priority country
-order rotates between market executions. This is deterministic priority matching,
-not an optimizer that guarantees maximal total trade across every restricted graph.
+## Исполнение торговли
 
-Remaining orders can use shared, finite external quotas if external access is
-open. The external price uses the existing base-price spread; direct deals use
-the changing market price. Bilateral embargoes do not ban trading with unrelated
-external suppliers. Export restrictions reduce sell capacity and hence market
-orders. Forecasts use the same clearing routine and current budgets/stocks.
-The card lists actual counterparties, quantities and settlement prices.
-The trade panel marks blocked contracts in red with a strike-through and a
-reason; partial forecasts are yellow. Closed external access does not mark
-available direct trades as blocked. Before the first market execution, demand
-and supply are displayed as unknown instead of misleading zeroes. Those columns
-represent the latest executed market snapshot, not a live supply guarantee.
+`market_clearing.py` планирует сделки без изменения государств. Для прямой сделки нужны допустимые покупатель и продавец; деньги и товары сохраняются между ними. Война или эмбарго любой из двух стран блокирует прямую торговлю в обе стороны. Союз и торговый договор дают приоритет при сопоставлении заявок; среди стран с одинаковым приоритетом порядок меняется между исполнениями рынка. Это детерминированный подбор, а не оптимизатор максимального общего объёма торговли для любого графа ограничений.
 
-Foreign and mixed-ownership hex selections cannot edit industrial specialization;
-the mutation handler rechecks ownership independently of button visibility.
+Оставшиеся заявки могут обращаться к общим ограниченным квотам внешнего рынка, если доступ к нему открыт. Цена внешнего рынка использует существующий разброс относительно базовой цены; прямые сделки — меняющуюся рыночную цену. Двустороннее эмбарго не запрещает закупку у других поставщиков внешнего рынка. Ограничение экспорта уменьшает допустимый объём продаж и соответствующие заявки. Прогноз использует тот же механизм сопоставления, текущие бюджеты и запасы. Карточка показывает фактических контрагентов, объёмы и цены исполнения.
 
-## Current abstraction boundaries
+В торговой панели заблокированные контракты показаны красным зачёркнутым текстом с причиной, частичные прогнозы — жёлтым. Закрытие внешнего рынка не помечает как заблокированные доступные прямые сделки. До первого исполнения рынка спрос и предложение указаны как неизвестные, а не как ложные нули. Эти колонки отражают последний рассчитанный снимок рынка, а не гарантию доступности товара прямо сейчас.
 
-- Existing company tax income is split 65% small/medium and 35% large as an
-  explicit temporary proxy. There are no individual firms yet.
-- Public support uses temporary weights (85/12/3), not a demographic census.
-  The public component blends general support (50%), social-group support (30%)
-  and faction support (20%). Social and ideological shares are separate views of
-  the same population, not additive headcounts. Initial social shares are
-  workers/farmers/middle class/aristocracy 45/25/28/2%; four factions start at 25%
-  each. These are tunable placeholders, not inferred census data.
-  Targeted programs affect support gradually and use the existing expense,
-  cooldown, cancellation and expiry rules. Taxes remain three economic categories.
-- Country details expose demographic and budget data, contract forecasts and
-  context-sensitive actions. Tooltips render after country and trade panels.
-  Successful decisions are recorded in Events without a debug footer.
-- Power indices in `country_power.py` normalize each component to the current
-  world leader and combine economy/ground forces/society with weights 40/40/20.
-  Tax revenue is the economic proxy; ground forces include manpower, equipment,
-  strength, organization and supply. Social potential combines population with
-  stability, legitimacy and government support. Ties share rank. Aircraft,
-  geography and operational matchups are not included; this is not a win forecast.
-  Threat combines current diplomatic hostility and relative ground capability.
-- Countries start at peace. Ground capture and air targeting/interception check
-  hostility. Neutral unowned land remains capturable.
-- Alliance means mutual non-aggression and trade priority. Automatic defense,
-  transit rights, occupation settlements and coalition wars are not implemented.
-- Foreign budgets/support are hidden; no intelligence collection system exists yet.
-- Bot diplomacy currently responds to offers; it does not initiate a foreign policy.
-- Existing save/load menu entries are stubs; this change does not add persistence.
+При выборе чужого гекса или гекса со смешанным владением нельзя менять промышленную специализацию; обработчик изменения повторно проверяет владельца независимо от видимости кнопки.
 
-## Verification
+## Границы текущей модели
 
-Support programs default to ongoing and may instead run for 7, 30 or 365 game
-days. Their deadlines include the start hour. Expiry and cancellation stop future
-charges. The political clock settles program-hours at monthly cost / 720; the
-economy tick excludes this cost from cash settlement to avoid double charging.
-The budget breakdown still shows the planned monthly allocation. Insufficient
-cash proportionally reduces funding across active programs without deleting them.
-Restarting after expiry has no arbitrary 90-day cooldown.
+- Налоговые поступления компаний временно делятся на 65% от малого и среднего бизнеса и 35% от крупного. Отдельных фирм пока нет.
+- Поддержка правительства использует временные веса 85/12/3 для населения, малого и среднего бизнеса, крупного бизнеса, а не данные переписи. Вклад населения складывается из общей поддержки (50%), поддержки социальных групп (30%) и фракций (20%). Социальные и идеологические доли — разные срезы одних и тех же людей; суммировать их численность нельзя. Исходные доли рабочих, сельских жителей, среднего класса и аристократии — 45/25/28/2%; у каждой из четырёх фракций — 25%. Это настраиваемые заглушки, не результаты переписи. Адресные программы постепенно влияют на поддержку и подчиняются правилам расходов, перезарядки, отмены и завершения. Налогов по-прежнему три экономические категории.
+- Карточки содержат демографию, бюджет, прогнозы контрактов и доступные по контексту действия. Подсказки отрисовываются поверх карточек страны и торговли. Принятые решения записываются в «События» без отладочной строки внизу.
+- Индексы мощи в `country_power.py` нормируют каждый компонент относительно текущего мирового лидера и объединяют экономику, сухопутные силы и общество с весами 40/40/20. Поступления налогов служат приближением экономической мощи; в сухопутных силах учитываются люди, оснащение, прочность, организация и снабжение. Общественный потенциал объединяет население, устойчивость, легитимность и поддержку правительства. Страны с равным результатом делят место. Авиация, география и конкретное столкновение в индекс не входят; это не прогноз победы. Оценка угрозы учитывает дипломатическую враждебность и относительные сухопутные силы.
+- Страны начинают в мире. Захват территории, выбор целей авиацией и перехват проверяют враждебность. Нейтральную землю без владельца по-прежнему можно захватить.
+- Союз означает взаимное ненападение, торговый приоритет и взаимный проход войск. Автоматической защиты, урегулирования оккупации и коалиционных войн нет.
+- Бюджет и поддержка чужих стран скрыты; системы сбора разведданных пока нет.
+- Боты отвечают на предложения, но сами не начинают внешнюю политику.
+- Существующие пункты сохранения и загрузки — заглушки; постоянное хранение состояния не добавлено.
 
-Base allocation remains equal across groups. Effectiveness scales with country
-population, group share relative to its reference share, actual funding, supply
-and legitimacy. Maximum direct target uplift is 4 percentage points, not an
-instant bonus. Support approaches its target with a 180-day time constant and
-a 0.05 percentage-point daily cap. The preview distinguishes the current support
-from its long-term target. Neither fixed costs nor these tuning values claim
-to be a final economic balance.
+## Правила программ и проверка
 
-Country details now open in centered windows while preserving the underlying
-tab and scroll position. Budget links go directly to Economy. Population uses
-the simulation's shared tile-growth calculation for a non-mutating monthly
-forecast; combat and border changes are excluded. Power is shown as category
-bars relative to each category leader, with weights and limitations separated.
-Tax changes and support programs have dedicated controls and confirmation.
-Export limits accept 0-100 percent (UI steps of 5), validated server-side; old
-commands without an amount retain the 50/100 toggle. Cancellation never applies
-the slider. No-op limits do not consume the action cooldown.
+По умолчанию программа действует до отмены; также доступны сроки 7, 30 и 365 игровых дней. Конечный срок учитывает час запуска. Истечение срока и отмена прекращают будущие списания. Политический счётчик времени списывает стоимость за каждый час по формуле `месячная стоимость / 720`; экономический тик не списывает её второй раз. В бюджете при этом видна плановая месячная сумма. Если денег не хватает, финансирование всех действующих программ уменьшается пропорционально, но сами программы остаются. После истечения срока нет произвольной 90-дневной перезарядки.
 
-Country and dialog text batches are cached per view with bounded eviction.
-RGB colors are normalized before comparison with Arcade's RGBA values, avoiding
-unnecessary text layout rebuilds. Data refresh is bounded to twice per second
-with immediate political/contract revision invalidation. Leaving resource views
-updates the map overlay; subsequent unrelated country navigation does not rebuild
-it. These changes address measured UI stalls, not an unverified fullscreen or
-OS-level Alt-Tab issue.
+Исходная сумма программы одинакова для всех групп. Эффективность зависит от населения страны, доли группы относительно эталона, фактического финансирования, снабжения и легитимности. Прямое повышение целевого уровня поддержки не превышает 4 процентных пунктов и не выдаётся мгновенно. Поддержка приближается к цели с характерным временем 180 дней; суточное изменение ограничено 0,05 процентного пункта. Предварительный просмотр различает текущую поддержку и долгосрочную цель. Ни фиксированные цены, ни эти коэффициенты не претендуют на окончательный экономический баланс.
 
-Run `.venv\Scripts\python.exe -m unittest discover -s tests -v` for model tests.
-Set `RUN_ARCADE_TESTS=1` to include actual hidden-window Arcade integration tests:
-card input/rendering, budget effects, market settlement and ground/air war gates.
-The tests exercise 1280x800, 1024x768 and 800x600 card layouts.
+Подробности страны открываются в центральном окне, сохраняя вкладку и прокрутку основной карточки. Ссылка на бюджет ведёт сразу в экономику. Прогноз населения за месяц использует общий расчёт прироста на гексах без изменения игрового состояния; бои и изменение границ в него не включены. Мощь показана полосами по категориям относительно лидера каждой категории; веса и ограничения объяснены отдельно. Для налогов и программ есть отдельные элементы управления и подтверждение. Лимит экспорта выбирается от 0 до 100% с шагом интерфейса 5%; проверка выполняется на стороне симуляции. Старые команды без числового значения сохраняют переключение между 50% и 100%. Отмена окна не применяет выбранное значение; отсутствие изменения не запускает перезарядку.
+
+Текстовые пакеты карточки и диалогов кэшируются для каждого представления с ограничением размера кэша. Цвета RGB нормируются перед сравнением с RGBA Arcade, чтобы не перестраивать текстовую раскладку без необходимости. Данные обновляются не чаще двух раз в секунду, кроме немедленной реакции на изменение политической ревизии или контрактов. Выход из ресурсного представления обновляет слой карты; дальнейшее перемещение по карточкам стран не перестраивает его. Эти изменения устраняют измеренные задержки интерфейса, но не подтверждают исправление полноэкранного режима или переключения Alt+Tab на уровне ОС.
+
+Для тестов модели выполните `.venv\Scripts\python.exe -m unittest discover -s tests -v`. Чтобы включить интеграционные тесты Arcade со скрытым окном, задайте `RUN_ARCADE_TESTS=1`. Они проверяют ввод и отрисовку карточки, бюджет, исполнение торговли и ограничения наземного и воздушного боя во время войны. Проверяются размеры окна 1280×800, 1024×768 и 800×600.
+
+## Сверка с исходным замыслом дипломатии и внутренней политики (2026-10-31)
+
+Ниже зафиксированы действующие правила для последующей проверки баланса. Все коэффициенты предварительные.
+
+| Пункт исходного замысла | Текущее состояние |
+| --- | --- |
+| Поддержка населения, бизнеса, социальных групп и фракций | Есть взвешенные показатели поддержки и финансируемые программы; доли групп пока фиксированы, без переписи и отдельных жителей. |
+| Легитимность и устойчивость | Есть ежедневные целевые уровни. Протесты, забастовки, перевороты и региональные волнения отложены; низкая устойчивость сама по себе не создаёт событие протеста. |
+| Политический капитал, требования фракций, терпение и радикализация | Есть запас капитала, четыре конкретных требования, ежедневное изменение терпения и накопление радикализации. Пока радикализация влияет только на доступность политических решений: сильное сопротивление либералов или социалистов блокирует объявление войны. Фракции не проводят самостоятельных действий. |
+| Двусторонние отношения, доверие, соглашения, война и история | Работают отношение, доверие, страх, уважение, претензии, идеологическое расхождение, репутация, надёжность, договоры, война, кредиты и журнал событий. Часть показателей пока использует простые формулы и ограниченный набор причин изменения. |
+| Другие дипломатические действия | Есть пакт о ненападении, запрос и отзыв прохода войск. Гарантии, военная помощь, инвестиции, разведка, поддержка оппозиции, ультиматумы, признание, территориальные требования и блоки не реализованы. |
+| Решения о налогах, поддержке, экспорте и внешнем рынке | Исполняются через команды симуляции с проверкой условий и предварительным показом стоимости и перезарядки. Контроля цен, пошлин, субсидий, национализации, пропаганды, репрессий и мобилизационной политики нет. |
+| Политический режим и идеологические оси | Отдельных осей режима нет. Идеологическая близость стран оценивается по взвешенной поддержке четырёх фракций; это приближение, а не полноценная идеологическая система. |
+| Внутренние и международные кризисы | Протесты и восстания пока не происходят. Шаблоны мировых кризисов доступны системе новостей, но сами по себе не меняют экономику, политику или карту. Дипломатическая напряжённость при подготовке войны остаётся действующим показателем отношений. |
+| Цены и торговые маршруты | Недельные цены реагируют на суммарные спрос и предложение; работают ограниченные внешние квоты и ограничения прямой торговли. Валютное доверие, коррупция, паника и блокада перевозок отсутствуют. |
+
+### Связанная цепочка внутренней политики
+
+На границе каждого игрового дня игра фиксирует доступность еды и потребительских товаров по той же формуле, что используется для прироста населения: `(запас + месячный выпуск) / месячная потребность`. Также фиксируется отношение текущей рыночной цены каждого товара к базовой. Рынок исполняется раз в неделю, поэтому торговое решение влияет на эти ежедневные показатели после ближайшего исполнения рынка. Значение обеспеченности `1` означает покрытие месячной потребности; входное значение ограничено сверху `1,25`.
+
+Долгосрочная цель поддержки каждой группы начинается с 61%; далее применяются действующие поправки за налоги, оплаченные программы, отсутствие денег и ограничение экспорта. Штраф за дефицит: `0,18 × max(0, 1 − min(еда, товары))`. Штраф за цены: `0,025 × min(2, 0,6 × max(0, цена_еды − 1) + 0,4 × max(0, цена_товаров − 1))`. Полный штраф получают население в целом, рабочие, сельские жители и социалисты; остальные группы — половину. Суточное изменение поддержки ограничено 0,05 процентного пункта, характерное время приближения к цели — 180 дней.
+
+Цель устойчивости: `72% + 0,7 × (поддержка_правительства − 61%) − 0,25 × дефицит`. Цель легитимности: `61% + 0,4 × (поддержка_правительства − 61%) − 0,1 × дефицит`. Оба значения ограничены диапазоном 0–100%. Устойчивость приближается к цели за характерные 90 дней, легитимность — за 180 дней; максимальное изменение каждой величины составляет 0,15 процентного пункта в сутки. Даже при низкой устойчивости протесты и восстания пока не запускаются.
+
+Налоговая отдача компаний получает множитель `clamp(1 + 0,5 × (устойчивость − 0,72), 0,65, 1,05)`. Он применяется к обеим частям временного деления дохода компаний 65/35. Множитель меняет прогноз месячного бюджета и реальные бюджетные поступления, но не физический выпуск заводов или недельную рыночную цену напрямую. Налоги населения от него не зависят. Вкладка «Общество» показывает снабжение, относительные цены и налоговую отдачу компаний.
+
+Таким образом, торговое ограничение может сократить доступность товаров, затем постепенно уменьшить поддержку и устойчивость, затем — прогнозируемые налоги и деньги на программы. Если внутреннее производство и запасы покрывают спрос, ограничение может не вызвать такого эффекта. Это причинное правило, а не гарантированное событие по сценарию.
+
+Мировые сообщения, архив, всплывающие карточки и отключённые шаблоны будущих кризисов описаны отдельно в `docs/world-news.md`. Новости пока не изменяют политические и экономические показатели.
+
+### Подготовка войны и договоры о проходе
+
+Страны начинают без войны. Невладеющий никто сухопутный гекс можно занимать и без дипломатического действия. Землю другого государства можно захватить только во время войны с ним. Мирная чужая территория доступна для прохода без смены владельца, если действует союз либо её владелец выдал этой армии отдельное разрешение. Разрешение направленное: проход наших войск через их страну не открывает проход их войск через нашу. Владелец может отозвать выданное разрешение. Уже находящиеся внутри его страны войска могут пройти по её территории только для возвращения в свою страну; новый маршрут в глубину страны им запрещён. Пакт о ненападении и союз запрещают подготовку и объявление войны, пока действуют; перемирие после мира также блокирует новую войну до своей даты.
+
+Для войны сначала требуется действие «Подготовить цель войны»: 2 млн денег и 15 политического капитала, не менее 45% поддержки правительства и 45% легитимности. Подготовка длится 30 игровых дней; готовая цель действует ещё 180 дней. Подготовка сразу повышает двустороннюю напряжённость до 25/100, ухудшает отношение и доверие, добавляет претензии. Пока цель действует, напряжённость растёт на 0,5 в день до 60/100 и затрудняет принятие дипломатических предложений. Подготовку можно отменить без возврата средств; напряжённость также спадает после истечения цели. Затем объявление войны требует 20 политического капитала, 45% поддержки правительства, 45% легитимности, 35% поддержки войны и радикализации либералов и социалистов ниже 70%. Объявление тратит капитал, прекращает договоры и разрешения на проход между сторонами, блокирует прямую торговлю, ухудшает отношение и доверие, увеличивает претензии и страх у цели, снижает репутацию и надёжность объявившей страны. Националисты кратковременно становятся терпеливее, либералы и социалисты — менее терпеливыми. Продолжительная война постепенно снижает поддержку войны; после мира она возвращается к базовым 50%. Мир требует принятия предложения другой стороной и оставляет 30-дневное перемирие. Бот может согласиться на мир при отрицательном бюджете, достаточно благоприятном отношении либо после 90 дней войны при поддержке войны ниже 50%.
+
+У фракций есть текущие требования: националисты хотят поддержку обороны не ниже 50%; социалисты — социальную программу или пониженный налог населения; либералы — открытый внешний рынок и отсутствие войны; консерваторы — положительный бюджет и легитимность не ниже 50%. Выполнение требования и текущая поддержка определяют целевое терпение. Терпение приближается к нему примерно за 90 дней. При терпении ниже 40% копится радикализация, выше 55% она уменьшается. Пока радикализация не вызывает протестов, саботажа или восстаний; высокая радикализация либералов или социалистов мешает объявлению войны. Политический капитал медленно восстанавливается при поддержке власти и легитимности; война замедляет восстановление.
+
+Другие решения также расходуют политический капитал: изменение налога и запуск программы — по 2, эмбарго — 3, разрыв договоров — 8, изменение экспорта или доступа к внешнему рынку — по 2, предложение союза — 3, пакта — 2, запрос прохода или миссия — по 1. Отмена программы, предложение мира и отзыв прохода не требуют капитала. Стоимость рассчитывается через `PoliticalRules.political_cost`, показывается до подтверждения и проверяется при исполнении. Это временные цены для настройки баланса.
+
+Идеологическое расхождение считается как половина суммы различий долей фракций, где доля фракции пропорциональна её оценочной численности × поддержке. Оно повышает требуемое отношение для принятия предложений ботом. Претензии также повышают порог, уважение понижает его; слишком низкая репутация или надёжность предлагающей стороны мешает принять пакт, союз и проход. Это начальные правила ответа бота на предложение, а не самостоятельный дипломатический ИИ. Страх и претензии постепенно уменьшаются по игровым дням. Формулы и пороги временные, их следует проверять на балансе игры.
