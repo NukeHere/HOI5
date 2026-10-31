@@ -83,7 +83,9 @@ class EconomySystemMixin:
     def ensure_player_stockpiles(self, player):
         stockpiles = player.resource_stockpiles or self.empty_resource_stockpiles()
         changed = False
-        scale = getattr(player, "starting_scale", self.player_starting_scale(player))
+        scale = getattr(player, "starting_scale", None)
+        if scale is None:
+            scale = self.player_starting_scale(player)
 
         for category_key, (min_amount, max_amount) in STARTING_STOCK_RANGES.items():
             bucket = stockpiles.setdefault(category_key, {})
@@ -1450,7 +1452,7 @@ class EconomySystemMixin:
                 return contract["amount"]
         return 0.0
 
-    def adjust_trade_contract(self, player, resource_key, mode, delta):
+    def adjust_trade_contract(self, player, resource_key, mode, delta, refresh=True):
         if not player or resource_key not in self.tradeable_resource_keys() or mode not in ("buy", "sell"):
             return False
         contracts = self.normalize_trade_contracts(player)
@@ -1470,7 +1472,8 @@ class EconomySystemMixin:
                 player.trade_contracts = [contract for contract in contracts if contract["amount"] > 0]
                 if changed:
                     player.trade_contract_revision = getattr(player, "trade_contract_revision", 0) + 1
-                    self.recalculate_monthly_balance(player)
+                    if refresh:
+                        self.recalculate_monthly_balance(player)
                     self.mark_player_resource_balance_dirty(player)
                 return True
 
@@ -1486,7 +1489,8 @@ class EconomySystemMixin:
                 player.trade_contracts = [contract for contract in contracts if contract["amount"] > 0]
                 if changed:
                     player.trade_contract_revision = getattr(player, "trade_contract_revision", 0) + 1
-                    self.recalculate_monthly_balance(player)
+                    if refresh:
+                        self.recalculate_monthly_balance(player)
                     self.mark_player_resource_balance_dirty(player)
                 return changed
         else:
@@ -1506,7 +1510,8 @@ class EconomySystemMixin:
         player.trade_contracts = [contract for contract in contracts if contract["amount"] > 0]
         if changed:
             player.trade_contract_revision = getattr(player, "trade_contract_revision", 0) + 1
-            self.recalculate_monthly_balance(player)
+            if refresh:
+                self.recalculate_monthly_balance(player)
             self.mark_player_resource_balance_dirty(player)
         return changed
 
@@ -1602,6 +1607,7 @@ class EconomySystemMixin:
         return capacity * (player.politics.export_capacity_factor if mode == "sell" else 1.0)
 
     def estimate_monthly_trade_flows(self, player, contracts=None):
+        batch = getattr(self, "_trade_forecast_batch", None) if contracts is None else None
         contracts = self.normalized_trade_contracts(getattr(player, "trade_contracts", [])) if contracts is None else contracts
         capacity_limits = {
             "buy": self.trade_capacity_per_month(player, "buy"),
@@ -1611,11 +1617,14 @@ class EconomySystemMixin:
         exports = {}
         buy_cost = 0.0
         sell_income = 0.0
-        orders = []
-        for participant in self.players:
-            orders.extend(self.collect_player_market_orders(
-                participant, 1.0, contracts=contracts if participant.id == player.id else None))
-        fills, _ = self.plan_market_orders(orders, 1.0)
+        if batch is None:
+            orders = []
+            for participant in self.players:
+                orders.extend(self.collect_player_market_orders(
+                    participant, 1.0, contracts=contracts if participant.id == player.id else None))
+            fills, _ = self.plan_market_orders(orders, 1.0)
+        else:
+            fills = batch
         for fill in fills:
             key, amount = fill["resource"], fill["amount"]
             if fill["buyer"] is player:
@@ -1851,10 +1860,12 @@ class EconomySystemMixin:
             key, amount, price = fill["resource"], fill["amount"], fill["price"]
             if seller:
                 self.consume_from_stockpile(seller, key, amount)
+                self.record_ai_flow(seller, "export", key, amount, buyer.id if buyer else None)
                 seller.budget += amount * price
                 money_by_player[seller.id] = money_by_player.get(seller.id, 0) + amount * price
             if buyer:
                 self.add_to_stockpile(buyer, key, amount)
+                self.record_ai_flow(buyer, "import", key, amount, seller.id if seller else None)
                 buyer.budget -= amount * price
                 money_by_player[buyer.id] = money_by_player.get(buyer.id, 0) - amount * price
         self.last_market_fills = fills

@@ -15,6 +15,8 @@ class CountryPanelMixin(CountryDialogMixin):
     def initialize_politics(self):
         self.politics = PoliticsSystem(self.players, start_time=self.simulation_server.current_time,
                                       news_seed=self.world_seed)
+        if getattr(self, "ai_system", None):
+            self.politics.offer_evaluator = self.ai_system.offer_response
         self.initialize_news_ui()
         self.country_card_id = None
         self.country_list_open = False
@@ -65,23 +67,34 @@ class CountryPanelMixin(CountryDialogMixin):
     def handle_political_command(self, command):
         if not self.human_player or command.player_id != self.human_player.id:
             return False
-        payload = command.payload
+        success, message = self.apply_country_political_action(command.player_id, command.payload)
+        self.country_card_message = message
+        return success
+
+    def apply_country_political_action(self, player_id, payload, refresh=True):
+        """Common game rules; caller authorizes the controller before entering."""
         if "offer" in payload:
             offer = tuple(payload["offer"])
-            if offer not in self.politics.pending or offer[1] != command.player_id:
-                return False
+            if offer not in self.politics.pending or offer[1] != player_id:
+                return False, "Предложение недоступно"
             self.politics.resolve_offer(offer, payload.get("accept") is True)
-            self.country_card_message = "Ответ отправлен"
+            message = "Ответ отправлен"
             success = True
         else:
-            success, self.country_card_message = self.politics.execute(
-                command.player_id, payload.get("target"), payload.get("action"), payload.get("amount"),
+            success, message = self.politics.execute(
+                player_id, payload.get("target"), payload.get("action"), payload.get("amount"),
                 payload.get("program_term", "ongoing"))
         if success:
             self.enforce_diplomatic_peace()
-            self.recalculate_all_monthly_balances()
+            if refresh:
+                self.recalculate_all_monthly_balances()
+            else:
+                for country_id in {player_id, payload.get("target", player_id)}:
+                    player = self.player_by_id(country_id)
+                    if player:
+                        self.recalculate_monthly_balance(player, include_trade=False)
             self.trade_panel_cache = None
-        return success
+        return success, message
 
     def enforce_diplomatic_peace(self):
         for key, battle in list(self.battles.items()):
@@ -385,6 +398,8 @@ class CountryPanelMixin(CountryDialogMixin):
         if self.country_card_tab == "power":
             return self.country_power_rows(player)
         if self.country_card_tab == "summary":
+            if player.ruler_name:
+                rows.append((f"Правитель: {player.ruler_name}", None))
             rows.append((f"Население: {self.format_population(player.population or 0)}", ("tab", "population") if own else None))
             if own:
                 rows.extend([

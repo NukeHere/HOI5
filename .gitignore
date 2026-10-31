@@ -25,3 +25,9 @@ user_settings.json
 # OS files
 .DS_Store
 Thumbs.db
+logs/
+.codex-work/ai-*.txt
+.codex-work/ai-*.json
+.codex-work/long-*.txt
+.codex-work/headless-*.txt
+.codex-work/recruit-*.txt

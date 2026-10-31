@@ -1,5 +1,6 @@
 import math
 import random
+import heapq
 
 from Constants import *
 from game_models import (

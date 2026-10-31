@@ -293,6 +293,7 @@ class PoliticsSystem:
         self.loans = []
         self.war_goals = {}
         self.news = NewsSystem(news_seed)
+        self.offer_evaluator = None
         for player in players:
             self.news.reported_support.update({(player.id, group): value
                 for group, value in player.politics.support.items()})
@@ -750,7 +751,7 @@ class PoliticsSystem:
                 a, b, key, due = offer
                 if due > self.day or self.players[b].is_human:
                     continue
-                accept = self.rules.accepts(self, offer)
+                accept = self.offer_evaluator(self, offer) if self.offer_evaluator else self.rules.accepts(self, offer)
                 self.resolve_offer(offer, accept)
             self.news.advance(self.day)
             self.revision += 1

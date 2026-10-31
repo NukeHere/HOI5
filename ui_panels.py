@@ -437,6 +437,7 @@ class UIPanelsMixin:
         return None
 
     def open_top_panel(self, key):
+        self.division_site_pick_mode = False
         self.country_dialog = None
         self.country_dialog_stack = []
         self.country_slider_drag = False
@@ -459,6 +460,7 @@ class UIPanelsMixin:
             self.set_construction_placement_mode(False)
 
     def close_top_panel(self):
+        self.division_site_pick_mode = False
         self.country_dialog = None
         self.country_dialog_stack = []
         self.country_slider_drag = False
@@ -1736,7 +1738,7 @@ class UIPanelsMixin:
 
         return True
 
-    def draw_army_panel_content(self, panel_x, panel_y, panel_width, panel_height):
+    def draw_army_overview_content(self, panel_x, panel_y, panel_width, panel_height):
         player = self.human_player
         if not player:
             return
@@ -1827,15 +1829,6 @@ class UIPanelsMixin:
                 self.draw_ui_text(str(counts.get("based", 0)), content_x + 190, y, (220, 230, 240), 10, anchor_x="right")
                 self.draw_ui_text(str(counts.get("reserve", 0)), content_right, y, (220, 230, 240), 10, anchor_x="right")
                 y -= 17
-
-        y -= 12
-        arcade.draw_line(content_x, y + 8, content_right, y + 8, (72, 92, 112, 180), 1)
-        button_h = 34
-        for label in ("Конструктор дивизий", "Развертывание войск"):
-            arcade.draw_lbwh_rectangle_filled(content_x, y - button_h, panel_width - 36, button_h, (32, 42, 54, 220))
-            arcade.draw_lbwh_rectangle_outline(content_x, y - button_h, panel_width - 36, button_h, (84, 106, 130), 1)
-            self.draw_ui_text(f"{label}: позже", content_x + 12, y - button_h / 2, (180, 192, 205), 12, anchor_y="center")
-            y -= button_h + 8
 
     def draw_side_panel(self):
         if self.active_top_panel_key in ("politics", "diplomacy"):

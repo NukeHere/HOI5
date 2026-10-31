@@ -3,6 +3,9 @@
 from collections import deque
 from dataclasses import dataclass, field
 import random
+from datetime import datetime, timedelta
+from pathlib import Path
+import warnings
 
 
 PRIORITIES = {"flavor": 0, "regular": 1, "important": 2, "critical": 3}
@@ -214,6 +217,38 @@ class NewsSystem:
         self.last_logistics_news_day = {}
         self.alert_states = {}
         self.notice_days = {}
+        self.log_path = None
+        self.log_error = None
+        self.log_start_time = datetime(2000, 1, 1)
+
+    def start_log(self, path, start_time, seed=0, countries=()):
+        """Reset once per new game. Each event is closed/flushed immediately."""
+        self.log_path = Path(path)
+        self.log_start_time = start_time
+        self.log_error = None
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("w", encoding="utf-8") as stream:
+                stream.write(f"HOI5 — история новостей новой партии\nСид: {seed}\nНачало: {start_time:%Y-%m-%d}\n")
+                for country in countries:
+                    stream.write(f"Страна {country.id}: {country.name}; правитель: {country.ruler_name or 'не указан'}\n")
+                stream.write("\n")
+        except OSError as error:
+            self.log_error = str(error)
+            warnings.warn(f"Не удалось создать журнал новостей: {error}", RuntimeWarning)
+
+    def log_item(self, item):
+        if self.log_path is None or self.log_error:
+            return
+        date = self.log_start_time + timedelta(days=item.day)
+        try:
+            with self.log_path.open("a", encoding="utf-8") as stream:
+                audience = "мир" if item.scope == "world" else "страны " + ", ".join(map(str, item.country_ids))
+                stream.write(f"[{date:%Y-%m-%d}] #{item.id} [{item.priority}] [{audience}] {item.key}\n")
+                stream.write(f"{item.title}\n{item.body}\n\n")
+        except OSError as error:
+            self.log_error = str(error)
+            warnings.warn(f"Не удалось записать новость: {error}", RuntimeWarning)
 
     def notice(self, day, owner, key, title, body, important=False, cooldown=0):
         token = owner.id, key
@@ -239,6 +274,7 @@ class NewsSystem:
                         tuple(country_ids), dict(context or {}))
         self.next_id += 1
         self.items.appendleft(item)
+        self.log_item(item)
         return item
 
     def visible(self, viewer_id):

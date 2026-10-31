@@ -34,6 +34,11 @@ from ui_controls import HudButton, PauseButton, PauseDropdown, PauseSlider
 from ui_panels import UIPanelsMixin
 from country_panel import CountryPanelMixin
 from news_panel import NewsPanelMixin
+from ai_system import CountryAI
+from division_recruitment import DivisionRecruitment
+from division_panel import DivisionPanelMixin
+from country_names import country_identities
+from pathlib import Path
 
 
 def create_hex_texture():
@@ -258,7 +263,7 @@ class WorldGenerator:
         return lake_chance > (1 - LAKE_FREQUENCY * 0.7) and is_depression
 
 
-class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanelsMixin, arcade.View):
+class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanelsMixin, arcade.View):
     def __init__(self, difficulty="Normal", bot_count=3, map_size=None):
         super().__init__()
         arcade.set_background_color(arcade.color.BLACK)
@@ -738,6 +743,9 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
         self.build_tile_spatial_hash()
         self.setup_players_and_states()
         self.register_simulation_command_handlers()
+        self.ai_system = CountryAI(self)
+        self.politics.news.start_log(Path(__file__).parent / "logs" / "world-news.txt",
+            self.simulation_server.current_time, self.world_seed, self.players)
         self.setup_premium_shader()
         self.update_map_bounds()
         self.create_map_overview()
@@ -774,6 +782,8 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
         ]
 
     def register_simulation_command_handlers(self):
+        self.recruitment = DivisionRecruitment(self)
+        self.simulation_server.register_command_handler("division_recruitment", self.recruitment.handle_command)
         self.simulation_server.register_command_handler("political_action", self.handle_political_command)
         self.simulation_server.register_command_handler("enqueue_construction", self.handle_enqueue_construction_command)
         self.simulation_server.register_command_handler("cancel_construction", self.handle_cancel_construction_command)
@@ -977,7 +987,7 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
             "total": army + government + social + infrastructure + political_programs + debt_service,
         }
 
-    def recalculate_monthly_balance(self, player):
+    def recalculate_monthly_balance(self, player, include_trade=True):
         population_income = self.monthly_population_income(player) * player.politics.tax_multiplier("population")
         company_yield_factor = self.politics.rules.company_tax_yield_factor(player)
         base_company_income = self.monthly_company_income(player) * company_yield_factor
@@ -985,7 +995,7 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
         smb_income = base_company_income * 0.65 * player.politics.tax_multiplier("smb")
         large_income = base_company_income * 0.35 * player.politics.tax_multiplier("large")
         company_income = smb_income + large_income
-        trade_balance = self.estimate_monthly_trade_flows(player)["money_balance"]
+        trade_balance = self.estimate_monthly_trade_flows(player)["money_balance"] if include_trade else player.monthly_trade_balance
         expenses = self.monthly_expenses(player)
         loan_repayments, _ = self.politics.monthly_debt_flows(player.id)
         total_income = population_income + company_income + trade_balance + loan_repayments
@@ -1007,8 +1017,18 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
         return total_balance
 
     def recalculate_all_monthly_balances(self):
+        # All countries share the same market forecast in this synchronous calculation.
+        # Don't clear the same world market independently for each country's budget.
+        previous_batch = getattr(self, "_trade_forecast_batch", None)
+        orders = []
         for player in self.players:
-            self.recalculate_monthly_balance(player)
+            orders.extend(self.collect_player_market_orders(player, 1.0))
+        self._trade_forecast_batch, _ = self.plan_market_orders(orders, 1.0)
+        try:
+            for player in self.players:
+                self.recalculate_monthly_balance(player)
+        finally:
+            self._trade_forecast_batch = previous_batch
 
     def economy_snapshot(self, player):
         income = player.monthly_income_breakdown or {}
@@ -1112,8 +1132,10 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
 
         for key, required in planned_inputs.items():
             self.consume_from_stockpile(player, key, required * actual_ratio)
+            self.record_ai_flow(player, "consumption", key, required * actual_ratio)
         for key, output in planned_outputs.items():
             self.add_to_stockpile(player, key, output * actual_ratio)
+            self.record_ai_flow(player, "output", key, output * actual_ratio)
         return actual_ratio
 
     def run_upkeep_stage(self, player, month_fraction):
@@ -1126,6 +1148,7 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
         ratios = []
         for key, required in planned_inputs.items():
             consumed = self.consume_from_stockpile(player, key, required)
+            self.record_ai_flow(player, "consumption", key, consumed)
             ratios.append(consumed / required if required > 0 else 1.0)
         if not ratios:
             return 1.0
@@ -1139,9 +1162,11 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
             return 0.0
 
         consumed_fertilizer = self.consume_from_stockpile(player, "fertilizer", planned_fertilizer)
+        self.record_ai_flow(player, "consumption", "fertilizer", consumed_fertilizer)
         fertilizer_ratio = self.clamp01(consumed_fertilizer / planned_fertilizer)
         if fertilizer_ratio > 0:
             self.add_to_stockpile(player, "food", planned_bonus_food * fertilizer_ratio)
+            self.record_ai_flow(player, "output", "food", planned_bonus_food * fertilizer_ratio)
         return fertilizer_ratio
 
     def run_production_tick(self, player, elapsed_hours=None):
@@ -1150,6 +1175,9 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
         month_fraction = max(0.0, (elapsed_hours or 0.0) / PRODUCTION_MONTH_HOURS)
         if month_fraction <= 0:
             return
+        ai = getattr(self, "ai_system", None)
+        if ai:
+            ai.ledger.advance(player.id, elapsed_hours)
         for stage in PRODUCTION_STAGES:
             ratio = self.run_production_stage(player, stage, month_fraction)
             if stage != "agriculture" and ratio is not None:
@@ -1160,6 +1188,11 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
                     f"{player.name}: этап «{label}» обеспечен ресурсами менее чем наполовину. Проверьте ресурсы и торговлю.",
                     "Снабжение производства сырьём восстановлено")
         self.mark_player_resource_balance_dirty(player)
+
+    def record_ai_flow(self, player, kind, resource, amount, partner=None):
+        ai = getattr(self, "ai_system", None)
+        if ai:
+            ai.ledger.record(player.id, kind, resource, amount, partner)
 
     @staticmethod
     def top_resource_items(resources, limit=3):
@@ -3191,6 +3224,9 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
         self.ownership_dirty_tile_keys.add((tile.q, tile.r))
         self.map_overview_dirty_tile_keys.add((tile.q, tile.r))
         self.map_overview_dirty = True
+        ai = getattr(self, "ai_system", None)
+        if ai:
+            ai.ownership_changed(old_owner, new_owner)
         return True
 
     def enclosed_water_owner(self, water_tile):
@@ -4232,14 +4268,16 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
         total_players = max(1, self.bot_count + 1)
         self.start_territory_radius = self.calculate_start_territory_radius(total_players)
         self.players = []
+        identities = country_identities(self.world_seed, total_players)
 
         for index in range(total_players):
             player = StatePlayer(
                 id=index,
-                name="Player" if index == 0 else f"Bot {index}",
+                name="Player" if index == 0 else identities[index][0],
                 color=STATE_COLORS[index % len(STATE_COLORS)],
                 border_color=STATE_BORDER_COLORS[index % len(STATE_BORDER_COLORS)],
                 is_human=index == 0,
+                ruler_name="Вы" if index == 0 else identities[index][1],
             )
             self.players.append(player)
 
@@ -6574,7 +6612,7 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
             ("  текст UI", "draw", "ui_text_batch"),
             ("  сам профайлер", "draw", "profiler_overlay"),
             ("UPDATE total", "update", "total"),
-            ("  сервер время/команды", "update", "server_clock"),
+            ("  сервер: все шаги", "update", "server_steps"),
             ("  рынок", "update", "server_market"),
             ("  экономика", "update", "server_economy"),
             ("  производство", "update", "server_production"),
@@ -6594,6 +6632,9 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
             ("  ПВО/воздушные атаки", "update", ("server_air_defense", "server_air_attack_salvos")),
             ("  авиация логика", "update", ("server_air_missions", "server_air_salvos")),
             ("  планы армий логика", "update", "server_army_plans"),
+            ("  ИИ: всего", "update", "ai_total"),
+            ("    ИИ: обзоры/сутки", "update", ("ai_reviews", "ai_daily")),
+            ("    ИИ: микро/задачи", "update", ("ai_micro", "ai_tasks")),
             ("  владение/камера/видимость", "update", ("ownership_refresh", "camera", "visible_tiles_refresh")),
             ("    владение", "update", "ownership_refresh"),
             ("    камера", "update", "camera"),
@@ -8406,6 +8447,8 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
             return
         changed = False
         for player in self.players:
+            if not player.is_human and getattr(self, "ai_system", None) and self.ai_system.enabled:
+                continue
             for army in getattr(player, "armies", []) or []:
                 if not getattr(army, "executing_plan", False):
                     continue
@@ -10145,52 +10188,9 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
                         self.fps_frame_count = 0
                         self.fps_timer = 0
 
-                previous_tick_count = self.simulation_client.snapshot.tick_count
-                previous_time = self.simulation_server.current_time
-                with profiler.measure("server_clock"):
-                    self.simulation_server.update(delta_time)
+                with profiler.measure("server_steps"):
+                    self.simulation_server.update(delta_time, self.advance_simulation)
                     self.simulation_client.sync_from_server()
-                snapshot = self.simulation_client.snapshot
-                tick_delta = max(0, snapshot.tick_count - previous_tick_count)
-                if tick_delta > 0:
-                    elapsed_hours = (snapshot.current_time - previous_time).total_seconds() / 3600
-                    with profiler.measure("server_politics"):
-                        self.advance_politics(elapsed_hours)
-                    with profiler.measure("server_market"):
-                        market_ticks = self.simulation_server.consume_market_ticks()
-                        for _market_index in range(market_ticks):
-                            self.run_weekly_market_tick()
-                    with profiler.measure("server_economy"):
-                        for player in self.players:
-                            self.run_economy_tick(player, elapsed_hours)
-                    with profiler.measure("server_production"):
-                        for player in self.players:
-                            self.run_production_tick(player, elapsed_hours)
-                    with profiler.measure("server_construction"):
-                        for player in self.players:
-                            self.run_construction_tick(player, elapsed_hours)
-                    with profiler.measure("server_population"):
-                        for player in self.players:
-                            self.run_population_tick(player, elapsed_hours)
-                    with profiler.measure("server_divisions"):
-                        self.update_divisions(elapsed_hours)
-                    with profiler.measure("server_ground_battles"):
-                        self.update_battles(elapsed_hours)
-                    with profiler.measure("server_field_helipads"):
-                        self.update_field_helipad_projects(elapsed_hours)
-                    with profiler.measure("server_air_defense"):
-                        self.update_air_defense_units(elapsed_hours)
-                    with profiler.measure("server_air_attack_salvos"):
-                        self.update_air_attack_salvos(elapsed_hours)
-                    with profiler.measure("server_air_missions"):
-                        self.update_air_missions(elapsed_hours)
-                    with profiler.measure("server_air_salvos"):
-                        self.update_air_salvos(elapsed_hours)
-                    with profiler.measure("server_army_plans"):
-                        self.update_army_plans(elapsed_hours)
-                    with profiler.measure("server_economy_history"):
-                        self.update_economy_month_history(snapshot.current_time)
-                        self.last_production_tick_count = snapshot.tick_count
 
                 with profiler.measure("ownership_refresh"):
                     self.process_ownership_refresh()
@@ -10219,6 +10219,38 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
         finally:
             profiler.end_phase("update")
 
+    def advance_simulation(self, elapsed_hours):
+        """One chronological world step, also used by runtime tests."""
+        profiler = self.profiler
+        with profiler.measure("server_politics"):
+            self.advance_politics(elapsed_hours)
+        with profiler.measure("server_market"):
+            for _ in range(self.simulation_server.consume_market_ticks()):
+                self.run_weekly_market_tick()
+        for label, operation in (("server_economy", self.run_economy_tick),
+                                 ("server_production", self.run_production_tick),
+                                 ("server_construction", self.run_construction_tick),
+                                 ("server_population", self.run_population_tick)):
+            with profiler.measure(label):
+                for player in self.players:
+                    operation(player, elapsed_hours)
+        for label, operation in (("server_divisions", self.update_divisions),
+                                 ("server_training", self.recruitment.update),
+                                 ("server_ground_battles", self.update_battles),
+                                 ("server_field_helipads", self.update_field_helipad_projects),
+                                 ("server_air_defense", self.update_air_defense_units),
+                                 ("server_air_attack_salvos", self.update_air_attack_salvos),
+                                 ("server_air_missions", self.update_air_missions),
+                                 ("server_air_salvos", self.update_air_salvos),
+                                 ("server_army_plans", self.update_army_plans)):
+            with profiler.measure(label):
+                operation(elapsed_hours)
+        with profiler.measure("ai_total"):
+            self.ai_system.update(elapsed_hours)
+        with profiler.measure("server_economy_history"):
+            self.update_economy_month_history(self.simulation_server.current_time)
+            self.last_production_tick_count = self.simulation_server.tick_count
+
     def handle_camera_keys(self, delta_time):
         move_distance = MOVE_SPEED * 60 * delta_time
         if arcade.key.LEFT in self.keys_pressed:
@@ -10231,6 +10263,11 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
             self.target_camera_y -= move_distance
 
     def on_mouse_press(self, x, y, button, modifiers):
+        if (not self.paused and button == arcade.MOUSE_BUTTON_RIGHT
+                and getattr(self, "division_site_pick_mode", False)):
+            self.division_site_pick_mode = False
+            self.recruitment.message = "Выбор гекса отменён"
+            return
         if self.paused:
             if button == arcade.MOUSE_BUTTON_LEFT:
                 if self.pause_screen == "settings":
@@ -10282,6 +10319,8 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
                         self.handle_trade_panel_click(x, y, modifiers)
                     elif self.active_top_panel_key == "construction":
                         self.handle_construction_panel_click(x, y)
+                    elif self.active_top_panel_key == "military":
+                        self.handle_division_panel_click(x, y)
                     return
 
             if self.handle_map_layer_control_click(x, y):
@@ -10357,6 +10396,8 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
                 return
 
             target_tile = self.get_tile_at(world_x, world_y)
+            if self.select_division_deployment_tile(target_tile):
+                return
             if self.handle_air_map_command_click(target_tile, modifiers):
                 return
 
@@ -10736,6 +10777,12 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
                 self.scroll_trade_rows(-scroll_y)
                 return
 
+        if self.active_top_panel_key == "military" and self.side_panel_progress > 0:
+            if self.point_in_rect(x, y, self.side_panel_rect()):
+                self.initialize_division_panel()
+                self.division_equipment_scroll = max(0, self.division_equipment_scroll - int(scroll_y * 3))
+                return
+
         old_zoom = self.world_camera.zoom
         new_zoom = max(MIN_ZOOM, min(MAX_ZOOM, old_zoom + scroll_y * ZOOM_SPEED))
         if new_zoom == old_zoom:
@@ -10771,6 +10818,12 @@ class Game(NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin
         return None
 
     def on_key_press(self, key, modifiers):
+        if key == arcade.key.ESCAPE and getattr(self, "division_site_pick_mode", False):
+            self.division_site_pick_mode = False
+            self.recruitment.message = "Выбор гекса отменён"
+            return
+        if self.handle_division_name_key(key, modifiers):
+            return
         if self.country_dialog and not self.paused:
             if key == arcade.key.ESCAPE:
                 self.close_country_dialog()

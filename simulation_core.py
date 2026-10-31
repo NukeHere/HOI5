@@ -1,6 +1,7 @@
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from math import ceil
 
 from Constants import SIMULATION_HOURS_PER_TICK, SIMULATION_REAL_SECONDS_PER_TICK, SIMULATION_START_TIME
 from game_models import MarketState
@@ -56,21 +57,37 @@ class LocalSimulationServer:
             execution_time += timedelta(days=7)
         return execution_time
 
-    def update(self, delta_time):
+    def update(self, delta_time, step_callback=None):
         self.process_pending_commands()
         if self.paused:
             return
 
         self.accumulator += delta_time
-        ticks_to_process = min(16, int(self.accumulator / SIMULATION_REAL_SECONDS_PER_TICK))
+        hours_per_step = self.hours_per_tick
+        if step_callback:
+            # At speed 5, advance six hours every .0625 s instead of doing a full
+            # day's four world steps in a single frame every .25 s.
+            hours_per_step /= ceil(hours_per_step / 6)
+        seconds_per_step = SIMULATION_REAL_SECONDS_PER_TICK * hours_per_step / self.hours_per_tick
+        ticks_to_process = min(16, int((self.accumulator + 1e-10) / seconds_per_step))
         if ticks_to_process <= 0:
             return
 
-        self.accumulator -= ticks_to_process * SIMULATION_REAL_SECONDS_PER_TICK
-        previous_time = self.current_time
-        self.current_time += timedelta(hours=self.hours_per_tick * ticks_to_process)
-        self.tick_count += ticks_to_process
-        self.update_market_schedule(previous_time, self.current_time)
+        self.accumulator = max(0, self.accumulator - ticks_to_process * seconds_per_step)
+        for _ in range(ticks_to_process):
+            self.tick_count += 1
+            remaining = hours_per_step
+            while remaining > 1e-9:
+                self.process_pending_commands()
+                midnight = self.current_time.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                hours_to_midnight = (midnight - self.current_time).total_seconds() / 3600
+                step = min(6, remaining, hours_to_midnight)
+                previous_time = self.current_time
+                self.current_time += timedelta(hours=step)
+                self.update_market_schedule(previous_time, self.current_time)
+                if step_callback:
+                    step_callback(step)
+                remaining -= step
 
     def update_market_schedule(self, previous_time, current_time):
         while previous_time < self.next_market_execution_time <= current_time:

@@ -82,6 +82,7 @@ class StatePlayer:
     legitimacy: float = 0.61
     war_support: float = 0.50
     politics: PoliticalState = field(default_factory=PoliticalState)
+    ruler_name: str = ""
 
     def __post_init__(self):
         if self.tiles is None:
