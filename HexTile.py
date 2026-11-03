@@ -38,6 +38,7 @@ class HexTile(arcade.Sprite):
         self.moisture = moisture
         self.temperature = temperature
         self.ridge_value = ridge_value
+        self.supply_score = 0.0
         # Компоненты тайла (в процентах 0-1)
         self.water_cover = 0.0  # % покрытия водой
         self.tree_cover = 0.0  # % покрытия деревьями

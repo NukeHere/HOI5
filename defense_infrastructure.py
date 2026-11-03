@@ -64,7 +64,8 @@ def update_air_defense_replacements(game, elapsed_hours):
             rear = {game.tile_key(n) for t in front for n in game.neighbor_tiles(t)} - front_keys
             forward_sites = [t for t in sites if game.tile_key(t) in rear]
             if forward_sites:
-                site = max(forward_sites, key=lambda t: (t.supply_score, -game.hex_distance(t, target.capital_tile)))
+                site = max(forward_sites, key=lambda t: (t.supply_score,
+                           -game.hex_distance(t, target.capital_tile) if target.capital_tile else 0))
         unit = game.create_air_defense_unit(player, site, project["unit_class"])
         if unit:
             queues.pop(country_id)

@@ -1,10 +1,10 @@
 """Server-owned baseline country AI. Expensive reviews intentionally span game days."""
 
-from collections import defaultdict, Counter
+from collections import defaultdict, Counter, deque
 import math
 import random
 
-from Constants import PRODUCTION_RECIPES, SIMULATION_START_TIME, TRADE_BASE_PRICES
+from Constants import COMBAT_WIDTH_DEFAULT, COMBAT_WIDTH_EXTRA_DIRECTION, PRODUCTION_RECIPES, SIMULATION_START_TIME, TRADE_BASE_PRICES
 from simulation_core import SimulationCommand
 from ai_models import BotState, CountryReport, FlowLedger, Intelligence, AITask, Review, choose_close, division_vector
 from ai_regions import RegionMap
@@ -526,9 +526,10 @@ class CountryAI:
         self.recruitment_tasks(bot, player, money, free)
         front = self.preparation_front(player, target)
         if front:
-            center = max(front, key=lambda t: (t.supply_score, -game.hex_distance(t, target.capital_tile)))
+            center = max(front, key=lambda t: (getattr(t, "supply_score", 0.0),
+                         -game.hex_distance(t, target.capital_tile) if target.capital_tile else 0))
             sites = [t for t in (center, *game.neighbor_tiles(center)) if t.owner is player
-                     and not game.is_water_tile(t) and t.supply_score >= .25]
+                     and not game.is_water_tile(t) and getattr(t, "supply_score", 0.0) >= .25]
             if sites:
                 reposition_air_defense(game, bot, player, max(sites, key=lambda t: t.supply_score), self.hour)
         self.diplomatic_tasks(bot, player)
@@ -996,28 +997,66 @@ class CountryAI:
             aircraft = sorted(player.aircraft_stockpile.items(), key=lambda item: (
                 -int("air_superiority" in game.aircraft_type_data(item[0]).get("allowed_missions", [])),
                 -int("cas" in game.aircraft_type_data(item[0]).get("allowed_missions", [])), item[0]))
+            # Reserve a fuel buffer for each deployed aircraft before committing more stock.
+            free_fuel = game.stockpile_amount(player, "refined_fuel") - self.military_reserve(player).get("refined_fuel", 0)
+            slots = max(0, int(free_fuel / 100) - sum(w.aircraft_count for w in player.air_wings))
+            rear_bases = [b.tile for b in player.airbases if b.tile.owner is player and not any(
+                n.owner and game.countries_hostile(player, n.owner)
+                for near in (b.tile, *game.neighbor_tiles(b.tile)) for n in game.neighbor_tiles(near))]
             for aircraft_type, count in aircraft:
-                if len(player.air_wings) >= 2:
-                    break
                 allowed = game.aircraft_type_data(aircraft_type).get("allowed_missions", [])
                 if not set(allowed).intersection({"air_superiority", "intercept", "patrol", "cas", "strategic_strike"}):
                     continue
-                if count > 0 and not any(aircraft_type in w.aircraft_composition for w in player.air_wings):
-                    game.create_air_wing_from_stockpile(player, aircraft_type, min(8, count))
+                while count > 0 and slots > 0:
+                    helicopter = game.aircraft_type_is_helicopter(aircraft_type)
+                    eligible = [t for t in rear_bases if game.base_capacity_for_wing(t, aircraft_type)
+                                > game.based_aircraft_load(t, helicopter=helicopter)]
+                    if not eligible:
+                        break
+                    base_tile = min(eligible, key=lambda t: game.based_aircraft_load(t, helicopter=helicopter))
+                    wing = game.create_air_wing_from_stockpile(player, aircraft_type, min(8, count, slots), base_tile)
+                    if not wing:
+                        break
+                    count -= wing.aircraft_count
+                    slots -= wing.aircraft_count
+            regions = self.controlled(player)
+            front_regions = [r for r, keys in regions.items()
+                             if any(n.owner and game.countries_hostile(player, n.owner)
+                                    for k in keys for n in self.geography.neighbors[k])]
+            assignments = Counter()
             for wing in player.air_wings:
                 allowed = set()
                 for kind in (wing.aircraft_composition or {wing.aircraft_type: 1}):
                     allowed.update(game.aircraft_type_data(kind).get("allowed_missions", []))
                 missions = [m for m in ("air_superiority", "intercept", "patrol", "cas", "strategic_strike") if m in allowed]
                 if missions:
-                    configure_air_operations(game, bot, player, wing, members, combat)
-                    bases = [b.tile for b in player.airbases if b.owner is player
-                             and game.air_wing_fits_base(wing, b.tile)[0]]
+                    choices = []
+                    for region in front_regions:
+                        keys = regions[region]
+                        reachable = any(game.aircraft_type_can_reach_tile(wing.base_tile, kind, game.tile_for_key(k))
+                                        for kind in (wing.aircraft_composition or {wing.aircraft_type: 1})
+                                        for k in keys)
+                        if reachable:
+                            importance = bot.regions.get(region, {}).get("importance", 0)
+                            choices.append((assignments[region], -importance, region))
+                    assignment = min(choices)[2] if choices else payload["region_id"]
+                    assignments[assignment] += 1
+                    wing_members = regions.get(assignment, members)
+                    wing_center = game.tile_for_key(wing_members[len(wing_members) // 2])
+                    bases = [t for t in rear_bases if game.air_wing_fits_base(wing, t)[0]]
                     if bases and wing.base_tile:
-                        base = min(bases, key=lambda t: game.hex_distance(t, center))
-                        if game.hex_distance(base, center) + 2 < game.hex_distance(wing.base_tile, center):
+                        base = min(bases, key=lambda t: game.hex_distance(t, wing_center))
+                        if game.hex_distance(base, wing_center) + 2 < game.hex_distance(wing.base_tile, wing_center):
                             game.rebase_air_wing(wing, base)
+                    configure_air_operations(game, bot, player, wing, wing_members, combat)
             game.air_asset_revision += 1
+            damaged = [t for t in player.tiles if t.building_coverage.get("industry", 0) > 0
+                       and game.building_health(t, "industry") < .85 and getattr(t, "supply_score", 0.0) >= .25
+                       and not game.tile_has_active_battle(t)
+                       and not any(n.owner and game.countries_hostile(player, n.owner) for n in game.neighbor_tiles(t))]
+            if damaged:
+                site = max(damaged, key=lambda t: t.building_coverage["industry"] * (1 - game.building_health(t, "industry")))
+                reposition_air_defense(game, bot, player, site, self.hour, short_range=True)
             return True, "Миссии назначены; " + reposition_air_defense(game, bot, player, center, self.hour)
         if operation in ("move", "attack", "withdraw", "claim"):
             division = game.division_by_id(payload["division_id"])
@@ -1056,6 +1095,65 @@ class CountryAI:
         game = self.game
         keys = [game.tile_key(tile)] + [game.tile_key(n) for n in self.geography.neighbors[game.tile_key(tile)]]
         return [d for key in keys for d in self.units_by_tile.get(key, ()) if game.countries_hostile(player, d.owner)]
+
+    def offensive_distances(self, bot, player, enemy, targets):
+        """Keep a regional objective and rank several approaches to it."""
+        game = self.game
+        plan = bot.war_objectives.get(enemy.id)
+        if (plan and self.hour < plan[0] + 168 and plan[1].owner is enemy
+                and any(game.tile_key(tile) in plan[2] for tile in targets)):
+            return plan[2]
+        if not targets:
+            return {}
+        regions = self.controlled(enemy)
+        reachable = {game.tile_key(tile) for tile in targets}
+        queue = deque(targets)
+        while queue:
+            for n in self.geography.neighbors[game.tile_key(queue.popleft())]:
+                key = game.tile_key(n)
+                if n.owner is enemy and key in self.geography.tile_region and key not in reachable:
+                    reachable.add(key)
+                    queue.append(n)
+        candidates = []
+        for region, keys in regions.items():
+            if keys[0] not in reachable:
+                continue
+            profile = self.geography.profile(enemy, keys)
+            anchor = max((game.tile_for_key(k) for k in keys),
+                         key=lambda t: (t.is_capital, sum(t.building_coverage.get(k, 0)
+                                        for k in ("industry", "supply_depot", "city"))))
+            distance = min(game.hex_distance(anchor, t) for t in targets)
+            candidates.append((profile["importance"] / (1 + distance), region, anchor))
+        if not candidates:
+            return {}
+        _, region, anchor = max(candidates, key=lambda row: (row[0], row[1]))
+        distances = {game.tile_key(anchor): 0}
+        queue = deque([anchor])
+        while queue:
+            tile = queue.popleft()
+            distance = distances[game.tile_key(tile)] + 1
+            for n in self.geography.neighbors[game.tile_key(tile)]:
+                key = game.tile_key(n)
+                if n.owner is enemy and key in self.geography.tile_region and key not in distances:
+                    distances[key] = distance
+                    queue.append(n)
+        lines = []
+        starts = sorted((game.tile_key(t) for t in targets if game.tile_key(t) in distances),
+                        key=lambda key: (distances[key], key))
+        for start in starts:
+            if any(game.hex_distance(game.tile_for_key(start), game.tile_for_key(line[0])) < 3 for line in lines):
+                continue
+            line = [start]
+            while distances[line[-1]] > 0:
+                line.append(min(game.tile_key(n) for n in self.geography.neighbors[line[-1]]
+                                if distances.get(game.tile_key(n)) == distances[line[-1]] - 1))
+            lines.append(line)
+            if len(lines) == 3:
+                break
+        priority = {key: distances[key] for line in lines for key in line}
+        bot.war_objectives[enemy.id] = self.hour, anchor, priority
+        bot.note(self.hour, "war_objective", target=enemy.id, region=region, tile=game.tile_key(anchor), lines=lines)
+        return priority
 
     def assign_forces(self, bot, player):
         """Macro records regional demand; actual reachable hex posts are tactical."""
@@ -1101,7 +1199,9 @@ class CountryAI:
             weak = division.organization < division.max_organization * .25 or division.last_supply_ratio < .12
             trapped = len(own_exits) <= 1 and hostile_sides >= 3
             pressure_limit = (division_vector(division)["defense"] if weak else local_defense) * .8
-            if enemies and (weak or trapped or threat > local_defense * 1.8) and own_exits and threat > pressure_limit:
+            emergency = trapped or (weak and threat > local_defense * 1.8)
+            if (enemies and (weak or trapped or threat > local_defense * 1.8) and own_exits
+                    and threat > pressure_limit and (not division.battle_id or emergency)):
                 target = min(own_exits, key=lambda t: (len(self.nearby_enemies(player, t)), -getattr(t, "supply_score", 0)))
                 self.send(bot, "withdraw", division_id=division.id, tile_key=game.tile_key(target),
                     rationale=f"Угроза обхода/истощения: атака врага {threat:.1f}, местная оборона {local_defense:.1f}; "
@@ -1131,13 +1231,22 @@ class CountryAI:
             used.add(division.id)
             if division.battle_id or division.route_mode == "retreat":
                 continue
+            if (division.tile and division.tile.owner is player and not division.path
+                    and game.division_supply_ratio(division) >= .25
+                    and not self.nearby_enemies(player, division.tile)):
+                continue
             target = division.target_tile
             if (division.path and target and target.owner is player
                     and getattr(target, "supply_score", 0) >= .35 and not self.nearby_enemies(player, target)):
                 continue
-            sites = [t for t in player.tiles if not game.is_water_tile(t)
+            sites = [t for t in player.tiles if not game.is_water_tile(t) and division.tile
+                     and game.hex_distance(division.tile, t) <= 3
                      and getattr(t, "supply_score", 0) >= .35 and not self.nearby_enemies(player, t)]
             sites.sort(key=lambda t: game.hex_distance(division.tile, t) - getattr(t, "supply_score", 0))
+            if not sites and not division.path and organization >= .65 and division.last_supply_ratio < .12:
+                # A unit stranded on an undersupplied post can accept a new,
+                # supplied front assignment instead of waiting there indefinitely.
+                used.discard(division.id)
             for tile in sites[:5]:
                 if tile is division.tile:
                     if division.path:
@@ -1161,6 +1270,10 @@ class CountryAI:
             target = game.tile_for_key(key)
             if target is division.tile or division.organization < division.max_organization * .65:
                 continue
+            if division.id in bot.resting_ids and getattr(target, "supply_score", 0) < .25:
+                continue
+            if self.hour - bot.last_orders.get(division.id, float("-inf")) < 24:
+                continue
             if self.send(bot, "move", division_id=division.id, tile_key=key, rationale="Назначение пограничного поста: сначала закрываем свободные участки фронта"):
                 bot.last_orders[division.id] = self.hour
                 used.add(division.id)
@@ -1175,9 +1288,21 @@ class CountryAI:
                      and d.last_supply_ratio >= .12]
             targets = {game.tile_key(n) for d in ready for n in game.neighbor_tiles(d.tile)
                        if n.owner and game.countries_hostile(player, n.owner) and not game.is_water_tile(n)}
+            by_enemy = defaultdict(list)
+            for key in targets:
+                tile = game.tile_for_key(key)
+                by_enemy[tile.owner.id].append(tile)
+            corridors = {enemy.id: self.offensive_distances(bot, player, enemy, by_enemy[enemy.id])
+                         for enemy in wars if by_enemy[enemy.id]}
             for key in sorted(targets):
                 tile = game.tile_for_key(key)
-                pool = [d for d in ready if tile in game.neighbor_tiles(d.tile)]
+                neighbors = game.neighbor_tiles(tile)
+                friendly = [n for n in neighbors if n.owner is player and not game.is_water_tile(n)]
+                hostile = [n for n in neighbors if n.owner and game.countries_hostile(player, n.owner)
+                           and not game.is_water_tile(n)]
+                if len(hostile) >= 2 and len(friendly) < 2:
+                    continue
+                pool = [d for d in ready if d.tile in friendly]
                 defense = sum(division_vector(d)["defense"] for d in self.units_by_tile.get(key, ())
                               if game.countries_hostile(player, d.owner))
                 if defense > 0:
@@ -1188,14 +1313,26 @@ class CountryAI:
                         source_counts[game.tile_key(d.tile)] += 1
                 package = []
                 protected = set()
-                limit = min(4, max(0, len(player.divisions) - 2))
+                limit = max(0, len(player.divisions) - 2)
                 if not limit:
                     continue
+                directions = {game.tile_key(d.tile) for d in pool}
+                width_limit = (COMBAT_WIDTH_DEFAULT + COMBAT_WIDTH_EXTRA_DIRECTION * max(0, len(directions) - 1)) * 1.5
+                width = 0
+                # Give every available approach a chance before adding more units from one hex.
+                by_source = defaultdict(list)
                 for d in sorted(pool, key=lambda d: -division_vector(d)["attack"]):
+                    by_source[game.tile_key(d.tile)].append(d)
+                ranks = {d.id: rank for units in by_source.values() for rank, d in enumerate(units)}
+                ordered = sorted(pool, key=lambda d: (ranks[d.id], -division_vector(d)["attack"]))
+                for d in ordered:
                     source = game.tile_key(d.tile)
-                    if d.id in protected:
+                    if d.id in protected or (defense > 0 and package and width + d.front_width > width_limit):
                         continue
                     if source_counts[source] <= 1:
+                        if any(n.owner and (n.owner.id, player.id) in game.politics.war_goals
+                               for n in game.neighbor_tiles(d.tile)):
+                            continue
                         support = [other for n in game.neighbor_tiles(d.tile)
                                    for other in self.units_by_tile.get(game.tile_key(n), ())
                                    if other.owner is player and other.id not in used
@@ -1203,18 +1340,22 @@ class CountryAI:
                                    and not other.path and not other.battle_id and other.route_mode != "retreat"]
                         exposed = any(n is not tile and self.game.enemy_divisions_on_tile(n, player)
                                       for n in game.neighbor_tiles(d.tile))
-                        if d.tile is player.capital_tile or (defense == 0 and exposed) or (defense > 0 and len(support) < 2):
+                        if (d.tile is player.capital_tile or (hostile and len(friendly) < 2)
+                                or (defense == 0 and exposed) or (defense > 0 and len(support) < 2)):
                             continue
                         if support:
                             protected.add(support[0].id)
                     package.append(d)
+                    width += d.front_width
                     source_counts[source] -= 1
-                    if len(package) >= limit:
+                    if len(package) >= limit or (not defense and len(package) >= max(1, len(friendly))):
                         break
                 attack = sum(division_vector(d)["attack"] for d in package)
                 threshold = 1.05 - .15 * bot.aggression
                 if package and attack > max(8, defense * threshold):
-                    value = attack / max(8, defense) + .1 * (game.tile_for_key(key).building_coverage.get("industry", 0))
+                    distance = corridors.get(tile.owner.id, {}).get(key)
+                    value = attack / max(8, defense) + .1 * tile.building_coverage.get("industry", 0)
+                    value += .6 / (1 + distance) if distance is not None else 0
                     choices.append((value, (key, package)))
             selection = choose_close(bot.rng, choices)
             if selection:

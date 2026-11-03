@@ -62,6 +62,7 @@ class BotState:
     expansion_target: int | None = None
     course_bias: dict = field(default_factory=dict)
     offensive_focus: tuple | None = None
+    war_objectives: dict = field(default_factory=dict)
     next_peace_deployment: float = 0
     next_air_refresh: float = 0
     next_air_defense_move: float = 0

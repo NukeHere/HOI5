@@ -2803,7 +2803,9 @@ class Game(AirRenderLODMixin, DivisionPanelMixin, NewsPanelMixin, CountryPanelMi
         return sorted(
             candidates,
             key=lambda tile: (
-                -getattr(tile, "supply_score", 0.0),
+                -(getattr(tile, "supply_score", 0.0) - .15 * (
+                    tile is battle.tile or any(n.owner and self.countries_hostile(player, n.owner)
+                                               and not self.is_water_tile(n) for n in self.neighbor_tiles(tile)))),
                 self.hex_distance(tile, battle.tile),
                 tile.r,
                 tile.q,
@@ -4717,10 +4719,10 @@ class Game(AirRenderLODMixin, DivisionPanelMixin, NewsPanelMixin, CountryPanelMi
             shapes.append(arcade.shape_list.create_line(x, y - size * 0.19, x - size * 0.12, y - size * 0.30, color, 3))
             shapes.append(arcade.shape_list.create_line(x, y - size * 0.19, x + size * 0.12, y - size * 0.30, color, 3))
         elif icon_key == "tank":
-            shapes.append(arcade.shape_list.create_rectangle_filled(x, y - size * 0.05, size * 0.56, size * 0.20, color))
-            shapes.append(arcade.shape_list.create_rectangle_filled(x - size * 0.04, y + size * 0.08, size * 0.27, size * 0.16, color))
-            shapes.append(arcade.shape_list.create_line(x + size * 0.08, y + size * 0.09, x + size * 0.31, y + size * 0.13, color, 4))
-            shapes.append(arcade.shape_list.create_line(x - size * 0.24, y - size * 0.18, x + size * 0.24, y - size * 0.18, color, 3))
+            shapes.append(arcade.shape_list.create_rectangle_filled(x - size * .05, y - size * .04, size * .58, size * .14, color))
+            shapes.append(arcade.shape_list.create_rectangle_filled(x - size * .10, y + size * .12, size * .27, size * .20, color))
+            shapes.append(arcade.shape_list.create_rectangle_filled(x + size * .19, y + size * .14, size * .34, size * .075, color))
+            shapes.append(arcade.shape_list.create_rectangle_filled(x - size * .05, y - size * .22, size * .62, size * .10, color))
         elif icon_key == "motorized":
             wheel = max(2, size * 0.055)
             shapes.append(arcade.shape_list.create_rectangle_filled(x, y - size * 0.03, size * 0.54, size * 0.20, color))
@@ -5001,25 +5003,34 @@ class Game(AirRenderLODMixin, DivisionPanelMixin, NewsPanelMixin, CountryPanelMi
         return groups
 
     def offset_division_counter_positions(self, entries):
-        offsets = [
-            (0, 0),
-            (10, -7),
-            (-10, -7),
-            (10, 7),
-            (-10, 7),
-            (0, -12),
-            (0, 12),
-        ]
-        placed = []
+        stacks = []
         for entry in entries:
-            close_count = sum(
-                1 for other_x, other_y in placed
-                if math.hypot(entry["center_x"] - other_x, entry["center_y"] - other_y) < 42
-            )
-            dx, dy = offsets[min(close_count, len(offsets) - 1)]
-            entry["center_x"] += dx
-            entry["center_y"] += dy
-            placed.append((entry["center_x"], entry["center_y"]))
+            x, y = entry["center_x"], entry["center_y"]
+            for sx, sy, rows in stacks:
+                if abs(x - sx) < 54 and abs(y - sy) < 34:
+                    rows.append(entry)
+                    break
+            else:
+                stacks.append((x, y, [entry]))
+        placed = []
+        pitch = 36
+        for x, y, rows in stacks:
+            rows.sort(key=lambda row: (
+                self.division_icon_key(row["divisions"][0]) != "infantry",
+                self.division_icon_key(row["divisions"][0]),
+            ))
+            bottom = y - pitch * (len(rows) - 1) / 2
+            top = bottom + pitch * (len(rows) - 1)
+            for other_x, other_bottom, other_top in placed:
+                if abs(x - other_x) < 56 and bottom < other_top + pitch and top > other_bottom - pitch:
+                    shift = other_top + pitch - bottom
+                    bottom += shift
+                    top += shift
+            for index, entry in enumerate(rows):
+                entry["center_x"] = x
+                entry["center_y"] = bottom + pitch * index
+            placed.append((x, bottom, top))
+            placed.sort(key=lambda stack: stack[1])
         return entries
 
     def rebuild_division_groups(self):
@@ -6072,6 +6083,57 @@ class Game(AirRenderLODMixin, DivisionPanelMixin, NewsPanelMixin, CountryPanelMi
                 x, y, heading, active = visual
                 aircraft_type = self.air_wing_visual_aircraft_type(wing, slot_index=slot_index)
                 self.draw_air_wing_flight_icon(wing, x, y, heading, active=active, aircraft_type=aircraft_type)
+        for wing, x, y, heading in self.sampled_air_flight_positions():
+            sx, sy = self.world_to_screen(x, y)
+            if -24 <= sx <= self.window.width + 24 and -24 <= sy <= self.window.height + 24:
+                self.draw_air_wing_flight_icon(wing, x, y, heading)
+
+    def update_sampled_air_flights(self, delta_time):
+        if self.simulation_server.paused or delta_time <= 0:
+            return
+        if not hasattr(self, "_sampled_air_flights"):
+            self._sampled_air_flights = []
+            self._air_flight_sample_in = 0.0
+            self._air_flight_sample_index = 0
+        # Real seconds on purpose: a six-hour simulation tick cannot skip a flight.
+        speed = (1, 1.25, 1.55, 1.95, 2.5)[self.simulation_server.speed_level - 1]
+        elapsed = min(.1, delta_time)
+        self._sampled_air_flights = [(w, base, target, age + elapsed * speed, travel)
+                                     for w, base, target, age, travel in self._sampled_air_flights
+                                     if age + elapsed * speed < 2 * travel + .65]
+        self._air_flight_sample_in -= elapsed
+        if self._air_flight_sample_in > 0 or len(self._sampled_air_flights) >= 4:
+            return
+        self._air_flight_sample_in = 2.5
+        wings = [w for w in self.air_wings if w.base_tile and w.ready_count > 0
+                 and self.air_wing_is_standing_air_mission(w)]
+        if not wings:
+            return
+        for _ in wings:
+            index = self._air_flight_sample_index
+            self._air_flight_sample_index += 1
+            wing = wings[index % len(wings)]
+            if any(active is wing for active, *_ in self._sampled_air_flights):
+                continue
+            target = self.air_wing_visual_target_tile(wing, slot_index=index // len(wings))
+            if not target or target is wing.base_tile:
+                continue
+            travel = min(6.0, 2.8 + self.hex_distance(wing.base_tile, target) * .16)
+            if self.aircraft_type_is_helicopter(self.air_wing_visual_aircraft_type(wing)):
+                travel *= 3
+            self._sampled_air_flights.append((wing, wing.base_tile, target, 0.0, travel))
+            break
+
+    def sampled_air_flight_positions(self):
+        for wing, base, target, age, travel in getattr(self, "_sampled_air_flights", ()):
+            if age < travel:
+                start, end, progress = base, target, age / travel
+            elif age < travel + .65:
+                start, end, progress = base, target, 1.0
+            else:
+                start, end, progress = target, base, (age - travel - .65) / travel
+            dx, dy = end.center_x - start.center_x, end.center_y - start.center_y
+            yield wing, start.center_x + dx * progress, start.center_y + dy * progress, math.atan2(dy, dx)
 
     def draw_selected_air_defense_ranges(self):
         tile = self.selected_tile
@@ -10087,6 +10149,7 @@ class Game(AirRenderLODMixin, DivisionPanelMixin, NewsPanelMixin, CountryPanelMi
 
                 with profiler.measure("visual_motion"):
                     self.update_division_visual_motion(delta_time)
+                    self.update_sampled_air_flights(delta_time)
                     self.update_air_impact_decals(delta_time)
                 with profiler.measure("fps_counter"):
                     self.fps_frame_count += 1

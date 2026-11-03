@@ -159,6 +159,7 @@ class DeveloperGameTests(unittest.TestCase):
         self.assertAlmostEqual(capacity["raw"], expected * player.production_modifiers.get("storage_efficiency", 1))
 
     def test_menu_generates_in_processes_and_stops_music_before_start(self):
+        import arcade
         from MainMenu import MainMenuView
         menu = MainMenuView()
         self.window.show_view(menu)
@@ -168,6 +169,10 @@ class DeveloperGameTests(unittest.TestCase):
             menu.start_new_game()
             self.assertIsNone(menu.music)
             self.assertIsNotNone(menu.generation_job)
+            job = menu.generation_job
+            menu.on_key_press(arcade.key.ESCAPE, 0)
+            self.assertIs(menu.generation_job, job)
+            menu.on_draw()
             deadline = time.monotonic() + 30
             while self.window.current_view is menu and time.monotonic() < deadline:
                 menu.on_update(1 / 60)

@@ -184,6 +184,49 @@ class FrontTests(unittest.TestCase):
         self.assertTrue(self.bot.front_quotas)
         json.dumps(self.ai.snapshot())
 
+    def test_defended_hex_can_be_attacked_by_more_than_four_from_two_sides(self):
+        game = self.game
+        target = game.hex_lookup[7, 5]
+        approaches = game.neighbor_tiles(target)[:2]
+        for tile in approaches:
+            game.set_tile_owner_only(tile, self.a)
+        for tile in list(self.b.tiles):
+            if tile is not target:
+                game.set_tile_owner_only(tile, None)
+        for index, division in enumerate(self.a.divisions):
+            division.tile = approaches[index % 2]
+            division.front_width = 20
+        for division in self.b.divisions[:4]:
+            division.tile = target
+        self.refresh()
+        def power(division):
+            return {"attack": 12 if division.owner is self.a else 1,
+                    "defense": 16 if division.owner is self.b else 30}
+        with patch("ai_system.division_vector", side_effect=power), \
+             patch("ai_system.deployment_posts", return_value=({}, set())), \
+             patch.object(self.ai, "send") as send:
+            self.ai.tactical(self.bot, self.a)
+        attacks = [c.kwargs for c in send.call_args_list if c.args[1] == "attack"]
+        self.assertGreater(len(attacks), 4)
+        self.assertEqual({c["tile_key"] for c in attacks}, {game.tile_key(target)})
+        sources = {game.division_by_id(c["division_id"]).tile for c in attacks}
+        self.assertEqual(len(sources), 2)
+
+    def test_attack_avoids_empty_salient_with_only_one_friendly_neighbor(self):
+        game = self.game
+        target = game.hex_lookup[7, 5]
+        neighbors = game.neighbor_tiles(target)
+        approaches = [t for t in neighbors if t.owner is self.a]
+        self.assertEqual(len(approaches), 1)
+        self.assertGreaterEqual(sum(t.owner is self.b for t in neighbors), 2)
+        for division in self.a.divisions:
+            division.tile = approaches[0]
+        self.refresh()
+        with patch("ai_system.deployment_posts", return_value=({}, set())), patch.object(self.ai, "send") as send:
+            self.ai.tactical(self.bot, self.a)
+        self.assertFalse(any(c.args[1] == "attack" and c.kwargs["tile_key"] == game.tile_key(target)
+                             for c in send.call_args_list))
+
     def test_mobilization_can_train_past_starting_army_and_respects_reserve(self):
         game = self.game
         game.politics.relation(self.a.id, self.b.id).at_war = False

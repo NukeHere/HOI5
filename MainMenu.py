@@ -223,6 +223,8 @@ class MainMenuView(arcade.View):
         self.dropdowns = []
         self.message = ""
         self.title_text = arcade.Text("", 0, 0, arcade.color.WHITE, 36, anchor_x="center", anchor_y="center", bold=True)
+        self.generation_text = arcade.Text("Мир генерируется", 0, 0, arcade.color.WHITE, 30,
+                                           anchor_x="center", anchor_y="center")
         self.message_text = arcade.Text("", 0, 0, (220, 180, 90), 16, anchor_x="center", anchor_y="center")
         self.help_text = arcade.Text(
             "",
@@ -268,7 +270,6 @@ class MainMenuView(arcade.View):
                 data = self.generation_job.poll()
                 if data is not None:
                     self.generation_job = None
-                    self.message = "Подготовка государств и интерфейса..."
                     game = Game(**self.generation_options, map_data=data)
                     self.window.show_view(game)
             except Exception as error:
@@ -432,11 +433,16 @@ class MainMenuView(arcade.View):
             bot_count=BOT_COUNTS[self.bot_count_index], map_size=MAP_SIZES[self.map_size_index],
             world_seed=random.randint(0, 999999))
         self.generation_job = MapGenerationJob(self.generation_options["map_size"], self.generation_options["world_seed"])
-        self.message = "Генерация карты в процессах... ESC: отмена"
+        self.message = ""
 
     def on_draw(self):
         self.clear()
         self.draw_background()
+        if self.generation_job is not None:
+            self.generation_text.x = self.window.width / 2
+            self.generation_text.y = self.window.height / 2
+            self.generation_text.draw()
+            return
         if self.screen == "main":
             self.draw_title("HOI 5")
         elif self.screen == "settings":
@@ -490,6 +496,8 @@ class MainMenuView(arcade.View):
         self.help_text.draw()
 
     def on_mouse_motion(self, x, y, dx, dy):
+        if self.generation_job is not None:
+            return
         self.hovered_button = None
         if self.open_dropdown:
             for dropdown in self.dropdowns:
@@ -559,10 +567,6 @@ class MainMenuView(arcade.View):
 
     def on_key_press(self, key, modifiers):
         if self.generation_job is not None:
-            if key == arcade.key.ESCAPE:
-                self.stop_menu()
-                self.message = "Генерация отменена"
-                self.on_show_view()
             return
         if key == arcade.key.ESCAPE and self.open_dropdown:
             for dropdown in self.dropdowns:

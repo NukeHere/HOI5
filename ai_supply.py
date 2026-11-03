@@ -34,9 +34,12 @@ def supply_site(ai, bot, player):
             continue
         strength = min(1, game.tile_supply_source_strength(player, tile)
                        + SUPPLY_SOURCE_WEIGHTS["supply_depot"] * (.7 - coverage))
-        multiplier = .5 if at_war and ai.nearby_enemies(player, tile) else 1
+        multiplier = 1
+        if at_war and any(n.owner and game.countries_hostile(player, n.owner)
+                          and not game.is_water_tile(n) for n in game.neighbor_tiles(tile)):
+            multiplier = .85
         if game.tile_has_active_battle(tile):
-            multiplier *= .25
+            multiplier *= .8
         if game.tile_key(tile) == bot.supply_target:
             multiplier *= 1.2
         candidates.append((game.tile_key(tile), strength, multiplier))

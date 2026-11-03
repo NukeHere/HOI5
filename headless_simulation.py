@@ -27,6 +27,7 @@ class SimulationTile:
         self.s = -self.q - self.r
         self.center_x, self.center_y = self.x, self.y
         self.owner = None
+        self.supply_score = 0.0
         self.is_capital = False
         self.buildings = []
         self.building_coverage = {}

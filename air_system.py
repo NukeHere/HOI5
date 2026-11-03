@@ -967,13 +967,14 @@ class AirSystemMixin:
                 return tile
         return None
 
-    def create_air_wing_from_stockpile(self, player, aircraft_type, requested_count):
+    def create_air_wing_from_stockpile(self, player, aircraft_type, requested_count, base_tile=None):
         if not player or aircraft_type not in AIRCRAFT_TYPES:
             return None
         reserve = self.aircraft_stockpile_count(player, aircraft_type)
         if reserve <= 0:
             return None
-        base_tile = self.air_wing_creation_base_tile(player, aircraft_type)
+        if base_tile is None:
+            base_tile = self.air_wing_creation_base_tile(player, aircraft_type)
         if not base_tile:
             return None
         capacity = self.base_capacity_for_wing(base_tile, aircraft_type)
@@ -1226,12 +1227,15 @@ class AirSystemMixin:
             priority += 0.45
         return priority
 
-    def air_should_fire(self, chance, target_priority, ammo_cost=1, ammo_available=1):
+    def air_should_fire(self, chance, target_priority, ammo_cost=1, ammo_available=1, defending=False):
         chance = self.clamp01(chance)
         priority = max(0.0, float(target_priority))
         scarcity = 1.0
         if ammo_available <= ammo_cost * 2:
             scarcity = 1.25
+        # Incoming strikes justify a shot even with a poor fire solution.
+        if defending and chance >= 0.03 * scarcity:
+            return True
         if chance >= AIR_ESTIMATE_NORMAL_FIRE_THRESHOLD * scarcity:
             return True
         if priority >= 1.7 and chance >= AIR_ESTIMATE_DESPERATE_FIRE_THRESHOLD * scarcity:
@@ -1330,7 +1334,8 @@ class AirSystemMixin:
             engaged_count = self.air_defense_engaged_salvo_count(unit, salvo)
             ammo_cost = engaged_count * max(1, getattr(unit, "interceptors_per_target", 1))
             priority = self.target_priority_value_for_salvo(salvo)
-            should_fire = engaged_count > 0 and self.air_should_fire(chance, priority, ammo_cost, getattr(unit, "ammo", 0))
+            should_fire = engaged_count > 0 and self.air_should_fire(
+                chance, priority, ammo_cost, getattr(unit, "ammo", 0), defending=True)
             return AirCombatEstimate(
                 detection_chance=self.clamp01(0.35 + getattr(unit, "detection_power", 0.0) * 0.65),
                 tracking_chance=self.clamp01(getattr(unit, "tracking_quality", 0.0)),
@@ -1434,6 +1439,8 @@ class AirSystemMixin:
                     priority,
                     ammo_cost,
                     getattr(interceptor_wing, "interceptor_ammo", 0),
+                    defending=context.get("target_mission_type", getattr(target_wing, "mission", "none"))
+                    in {"cas", "strategic_strike"},
                 )
                 return AirCombatEstimate(
                     detection_chance=detection,
@@ -1524,7 +1531,9 @@ class AirSystemMixin:
                 aircraft_type,
                 target_tile,
             )
-            should_fire = engaged_count > 0 and self.air_should_fire(hit_chance, priority, ammo_cost, getattr(unit, "ammo", 0))
+            should_fire = engaged_count > 0 and self.air_should_fire(
+                hit_chance, priority, ammo_cost, getattr(unit, "ammo", 0),
+                defending=context.get("mission_type", getattr(wing, "mission", "none")) in {"cas", "strategic_strike"})
             if (
                 not should_fire
                 and isinstance(unit, DivisionAirDefenseThreat)

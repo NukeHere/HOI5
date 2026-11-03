@@ -129,4 +129,11 @@ class AirRenderLODMixin:
             self._air_lod_flight_key = flight_key
             self._air_lod_next_flight = now + .1
         self._air_lod_flight_shapes.draw()
+        for wing, x, y, heading in self.sampled_air_flight_positions():
+            if abs(x - cx) <= half_w and abs(y - cy) <= half_h:
+                size = 5 / zoom
+                points = [(x + math.cos(heading + angle) * size, y + math.sin(heading + angle) * size)
+                          for angle in (0, 2.5, -2.5)]
+                color = wing.owner.border_color if wing.owner else (190, 200, 210)
+                arcade.draw_polygon_filled(points, (*color[:3], 240))
         self.draw_air_wing_operation_overlays()

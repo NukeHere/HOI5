@@ -41,6 +41,35 @@ class AirSupportTests(unittest.TestCase):
         self.assertTrue(self.game.air_wing_can_attack_tile(self.wing, self.target, "cas"))
         self.assertIs(self.game.select_air_wing_cas_target(self.wing), self.target)
 
+    def test_sampled_flight_leaves_base_and_advances_faster_at_speed_five(self):
+        game = self.game
+        game.simulation_server.set_paused(False)
+        game.simulation_server.set_speed_level(1)
+        game.update_sampled_air_flights(.1)
+        _, x, y, _ = next(game.sampled_air_flight_positions())
+        self.assertEqual((x, y), (self.base.center_x, self.base.center_y))
+        game.update_sampled_air_flights(.1)
+        self.assertAlmostEqual(game._sampled_air_flights[0][3], .1)
+        game.simulation_server.set_speed_level(5)
+        game.update_sampled_air_flights(.1)
+        self.assertAlmostEqual(game._sampled_air_flights[0][3], .35)
+        game.simulation_server.set_paused(True)
+        game.update_sampled_air_flights(1)
+        self.assertAlmostEqual(game._sampled_air_flights[0][3], .35)
+
+    def test_stationary_battery_spends_ammo_against_cas_with_low_hit_chance(self):
+        game = self.game
+        unit = game.create_air_defense_unit(self.b, self.depot, "medium_range_sam")
+        before = unit.ammo
+        with patch.object(game, "air_defense_range_factor", return_value=.65), \
+             patch.object(game, "sample_air_hits", return_value=0):
+            estimate = game.estimate_intercept_or_hit_chance(unit, None, self.wing,
+                {"exposure_tile": self.target, "aircraft_type": "multirole_fighter", "mission_type": "cas"})
+            self.assertLess(estimate.hit_chance, .15)
+            game.resolve_air_defense_against_air_wing(
+                self.wing, self.target, "multirole_fighter", 1, "cas", phase="attack_run")
+        self.assertLess(unit.ammo, before)
+
     def test_own_ground_battle_has_priority_over_small_remote_group(self):
         game = self.game
         for d in self.b.divisions[3:]:

@@ -28,14 +28,24 @@ def deployment_posts(ai, bot, player, wars, excluded=()):
     preparation = ai.preparation_target(bot, player) if not wars else None
     occupied = Counter(game.tile_key(d.tile) for d in player.divisions if d.tile)
     previous_posts = set(bot.hex_assignments.values())
+    incoming = {actor for actor, target in game.politics.war_goals if target == player.id}
     for key, tile in own.items():
         adjacent = [t for t in neighbors[key] if not game.is_water_tile(t) and t.owner is not player]
-        if wars:
-            adjacent = [t for t in adjacent if t.owner and game.countries_hostile(player, t.owner)]
+        warning = any(t.owner and t.owner.id in incoming for t in adjacent)
+        active = any(t.owner and game.countries_hostile(player, t.owner) for t in adjacent)
+        if wars and not (active or warning):
+            continue
         if not adjacent:
             continue
-        enemies = {d.id: d for d in ai.nearby_enemies(player, tile)} if wars else {}
-        threat = sum(division_vector(d)["attack"] for d in enemies.values())
+        threats = Counter()
+        for division in ai.nearby_enemies(player, tile) if wars else ():
+            threats[division.owner.id] += division_vector(division)["attack"]
+        for nearby in (tile, *neighbors[key]):
+            for division in ai.units_by_tile.get(game.tile_key(nearby), ()):
+                owner = division.owner
+                if owner and owner is not player and owner.id in incoming and not game.countries_hostile(player, owner):
+                    threats[owner.id] += division_vector(division)["attack"]
+        threat = sum(threats.values())
         priority = 2 + getattr(tile, "supply_score", 0) + (2 if occupied[key] else 0)
         priority += int(key in previous_posts)
         if wars:
@@ -47,7 +57,9 @@ def deployment_posts(ai, bot, player, wars, excluded=()):
                 priority += 4 * getattr(tile, "supply_score", 0)
             if focus and focus.tiles:
                 priority += 3 / (1 + game.hex_distance(tile, focus.capital_tile))
-        front[key] = dict(priority=priority, threat=threat,
+        front[key] = dict(priority=priority, threat=threat, warning=warning, active=active,
+                          opponents={t.owner.id for t in adjacent if t.owner and
+                                     (t.owner.id in incoming or game.countries_hostile(player, t.owner))},
                           mobilization=bool(preparation and any(t.owner is preparation for t in adjacent)))
     units = [d for d in player.divisions if d.id not in excluded and d.tile
              and not d.battle_id and d.route_mode != "retreat"
@@ -56,7 +68,8 @@ def deployment_posts(ai, bot, player, wars, excluded=()):
         bot.front_quotas = {}
         return {}, set()
     if wars and (bot.offensive_focus not in front):
-        bot.offensive_focus = max(front, key=lambda k: (getattr(own[k], "supply_score", 0), front[k]["priority"]))
+        bot.offensive_focus = max((k for k in front if front[k]["active"]),
+                                  key=lambda k: (getattr(own[k], "supply_score", 0), front[k]["priority"]), default=None)
     if not wars:
         bot.offensive_focus = None
     posts, pinned = {}, set()
@@ -84,11 +97,29 @@ def deployment_posts(ai, bot, player, wars, excluded=()):
                 if reserve.path:
                     pinned.add(reserve.id)
                 local_units = [d for d in local_units if d is not reserve]
-        selected = sorted(local_front, key=lambda k: (-front[k]["priority"], k))[:len(local_units)]
+        rank = lambda k: (-front[k]["priority"], k)
+        ranked = sorted(local_front, key=rank)
+        selected = []
+        covered = set()
+        # Give each opponent a watch post before distributing the remaining strength.
+        for key in sorted(ranked, key=lambda k: (not front[k]["active"], *rank(k))):
+            opponents = front[key]["opponents"]
+            if opponents - covered:
+                selected.append(key)
+                covered.update(opponents)
+            if len(selected) >= len(local_units):
+                break
+        pressured = [k for k in ranked if front[k]["threat"] > 0]
+        # Under pressure, quiet stretches keep their opponent's watch post.
+        # Empty forest hexes must not absorb every spare division as a quota of one.
+        candidates = pressured or ranked
+        selected += [k for k in candidates if k not in selected][:len(local_units) - len(selected)]
         quota = {k: 1 for k in selected}
-        cap = len(local_units) if len(selected) == 1 else max(2, math.ceil(len(local_units) * .5))
+        concentrating = sum(front[k]["threat"] > 0 for k in selected) if pressured else len(selected)
+        cap = len(local_units) if concentrating <= 1 else max(2, math.ceil(len(local_units) * .5))
         for _ in range(len(local_units) - len(selected)):
-            options = [k for k in selected if quota[k] < cap]
+            options = [k for k in selected if quota[k] < cap and
+                       (not pressured or front[k]["threat"] > 0)]
             if not options:
                 break
             key = max(options, key=lambda k: (front[k]["priority"] +
@@ -101,7 +132,7 @@ def deployment_posts(ai, bot, player, wars, excluded=()):
         # the old peacetime rear, but it does not interrupt a front reinforcement.
         for d in list(remaining):
             key = game.tile_key(d.target_tile) if d.target_tile else None
-            if d.path and d.target_tile and (d.route_mode == "attack" or (key in quota and counts[key] < quota[key])):
+            if d.path and d.target_tile and (d.route_mode == "attack" or key in local_front):
                 key = game.tile_key(d.target_tile)
                 posts[d.id] = key
                 if key in quota:
@@ -121,7 +152,17 @@ def deployment_posts(ai, bot, player, wars, excluded=()):
         for key in slots:
             if not remaining:
                 break
-            d = min(remaining, key=lambda d: game.hex_distance(d.tile, own[key])
+            candidates = []
+            for d in remaining:
+                source = game.tile_key(d.tile)
+                if source not in local_front or counts[key] == 0:
+                    candidates.append(d)
+                elif (counts[source] > 0 and source != key
+                      and front[key]["threat"] > 1.5 * front[source]["threat"] + 10):
+                    candidates.append(d)
+            if not candidates:
+                continue
+            d = min(candidates, key=lambda d: game.hex_distance(d.tile, own[key])
                     - (2 if bot.hex_assignments.get(d.id) == key else 0))
             posts[d.id] = key
             counts[key] += 1

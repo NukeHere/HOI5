@@ -352,6 +352,41 @@ class CountryPanelMixin(CountryDialogMixin):
                          (self.country_threat(player), None)])
         return rows
 
+    def country_agreement_rows(self, player):
+        politics = self.politics
+        rows = []
+        for other in self.players:
+            if other is player:
+                continue
+            relation = politics.relations.get(tuple(sorted((player.id, other.id))))
+            events = []
+            if relation:
+                if relation.at_war:
+                    events.append("Война")
+                events.extend(TREATIES[key] for key in sorted(relation.treaties)
+                              if key in TREATIES and key != "transit")
+                if relation.truce_until > politics.day:
+                    events.append(f"Перемирие до {politics.date_text(relation.truce_until)}")
+                if (player.id, other.id) in relation.transit_grants:
+                    events.append("Их войска могут проходить по территории страны")
+                if (other.id, player.id) in relation.transit_grants:
+                    events.append("Войска страны могут проходить по их территории")
+                if player.id in relation.embargoes:
+                    events.append("Эмбарго против партнёра")
+                if other.id in relation.embargoes:
+                    events.append("Эмбарго со стороны партнёра")
+            for actor, target, label in ((player.id, other.id, "Цель войны против партнёра"),
+                                         (other.id, player.id, "Партнёр готовит войну против страны")):
+                ready = politics.war_goals.get((actor, target))
+                if ready is not None and politics.day <= ready + 180:
+                    date = politics.date_text(ready)
+                    events.append(f"{label} (готова с {date})" if ready <= politics.day
+                                  else f"{label} (будет готова {date})")
+            if events:
+                rows.append((f"{other.name} — " + ", ".join(events), None))
+        return [("", None), ("Войны и договорённости", None), *(
+            rows or [("Нет действующих войн и договорённостей", None)])]
+
     def country_rows(self, player, action_preview=False):
         own = player.id == self.human_player.id
         rows = []
@@ -433,6 +468,7 @@ class CountryPanelMixin(CountryDialogMixin):
             rows.append((f"Мощь государства: место {rating['rank']} из {len(self.players)}", ("tab", "power")))
             if not own:
                 rows.append((self.country_threat(player), None))
+            rows.extend(self.country_agreement_rows(player))
         elif self.country_card_tab == "society":
             if own:
                 rows.extend(self.country_society_rows(player))
