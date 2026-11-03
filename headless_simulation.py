@@ -150,7 +150,7 @@ class HeadlessGame(Game):
                                      tile=self.tile_key(division.tile) if division.tile else None))
         return super().destroy_division(division)
 
-    def setup_border_war(self):
+    def setup_border_war(self, forward_counts=(5, 3)):
         """Explicit test fixture, never silently applied to a natural game."""
         for index, a in enumerate(self.players):
             for b in self.players[index + 1:]:
@@ -176,7 +176,8 @@ class HeadlessGame(Game):
                 middle = len(path) // 2
                 for i, key in enumerate(path):
                     self.set_tile_owner_only(self.tile_for_key(key), a if i < middle else b)
-                for player, key, count in ((a, path[middle - 1], 5), (b, path[middle], 3)):
+                for player, key, count in ((a, path[middle - 1], forward_counts[0]),
+                                           (b, path[middle], forward_counts[1])):
                     tile = self.tile_for_key(key)
                     tile.building_coverage.update(supply_depot=1, warehouse=.6)
                     for division in player.divisions[:count]:
@@ -193,7 +194,8 @@ class HeadlessGame(Game):
                 if not ok:
                     raise RuntimeError(f"Scenario war rejected: {reason}")
                 self.politics.news.publish(self.politics.day, "test_scenario", "Тестовый пограничный конфликт",
-                    f"Сценарий: {a.name} и {b.name} получили сухопутный коридор, передовые группы 5 против 3 и пункты снабжения. "
+                    f"Сценарий: {a.name} и {b.name} получили сухопутный коридор, передовые группы "
+                    f"{forward_counts[0]} против {forward_counts[1]} и пункты снабжения. "
                     "Война начата настройкой теста, а не самостоятельным решением ИИ.")
                 return a.id, b.id
         raise ValueError("No pair of countries shares a reachable land component; try another seed")

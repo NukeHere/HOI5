@@ -7,13 +7,11 @@ import time
 import textwrap
 import heapq
 from collections import deque
-from perlin_noise import PerlinNoise
 from PIL import Image, ImageDraw
 from pyglet.graphics import Batch
 from arcade.gl import BufferDescription
 from Constants import *
 from HexTile import HexTile
-from MapData import MapTileData
 from Settings import apply_window_settings_safely, create_window_with_fallback, load_settings, save_settings
 
 from air_system import AirSystemMixin
@@ -37,6 +35,13 @@ from news_panel import NewsPanelMixin
 from ai_system import CountryAI
 from division_recruitment import DivisionRecruitment
 from division_panel import DivisionPanelMixin
+from runtime_diagnostics import RuntimeDiagnostics, diagnose_frame
+from audio_process import ProcessAudio
+from ai_debug_panel import AIDebugPanel
+from ai_workers import AIPlanningWorkers
+from world_generation import WorldGenerator
+from defense_infrastructure import fortification_bonus
+from air_render_lod import AirRenderLODMixin
 from country_names import country_identities
 from pathlib import Path
 
@@ -94,178 +99,10 @@ def create_hex_border_texture(color=(255, 255, 0), width=4, name="hex_texture_bo
     return texture
 
 
-class WorldGenerator:
-    def __init__(self, width, height, seed=None):
-        self.width = width
-        self.height = height
-        self.seed = seed if seed is not None else random.randint(0, 999999)
-
-        # Основные шумы для рельефа
-        self.noise_elevation = PerlinNoise(octaves=1.5, seed=self.seed)
-        self.noise_elevation_large = PerlinNoise(octaves=3, seed=self.seed + 50)
-        self.noise_elevation_medium = PerlinNoise(octaves=4, seed=self.seed + 100)
-        self.noise_elevation_small = PerlinNoise(octaves=6, seed=self.seed + 150)
-
-        # Шумы для формы континентов
-        self.noise_continent = PerlinNoise(octaves=2, seed=self.seed + 200)
-        self.noise_continent_detail = PerlinNoise(octaves=3, seed=self.seed + 250)
-
-        # Шумы для горных хребтов
-        self.noise_mountains = PerlinNoise(octaves=2, seed=self.seed + 300)
-        self.noise_mountains_detail = PerlinNoise(octaves=4, seed=self.seed + 350)
-        self.noise_ridge_direction = PerlinNoise(octaves=1, seed=self.seed + 380)
-
-        # Шумы для влажности
-        self.noise_moisture_base = PerlinNoise(octaves=1, seed=self.seed + 400)
-        self.noise_moisture_detail = PerlinNoise(octaves=1.5, seed=self.seed + 450)
-        self.noise_rain_shadow = PerlinNoise(octaves=2, seed=self.seed + 480)
-
-        # Шумы для температуры
-        self.noise_temp_base = PerlinNoise(octaves=0.5, seed=self.seed + 500)
-        self.noise_temp_variation = PerlinNoise(octaves=2, seed=self.seed + 550)
-
-        # Шумы для озер и рек
-        self.noise_water_features = PerlinNoise(octaves=3, seed=self.seed + 600)
-        self.noise_lake_basins = PerlinNoise(octaves=2, seed=self.seed + 650)
-
-        print(f"Генерация мира с сидом: {self.seed}")
-
-    def generate_elevation(self, x, y):
-        period = (self.width + self.height) / (25 * (1.1 - MOUNTAIN_FREQUENCY))
-        large = self.noise_elevation_large([x * 0.8 / period, y * 0.8 / period])
-        large = (large + 1) / 2
-        medium = self.noise_elevation_medium([x / period, y / period])
-        medium = (medium + 1) / 2
-        small = self.noise_elevation_small([x * 1.5 / period, y * 1.5 / period])
-        small = (small + 1) / 2
-        elevation = (0.4 + 1.2 * 0.8 * self.noise_elevation([x / period, y / period])) / 1
-        elevation = elevation  # + large * 0.2 + medium * 0.2 + small * 0.2
-
-        return min(1.0, max(0.0, elevation))
-
-    def generate_ridges(self, x, y):
-        """Генерирует горные хребты"""
-        nx = x / self.width * 1.5
-        ny = y / self.height * 1.5
-        # Основной шум для хребтов
-        ridge_base = self.noise_mountains([nx, ny])
-        ridge_detail = self.noise_mountains_detail([nx * 2, ny * 2])
-        # Направление хребтов
-        dir_x = self.noise_ridge_direction([nx + 10, ny])
-        dir_y = self.noise_ridge_direction([nx, ny + 10])
-        # Создаем линейные структуры
-        ridge = (ridge_base + ridge_detail) / 2
-        ridge = (ridge + 1) / 2
-        # Усиливаем вдоль определенного направления
-        direction_strength = abs(dir_x * dir_y) * 2
-        ridge = ridge * (0.7 + direction_strength * 0.3)
-        # Применяем частоту
-        if ridge < RIDGE_FREQUENCY:
-            ridge = 0
-        else:
-            ridge = (ridge - RIDGE_FREQUENCY) / (1 - RIDGE_FREQUENCY)
-            ridge = math.pow(ridge, RIDGE_SHARPNESS)
-        return ridge
-
-    def generate_temperature(self, x, y, elevation):
-        period = (self.width + self.height) / 15
-        noise = self.noise_temp_variation([x * 3 / period, y * 3 / period])
-        base_temp = 0.5 + self.noise_temp_base([x / period, y / period]) * 0.5
-        elevation_factor = 1.0 - elevation * 0.4
-        temp = (base_temp + noise * 0.6) * elevation_factor
-        if temp > TROPICAL_TEMP:
-            temp = TROPICAL_TEMP
-        elif temp < POLAR_TEMP:
-            temp = POLAR_TEMP
-        return max(0.05, min(1.0, temp))
-
-    def generate_moisture(self, x, y, elevation):
-        """Генерирует влажность с учетом рельефа и proximity к воде"""
-        period = (self.width + self.height) / 20
-        moisture_base = self.noise_moisture_base([x / period, y / period])
-        moisture_base = (moisture_base + 1) / 2
-        moisture_detail = self.noise_moisture_detail([x * 2 / period, y * 2 / period])
-        moisture_detail = (moisture_detail + 1) / 2
-        rain_shadow = self.noise_rain_shadow([x / period, y / period])
-        rain_shadow = (rain_shadow + 1) / 2
-        if elevation > 0.6:
-            shadow_effect = rain_shadow * 0.5
-            moisture_base = moisture_base * (1 - shadow_effect)
-        elevation_factor = 1.0 - elevation * 0.4
-        lowland_bonus = 0
-        if WATER_LEVEL < elevation < SWAMP_ELEVATION:
-            lowland_bonus = 0.2 * (1 - (elevation - WATER_LEVEL) / (SWAMP_ELEVATION - WATER_LEVEL))
-        moisture = (moisture_base * 0.6 + moisture_detail * 0.4) * GLOBAL_MOISTURE
-        moisture = moisture * elevation_factor + lowland_bonus
-
-        return max(0.1, min(1.0, moisture))
-
-    def resource_seed_for_tile(self, q, r):
-        return (self.seed * 1_000_003 + q * 9_176 + r * 131_071) & 0xFFFFFFFF
-
-    def generate_tile_data(self, q, r, x, y):
-        base_elevation = self.generate_elevation(q, r)
-        ridge = self.generate_ridges(q, r)
-        ridge_lift = ridge * MOUNTAIN_HEIGHT * 0.35
-        if base_elevation < WATER_LEVEL:
-            ridge_lift *= 0.35
-        elevation = min(1.0, max(0.0, base_elevation + ridge_lift))
-
-        moisture = self.generate_moisture(q, r, elevation)
-        temperature = self.generate_temperature(q, r, elevation)
-        terrain_type = None
-
-        if elevation > WATER_LEVEL and self.is_lake(q, r, elevation, temperature):
-            terrain_type = "lake"
-            elevation = WATER_LEVEL - 0.02
-            moisture = self.generate_moisture(q, r, elevation)
-            temperature = self.generate_temperature(q, r, elevation)
-
-        tile_data = MapTileData(
-            q=q,
-            r=r,
-            x=x,
-            y=y,
-            elevation=elevation,
-            moisture=moisture,
-            temperature=temperature,
-            ridge_value=ridge,
-            terrain_type=terrain_type,
-        )
-        resource_rng = random.Random(self.resource_seed_for_tile(q, r))
-        tile_data.finalize_generation(resource_rng)
-        return tile_data
-
-    def is_lake(self, x, y, elevation=None, temperature=None):
-        """Определяет, является ли тайл озером"""
-        if elevation is None:
-            elevation = self.generate_elevation(x, y)
-        # Озера только на суше
-        if elevation < WATER_LEVEL:
-            return False
-        # Озера только в не-холодных зонах
-        if temperature is None:
-            temperature = self.generate_temperature(x, y, elevation)
-        if temperature < 0.2:
-            return False
-        # Шум для определения озерных котловин
-        nx = x / self.width * 3
-        ny = y / self.height * 3
-        lake_basin = self.noise_lake_basins([nx, ny])
-        lake_basin = (lake_basin + 1) / 2
-        # Дополнительный шум для формы озер
-        water_feature = self.noise_water_features([nx * 2, ny * 2])
-        water_feature = (water_feature + 1) / 2
-        # Озера в низинах
-        is_depression = WATER_LEVEL < elevation < WATER_LEVEL + LAKE_SIZE * 0.3
-        # Комбинируем условия
-        lake_chance = lake_basin * water_feature
-        return lake_chance > (1 - LAKE_FREQUENCY * 0.7) and is_depression
-
-
-class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanelsMixin, arcade.View):
-    def __init__(self, difficulty="Normal", bot_count=3, map_size=None):
+class Game(AirRenderLODMixin, DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin, EconomySystemMixin, ConstructionSystemMixin, UIPanelsMixin, arcade.View):
+    def __init__(self, difficulty="Normal", bot_count=3, map_size=None, world_seed=None, map_data=None):
         super().__init__()
+        self.precomputed_map_data = map_data
         arcade.set_background_color(arcade.color.BLACK)
         self.paused = False
         self.game_over = False
@@ -321,7 +158,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         self.fps_frame_count = 0
         self.fps_timer = 0
         self.world_generator = None
-        self.world_seed = random.randint(0, 999999)
+        self.world_seed = random.randint(0, 999999) if world_seed is None else int(world_seed)
         self.selection_border = None
         self.selection_border_sprite_list = arcade.SpriteList()
         self.divisions = []
@@ -376,7 +213,8 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         self.air_wing_overlay_area_shapes = arcade.shape_list.ShapeElementList()
         self.division_route_shape_list = arcade.shape_list.ShapeElementList()
         self.division_route_cache_key = None
-        self.division_group_shape_list = arcade.shape_list.ShapeElementList()
+        self.division_group_meshes = {}
+        self.division_group_text_batch = Batch()
         self.division_list_icon_shape_list = arcade.shape_list.ShapeElementList()
         self.division_display_positions = {}
         self.division_group_texts = []
@@ -461,6 +299,8 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         self.time_date_text = arcade.Text("", 0, 0, (225, 232, 240), 15, anchor_x="center", anchor_y="center")
         self.time_clock_text = arcade.Text("", 0, 0, (225, 232, 240), 13, anchor_x="center", anchor_y="center")
         self.ui_text_pool = []
+        self.ui_text_pools = {}
+        self.ui_text_cursors = {}
         self.ui_text_pool_cursor = 0
         self.ui_text_pool_max_used = 0
         self.tooltip_text_pool = []
@@ -573,6 +413,12 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         self.pending_resolution_index = self.resolution_index
 
         self.setup()
+        self.runtime_diagnostics = RuntimeDiagnostics(dict(seed=self.world_seed, map_size=self.map_size,
+            bots=self.bot_count, difficulty=self.difficulty))
+        self.profiler.diagnostic_stage = self.runtime_diagnostics.stage
+        self.music = None
+        self.ai_debug_panel = AIDebugPanel()
+        self.simulation_frame_budget = .008
 
     def load_division_templates(self):
         templates = {}
@@ -885,12 +731,8 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         return income
 
     def monthly_company_income(self, player):
-        income = 0.0
-        for tile in player.tiles:
-            coverage = getattr(tile, "building_coverage", {}) or {}
-            for building_key, amount_per_coverage in COMPANY_INCOME_PER_COVERAGE.items():
-                income += self.effective_building_coverage(tile, building_key, coverage.get(building_key, 0.0)) * amount_per_coverage
-        return income
+        coverage = self.effective_coverage_totals(player)
+        return sum(coverage.get(key, 0.0) * rate for key, rate in COMPANY_INCOME_PER_COVERAGE.items())
 
     def monthly_tile_company_income(self, tile):
         income = 0.0
@@ -961,8 +803,8 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         expenses = 0.0
         for tile in player.tiles:
             coverage = getattr(tile, "building_coverage", {}) or {}
-            for building_key, amount_per_coverage in INFRASTRUCTURE_UPKEEP_PER_COVERAGE.items():
-                expenses += max(0.0, coverage.get(building_key, 0.0)) * amount_per_coverage
+            for building_key, value in coverage.items():
+                expenses += max(0.0, value) * INFRASTRUCTURE_UPKEEP_PER_COVERAGE.get(building_key, 0.0)
         return expenses
 
     def monthly_army_expenses(self, player):
@@ -1396,13 +1238,15 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         if not owner or not owner.population or not owner.tiles:
             return None
 
-        total_weight = 0.0
-        tile_weight = 0.0
-        for owned_tile in owner.tiles:
-            weight = self.tile_population_weight(owned_tile)
-            total_weight += weight
-            if owned_tile == tile:
-                tile_weight = weight
+        cache = getattr(self, "_population_weight_step_cache", None)
+        if cache is not None and owner.id in cache:
+            weights, total_weight = cache[owner.id]
+        else:
+            weights = {self.tile_key(owned_tile): self.tile_population_weight(owned_tile) for owned_tile in owner.tiles}
+            total_weight = sum(weights.values())
+            if cache is not None:
+                cache[owner.id] = weights, total_weight
+        tile_weight = weights.get(self.tile_key(tile), 0)
         if total_weight <= 0:
             return None
         return owner.population * tile_weight / total_weight
@@ -1628,6 +1472,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                     coverage[building_key] = new_value
                     changed = True
         if changed:
+            self.invalidate_coverage_totals(player)
             self.recalculate_state_production_cache(player)
             self.recalculate_player_supply(player)
             self.mark_player_storage_dirty(player)
@@ -2020,6 +1865,14 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             path = TILE_VISUAL_DIR / file_name
             if path.exists():
                 textures[key] = arcade.load_texture(str(path))
+        bunker = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        painter = ImageDraw.Draw(bunker)
+        painter.polygon([(7, 48), (14, 26), (49, 26), (57, 48)], fill=(93, 100, 87, 255), outline=(30, 35, 32, 255))
+        painter.polygon([(8, 28), (17, 18), (47, 18), (56, 28)], fill=(151, 156, 142, 255), outline=(36, 42, 36, 255))
+        painter.rectangle((17, 32, 45, 38), fill=(20, 24, 22, 255))
+        painter.rectangle((12, 46, 52, 50), fill=(57, 69, 47, 255))
+        textures["fortification"] = arcade.Texture(name="fortification-bunker-v1", image=bunker,
+                                                   hit_box_algorithm=arcade.hitbox.algo_detailed)
         return textures
 
     @staticmethod
@@ -2273,7 +2126,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
 
     def draw_tile_visual_system(self):
         mode = self.tile_visual_zoom_mode()
-        cache_key = (self.visible_tiles_revision, self.tile_visual_revision, mode)
+        cache_key = (self.visible_tiles_revision, mode)
         if cache_key != self.tile_visual_cache_key:
             self.rebuild_tile_visual_sprites(mode)
             self.tile_visual_cache_key = cache_key
@@ -2365,7 +2218,9 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             for r in range(self.grid_height):
                 x = self.x_offset + q * HEX_WID + (r % 2) * HEX_WID / 2
                 y = self.y_offset + r * HEX_HGT * 0.75
-                tile_data = self.world_generator.generate_tile_data(q, r, x, y)
+                tile_data = (self.precomputed_map_data[q * self.grid_height + r]
+                             if self.precomputed_map_data is not None else
+                             self.world_generator.generate_tile_data(q, r, x, y))
                 hex_tile = HexTile(hex_texture=hex_texture, tile_data=tile_data)
                 # landscale[q][r] = tile_data.moisture
                 self.hex_grid.append(hex_tile)
@@ -2373,6 +2228,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         # plt.imshow(landscale)
         # plt.show()
         print(f"Создано {len(self.hex_grid)} тайлов")
+        self.precomputed_map_data = None
 
     def spatial_hash_coords(self, x, y):
         return (
@@ -2735,6 +2591,12 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         attacker_eff *= supply_factor
         target_eff = max(0.2, target.width_efficiency)
         active_defense_value = target.defense if target_is_defending else target.breakthrough
+        fort_bonus = 0
+        fort_tile = battle.tile if battle else target.tile
+        if target_is_defending and fort_tile and fort_tile.owner is target.owner:
+            fort_bonus = fortification_bonus(fort_tile.building_coverage.get("fortification", 0),
+                self.building_health(fort_tile, "fortification"), getattr(fort_tile, "supply_score", 0), attacker.vehicle_share)
+            active_defense_value *= 1 + fort_bonus
         breakthrough_bonus = 0.0
         if not target_is_defending:
             breakthrough_bonus = self.division_attack_breakthrough_air_bonus(target, battle)
@@ -2752,6 +2614,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             "attacker_eff": attacker_eff,
             "breakthrough_bonus": breakthrough_bonus,
             "active_defense": active_defense,
+            "fortification_bonus": fort_bonus,
         }
 
         front_penetrated = attacker.front_piercing >= target.front_armor
@@ -3012,7 +2875,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                     ),
                     INFRASTRUCTURE_COVERAGE_LIMITS["field_helipad"][1],
                 )
-                self.refresh_tile_after_building_health_change(project.tile, project.owner)
+                self.refresh_tile_after_building_health_change(project.tile, project.owner, "field_helipad")
                 completed.append(project)
         for project in completed:
             if project in self.field_helipad_projects:
@@ -3295,6 +3158,8 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         self.refresh_after_ownership_change()
 
     def transfer_tile_owner(self, tile, new_owner):
+        self.invalidate_coverage_totals(getattr(tile, "owner", None))
+        self.invalidate_coverage_totals(new_owner)
         old_owner = tile.owner if tile else None
         changed = self.set_tile_owner_only(tile, new_owner)
         if not changed:
@@ -3349,8 +3214,6 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                 for battle in list(self.battles.values()):
                     self.tick_battle(battle, step)
                 remaining -= step
-        with self.profiler.measure("battles_invalidate_render"):
-            self.invalidate_division_render_cache()
 
     def organization_recovery_factor(self, division):
         missing_ratio = 1.0 - self.clamp01(division.organization / max(1.0, division.max_organization))
@@ -3465,23 +3328,15 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             if division.tile:
                 division.x = division.tile.center_x
                 division.y = division.tile.center_y
-        self.invalidate_division_render_cache()
-
     def update_division_visual_motion(self, delta_time):
         if delta_time <= 0:
             return
         smoothing = min(1.0, delta_time * 12.0)
-        changed = False
         for division in self.divisions:
             target_progress = self.clamp01(division.movement_progress) if division.path else 0.0
-            old_progress = division.visual_movement_progress
             division.visual_movement_progress += (target_progress - division.visual_movement_progress) * smoothing
             if abs(division.visual_movement_progress - target_progress) < 0.002:
                 division.visual_movement_progress = target_progress
-            if abs(old_progress - division.visual_movement_progress) > 0.0005:
-                changed = True
-        if changed:
-            self.invalidate_division_render_cache()
 
     def is_coastal_land_tile(self, tile):
         if self.is_water_tile(tile):
@@ -3523,6 +3378,9 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             return 0.0
 
         coverage[building_key] = new_value
+        self.invalidate_coverage_totals(getattr(tile, "owner", None))
+        if tile in getattr(self, "visible_tiles", ()):
+            self.invalidate_tile_visual_cache()
         if not hasattr(tile, "buildings") or tile.buildings is None:
             tile.buildings = []
         if building_key not in tile.buildings:
@@ -4434,6 +4292,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         self.state_border_segments = {}
         self.state_border_chunk_segments = {}
         self.state_border_chunk_lists = {}
+        self.state_border_chunk_bounds = {}
         for tile in self.hex_grid:
             self.add_state_border_segments_for_tile(tile)
         for chunk_key in list(self.state_border_chunk_segments):
@@ -4479,13 +4338,14 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
 
     def state_border_shape_list_from_segments(self, segments):
         shape_list = arcade.shape_list.ShapeElementList()
+        points, colors = [], []
         for _edge_key, (x1, y1, x2, y2, color) in sorted(segments.items()):
-            shape_list.append(
-                arcade.shape_list.create_line(x1, y1, x2, y2, (0, 0, 0), 11)
-            )
-            shape_list.append(
-                arcade.shape_list.create_line(x1, y1, x2, y2, color, 7)
-            )
+            for width, tint in ((11, (0, 0, 0)), (7, color)):
+                a, b, c, d = arcade.shape_list.get_points_for_thick_line(x1, y1, x2, y2, width)
+                points.extend((b, a, c, c, a, d))
+                colors.extend((tint,) * 6)
+        if points:
+            shape_list.append(arcade.shape_list.create_triangles_filled_with_colors(points, colors))
         return shape_list
 
     def rebuild_state_border_shape_list(self):
@@ -4495,13 +4355,23 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         segments = self.state_border_chunk_segments.get(chunk_key)
         if not segments:
             self.state_border_chunk_lists.pop(chunk_key, None)
+            self.state_border_chunk_bounds.pop(chunk_key, None)
             return
+        coords = list(segments.values())
+        self.state_border_chunk_bounds[chunk_key] = (
+            min(min(s[0], s[2]) for s in coords) - 6, min(min(s[1], s[3]) for s in coords) - 6,
+            max(max(s[0], s[2]) for s in coords) + 6, max(max(s[1], s[3]) for s in coords) + 6)
         self.state_border_chunk_lists[chunk_key] = self.state_border_shape_list_from_segments(segments)
 
     def draw_state_borders(self):
         if self.state_border_chunk_lists:
+            x, y = self.world_camera.position
+            half_width = self.window.width / (2 * self.world_camera.zoom)
+            half_height = self.window.height / (2 * self.world_camera.zoom)
             for chunk_key in sorted(self.state_border_chunk_lists):
-                self.state_border_chunk_lists[chunk_key].draw()
+                left, bottom, right, top = self.state_border_chunk_bounds[chunk_key]
+                if right >= x - half_width and left <= x + half_width and top >= y - half_height and bottom <= y + half_height:
+                    self.state_border_chunk_lists[chunk_key].draw()
         else:
             self.state_border_list.draw()
 
@@ -4810,10 +4680,9 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         return visible
 
     def division_render_signature(self):
+        visible = self.visible_divisions()
         return (
             round(self.world_camera.zoom, 3),
-            round(self.world_camera.position[0], 1),
-            round(self.world_camera.position[1], 1),
             tuple(
                 (
                     division.id,
@@ -4829,15 +4698,17 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                     round(division.strength, 1),
                     division.selected,
                 )
-                for division in self.divisions
+                for division in visible
             ),
         )
 
     def use_division_lod(self):
         return self.world_camera.zoom < DIVISION_LOD_ZOOM
 
-    def append_division_template_icon(self, shapes, template_key, x, y, size, color):
-        icon_key = self.division_template(template_key).get("icon", "infantry")
+    def division_icon_key(self, division):
+        return self.division_template(division.template_key).get("icon", "infantry")
+
+    def append_division_icon(self, shapes, icon_key, x, y, size, color):
         if icon_key == "infantry":
             head = max(3, size * 0.10)
             shapes.append(arcade.shape_list.create_ellipse_filled(x, y + size * 0.08, head * 2, head * 2, color))
@@ -4879,7 +4750,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                 continue
             key = (
                 division.owner.id if division.owner else None,
-                division.template_key,
+                self.division_icon_key(division),
                 division.tile.q,
                 division.tile.r,
             )
@@ -4967,10 +4838,10 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             self.division_tile_stack_texts[index].text = ""
 
     def division_group_signature(self):
+        visible = self.visible_divisions()
         return (
             round(self.world_camera.zoom, 3),
-            round(self.world_camera.position[0], 1),
-            round(self.world_camera.position[1], 1),
+            self.window.width, self.window.height,
             tuple(
                 (
                     division.id,
@@ -4988,25 +4859,15 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                     round(division.max_strength, 1),
                     division.selected,
                 )
-                for division in self.divisions
+                for division in visible
             ),
         )
 
-    def division_counter_template_key(self, divisions):
-        counts = {}
-        for division in divisions:
-            counts[division.template_key] = counts.get(division.template_key, 0) + 1
-        if not counts:
-            return "basic_infantry", False
-        sorted_counts = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-        return sorted_counts[0][0], len(sorted_counts) > 1
-
-    def append_division_counter_shapes(self, shapes, divisions, center_x, center_y, width=54, height=34):
+    def append_division_counter_shapes(self, shapes, divisions, center_x, center_y, width=54, height=34, appearance=None):
         if not divisions:
             return (center_x - width / 2, center_y - height / 2, width, height)
-        selected = any(division.selected for division in divisions)
-        owner = divisions[0].owner
-        owner_color = tuple((owner.color if owner else (148, 158, 168))[:3])
+        selected, owner_color, icon_key, org_ratio, strength_ratio = (
+            appearance if appearance is not None else self.division_counter_appearance(divisions))
         fill = self.blend_colors(owner_color, (32, 38, 44), 0.44)
         border = (255, 246, 132) if selected else (186, 204, 220)
         shapes.append(
@@ -5015,35 +4876,15 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         shapes.append(
             arcade.shape_list.create_rectangle_outline(center_x, center_y, width, height, border, 2)
         )
-        template_key, mixed = self.division_counter_template_key(divisions)
         icon_size = min(34, height * 0.98)
-        self.append_division_template_icon(
+        self.append_division_icon(
             shapes,
-            template_key,
+            icon_key,
             center_x - width * 0.17,
             center_y + 3,
             icon_size,
             (18, 24, 31),
         )
-        if mixed:
-            shapes.append(
-                arcade.shape_list.create_line(
-                    center_x - width * 0.38,
-                    center_y + height * 0.33,
-                    center_x - width * 0.02,
-                    center_y - height * 0.28,
-                    (236, 222, 150),
-                    2,
-                )
-            )
-        max_org = sum(max(1.0, division.max_organization) for division in divisions)
-        org_ratio = 0.0
-        if max_org > 0:
-            org_ratio = self.clamp01(sum(division.organization for division in divisions) / max_org)
-        max_strength = sum(max(1.0, division.max_strength) for division in divisions)
-        strength_ratio = 0.0
-        if max_strength > 0:
-            strength_ratio = self.clamp01(sum(division.strength for division in divisions) / max_strength)
         hp_x = center_x - width / 2 + 4
         hp_height = height - 6
         shapes.append(
@@ -5076,6 +4917,30 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             )
         return (center_x - width / 2, center_y - height / 2, width, height)
 
+    def division_counter_appearance(self, divisions):
+        owner = divisions[0].owner
+        color = tuple((owner.color if owner else (148, 158, 168))[:3])
+        icon = self.division_icon_key(divisions[0])
+        organization = self.clamp01(sum(d.organization for d in divisions) /
+                                    sum(max(1.0, d.max_organization) for d in divisions))
+        strength = self.clamp01(sum(d.strength for d in divisions) /
+                                sum(max(1.0, d.max_strength) for d in divisions))
+        return any(d.selected for d in divisions), color, icon, organization, strength
+
+    def division_group_mesh(self, divisions):
+        selected, color, icon, org, hp = self.division_counter_appearance(divisions)
+        # The bars are only 46 and 28 pixels long. Subpixel changes can share geometry.
+        key = selected, color, icon, round(org * 24) / 24, round(hp * 24) / 24
+        meshes = self.division_group_meshes
+        mesh = meshes.pop(key, None)
+        if mesh is None:
+            mesh = arcade.shape_list.ShapeElementList()
+            self.append_division_counter_shapes(mesh, divisions, 0, 0, appearance=key)
+            if len(meshes) >= 512:
+                del meshes[next(iter(meshes))]
+        meshes[key] = mesh
+        return mesh
+
     def division_lod_group_entries(self):
         divisions = [
             division for division in self.visible_divisions()
@@ -5099,6 +4964,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             for division in divisions:
                 key = (
                     division.owner.id if division.owner else None,
+                    self.division_icon_key(division),
                     division.tile.q,
                     division.tile.r,
                 )
@@ -5116,14 +4982,17 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         )
         groups = []
         assigned = set()
+        by_icon = {}
+        for division in remaining:
+            key = (division.owner.id if division.owner else None, self.division_icon_key(division))
+            by_icon.setdefault(key, []).append(division)
         for seed in remaining:
             if seed.id in assigned:
                 continue
             group = []
-            for division in remaining:
+            key = (seed.owner.id if seed.owner else None, self.division_icon_key(seed))
+            for division in by_icon[key]:
                 if division.id in assigned:
-                    continue
-                if division.owner != seed.owner:
                     continue
                 if self.hex_distance(seed.tile, division.tile) <= neighbor_radius:
                     group.append(division)
@@ -5155,13 +5024,23 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
 
     def rebuild_division_groups(self):
         cache_key = self.division_group_signature()
+        camera = tuple(self.world_camera.position)
         if cache_key == self.division_groups_cache_key:
+            previous = getattr(self, "_division_groups_camera", camera)
+            dx = (previous[0] - camera[0]) * self.world_camera.zoom
+            dy = (previous[1] - camera[1]) * self.world_camera.zoom
+            if dx or dy:
+                for group in self.division_groups:
+                    x, y, width, height = group["rect"]
+                    group["rect"] = (x + dx, y + dy, width, height)
+                for label in self.division_group_texts:
+                    label.x += dx
+                    label.y += dy
+            self._division_groups_camera = camera
             return
+        self._division_groups_camera = camera
         self.division_groups_cache_key = cache_key
         self.division_groups = []
-        self.division_group_shape_list = arcade.shape_list.ShapeElementList()
-        for text in self.division_group_texts:
-            text.text = ""
 
         if not self.use_division_lod():
             return
@@ -5189,21 +5068,25 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             center_y = entry["center_y"]
             width = 54
             height = 34
-            rect = self.append_division_counter_shapes(self.division_group_shape_list, divisions, center_x, center_y, width, height)
+            rect = (center_x - width / 2, center_y - height / 2, width, height)
             if text_index >= len(self.division_group_texts):
                 self.division_group_texts.append(
-                    arcade.Text("", 0, 0, arcade.color.WHITE, 13, anchor_x="center", anchor_y="center")
+                    arcade.Text("", 0, 0, arcade.color.WHITE, 13, anchor_x="center", anchor_y="center",
+                                batch=self.division_group_text_batch)
                 )
             label = self.division_group_texts[text_index]
-            label.text = str(len(divisions))
-            label.x = center_x + width / 2 - 11
-            label.y = center_y + 5
-            label.color = arcade.color.WHITE
-            label.font_size = 13
+            count = str(len(divisions))
+            if label.text != count:
+                label.text = count
+            if label.x != center_x + width / 2 - 11:
+                label.x = center_x + width / 2 - 11
+            if label.y != center_y + 5:
+                label.y = center_y + 5
             text_index += 1
             self.division_groups.append({
                 "rect": rect,
                 "divisions": divisions,
+                "mesh": self.division_group_mesh(divisions),
             })
         for index in range(text_index, len(self.division_group_texts)):
             self.division_group_texts[index].text = ""
@@ -5494,10 +5377,12 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         if not self.use_division_lod():
             return
         self.rebuild_division_groups()
-        self.division_group_shape_list.draw()
-        for text in self.division_group_texts:
-            if text.text:
-                text.draw()
+        for group in self.division_groups:
+            x, y, width, height = group["rect"]
+            mesh = group["mesh"]
+            mesh.position = x + width / 2, y + height / 2
+            mesh.draw()
+        self.division_group_text_batch.draw()
 
     def draw_division_selection_box(self):
         if not self.division_selection_drag_started:
@@ -5766,9 +5651,18 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         if self.map_overview_image is None or not self.map_overview_params:
             return
         self.map_overview_revision += 1
+        if (self.map_overview_sprite is not None
+                and self.map_overview_sprite.texture.image.size == self.map_overview_image.size):
+            texture = self.map_overview_sprite.texture
+            texture.image = self.map_overview_image
+            atlas = self.map_overview_sprite_list.atlas
+            if atlas is not None:
+                atlas.add(texture)
+                atlas.update_texture_image(texture)
+            return
         texture = arcade.Texture(
             name=(
-                f"map_overview_{self.world_seed}_{self.grid_width}x{self.grid_height}_"
+                f"map_overview_{id(self)}_{self.world_seed}_{self.grid_width}x{self.grid_height}_"
                 f"{self.map_layer}_{self.resource_group_index}_{self.selected_resource_key or 'none'}_"
                 f"build_{self.construction_placement_mode}_{self.selected_construction_building_key() or 'none'}_"
                 f"rev_{self.map_overview_revision}"
@@ -5822,7 +5716,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         return clamped_x, clamped_y
 
     def use_overview_lod(self):
-        return self.map_overview_sprite is not None and self.world_camera.zoom <= OVERVIEW_LOD_ZOOM
+        return self.map_overview_sprite is not None and self.world_camera.zoom <= OVERVIEW_LOD_ZOOM + 1e-6
 
     def draw_capital_markers(self):
         for player in self.players:
@@ -5990,12 +5884,13 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         radius = AIR_VISUAL_TILE_OFFSET_RADIUS * max(0.0, float(scale)) * (0.35 + radius_noise * 0.65)
         return tile.center_x + math.cos(angle) * radius, tile.center_y + math.sin(angle) * radius * 0.72
 
-    def air_wing_visual_position(self, wing, now=None, slot_index=0, slot_count=1):
+    def air_wing_visual_position(self, wing, now=None, slot_index=0, slot_count=1, target_tile=None):
         if not wing or not wing.base_tile:
             return None
         now = time.perf_counter() if now is None else now
         state = getattr(wing, "mission_state", "returning")
-        target_tile = self.air_wing_visual_target_tile(wing, slot_index=slot_index, now=now)
+        if target_tile is None:
+            target_tile = self.air_wing_visual_target_tile(wing, slot_index=slot_index, now=now)
         if not target_tile:
             return None
         slot_angle = (math.tau * slot_index / max(1, slot_count)) + wing.id * 0.19
@@ -6165,15 +6060,14 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                 continue
             state = getattr(wing, "mission_state", "returning")
             package_count = 1 if state in {"approach", "attack_run", "egress", "defensive", "aborted"} else self.air_wing_visual_package_count(wing)
+            base_visible = self.tile_key(wing.base_tile) in visible_keys
             for slot_index in range(max(1, package_count)):
-                visual = self.air_wing_visual_position(wing, now=now, slot_index=slot_index, slot_count=package_count)
-                if not visual:
-                    continue
                 target_tile = self.air_wing_visual_target_tile(wing, slot_index=slot_index, now=now)
-                if (
-                    self.tile_key(wing.base_tile) not in visible_keys
-                    and (not target_tile or self.tile_key(target_tile) not in visible_keys)
-                ):
+                if not base_visible and (not target_tile or self.tile_key(target_tile) not in visible_keys):
+                    continue
+                visual = self.air_wing_visual_position(wing, now=now, slot_index=slot_index, slot_count=package_count,
+                                                       target_tile=target_tile)
+                if not visual:
                     continue
                 x, y, heading, active = visual
                 aircraft_type = self.air_wing_visual_aircraft_type(wing, slot_index=slot_index)
@@ -6195,18 +6089,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             for unit in self.air_defense_units_on_tile(tile):
                 if unit not in units:
                     units.append(unit)
-        for unit in units:
-            friendly = unit.owner is self.human_player
-            fire_color = (120, 230, 150, 150) if friendly else (248, 132, 96, 150)
-            fire_glow = (120, 230, 150, 85) if friendly else (248, 132, 96, 85)
-            radar_color = (122, 196, 248, 112) if friendly else (238, 150, 238, 112)
-            if unit.fire_range_cells > 0:
-                radius = unit.fire_range_cells * HEX_WID
-                arcade.draw_circle_outline(unit.tile.center_x, unit.tile.center_y, radius, fire_color, 4)
-                arcade.draw_circle_outline(unit.tile.center_x, unit.tile.center_y, radius + 3, fire_glow, 2)
-            if unit.radar_active and unit.radar_range_cells > 0:
-                radius = unit.radar_range_cells * HEX_WID
-                arcade.draw_circle_outline(unit.tile.center_x, unit.tile.center_y, radius, radar_color, 3)
+        self.draw_cached_air_defense_ranges(units)
 
     def air_wing_display_range_cells(self, wing):
         composition = self.air_wing_composition(wing)
@@ -6331,21 +6214,13 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         self.air_wing_overlay_area_shapes.draw()
 
     def draw_air_assets(self):
+        if self.world_camera.zoom <= .35:
+            self.draw_air_assets_lod()
+            return
         visible_keys = self.visible_tile_key_set()
         self.draw_air_wing_operation_overlays()
         self.draw_selected_air_defense_ranges()
-        for airbase in self.airbases:
-            tile = airbase.tile
-            if not tile or self.tile_key(tile) not in visible_keys:
-                continue
-            owner_color = tuple((airbase.owner.border_color if airbase.owner else (190, 200, 210))[:3])
-            self.draw_airbase_icon(tile, owner_color)
-        for tile in self.visible_tiles:
-            coverage = (getattr(tile, "building_coverage", {}) or {}).get("field_helipad", 0.0)
-            if coverage <= 0:
-                continue
-            owner_color = tuple((tile.owner.border_color if tile.owner else (180, 190, 200))[:3])
-            self.draw_field_helipad_icon(tile, owner_color)
+        self.draw_static_air_assets(visible_keys)
         for project in self.field_helipad_projects:
             tile = project.tile
             if not tile or self.tile_key(tile) not in visible_keys:
@@ -6354,7 +6229,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             progress = project.progress_hours / max(1.0, project.work_required_hours)
             self.draw_field_helipad_icon(tile, owner_color, progress=progress)
         for unit in self.air_defense_units:
-            if unit.tile and self.tile_key(unit.tile) in visible_keys:
+            if unit.path and unit.tile and self.tile_key(unit.tile) in visible_keys:
                 self.draw_air_defense_icon(unit)
         self.draw_air_impact_decals(visible_keys)
         self.draw_air_wings_in_flight(visible_keys)
@@ -6441,6 +6316,9 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
     def get_visible_tiles(self):
         camera_x, camera_y = self.world_camera.position
         zoom = self.world_camera.zoom
+        query = (round(camera_x, 2), round(camera_y, 2), round(zoom, 6), self.window.width, self.window.height)
+        if query == getattr(self, "_visible_query", None) and self.visible_tiles:
+            return
         view_width = self.window.width / zoom
         view_height = self.window.height / zoom
         left = camera_x - view_width / 2 - HEX_SIZE * 4
@@ -6466,7 +6344,9 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             if (max_x >= left and min_x <= right and
                     max_y >= bottom and min_y <= top):
                 self.visible_tiles.append(tile)
+        self._visible_query = query
 
+    @diagnose_frame("draw")
     def on_draw(self):
         profiler = self.profiler
         profiler.begin_phase("draw")
@@ -6562,6 +6442,10 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                     self.draw_country_card()
                 with profiler.measure("ui_news"):
                     self.draw_news_overlay()
+                if self.map_layer_menu_open:
+                    self.begin_ui_text_frame()
+                    self.draw_map_layer_control()
+                    self.draw_ui_text_batch()
             if construction_tooltip_data or top_tooltip_active:
                 with profiler.measure("ui_tooltips"):
                     self.begin_tooltip_text_frame()
@@ -6579,6 +6463,8 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         if self.profiler.visible:
             with profiler.measure("profiler_overlay"):
                 self.draw_performance_overlay()
+        with profiler.measure("ai_debug_panel"):
+            self.ai_debug_panel.draw(self)
         profiler.end_phase("draw")
 
     def draw_performance_overlay(self):
@@ -6595,6 +6481,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             ("  авиация визуал", "draw", "world_air_assets"),
             ("  планы армий", "draw", "world_army_plans"),
             ("  дивизии", "draw", "world_divisions"),
+            ("  счётчики дивизий", "draw", "ui_division_groups"),
             ("  списки авиации/дивизий", "draw", ("ui_air_wing_list", "ui_division_list")),
             ("  верхний UI", "draw", ("ui_top_status", "ui_top_navigation", "ui_time_hud")),
             ("  боковая/гекс панель", "draw", ("ui_side_panel", "ui_hex_panel")),
@@ -6617,6 +6504,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             ("  экономика", "update", "server_economy"),
             ("  производство", "update", "server_production"),
             ("  строительство", "update", "server_construction"),
+            ("  пересчёт зданий", "update", "server_building_refresh"),
             ("    стройка: auto repair", "update", "construction_auto_repairs"),
             ("    стройка: проекты", "update", "construction_projects"),
             ("    стройка: статус", "update", "construction_status_eval"),
@@ -6682,12 +6570,12 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             overlay_text = self.performance_overlay_texts[index]
             if overlay_text.text != text:
                 overlay_text.text = text
-            overlay_text.x = x + 10
-            overlay_text.y = text_y
+            if overlay_text.x != x + 10:
+                overlay_text.x = x + 10
+            if overlay_text.y != text_y:
+                overlay_text.y = text_y
             if overlay_text.color != color:
                 overlay_text.color = color
-            if overlay_text.font_size != 10:
-                overlay_text.font_size = 10
             text_y -= line_height
         for overlay_text in self.performance_overlay_texts[len(self.performance_overlay_rows):]:
             if overlay_text.text:
@@ -6717,11 +6605,13 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
 
     def begin_ui_text_frame(self):
         self.ui_text_pool_cursor = 0
+        self.ui_text_cursors.clear()
 
     def draw_ui_text_batch(self):
-        for index in range(self.ui_text_pool_cursor, self.ui_text_pool_max_used):
-            if index < len(self.ui_text_pool) and self.ui_text_pool[index].text:
-                self.ui_text_pool[index].text = ""
+        for key, pool in self.ui_text_pools.items():
+            for label in pool[self.ui_text_cursors.get(key, 0):]:
+                if label.text:
+                    label.text = ""
         self.ui_text_pool_max_used = max(self.ui_text_pool_max_used, self.ui_text_pool_cursor)
         self.batch.draw()
 
@@ -6736,11 +6626,16 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         anchor_y="baseline",
         bold=False,
     ):
-        index = self.ui_text_pool_cursor
+        # Opening a division list shifts every following label. Keep font and
+        # anchors fixed instead of rebuilding existing pyglet text layouts.
+        key = (font_size, anchor_x, anchor_y)
+        pool = self.ui_text_pools.setdefault(key, [])
+        index = self.ui_text_cursors.get(key, 0)
+        self.ui_text_cursors[key] = index + 1
         self.ui_text_pool_cursor += 1
 
-        if index >= len(self.ui_text_pool):
-            self.ui_text_pool.append(
+        if index >= len(pool):
+            pool.append(
                 arcade.Text(
                     "",
                     0,
@@ -6752,21 +6647,18 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                     batch=self.batch,
                 )
             )
+            self.ui_text_pool.append(pool[-1])
 
-        label = self.ui_text_pool[index]
+        label = pool[index]
         new_text = str(text)
         if label.text != new_text:
             label.text = new_text
-        if label.font_size != font_size:
-            label.font_size = font_size
-        if label.anchor_x != anchor_x:
-            label.anchor_x = anchor_x
-        if label.anchor_y != anchor_y:
-            label.anchor_y = anchor_y
         if label.color != color:
             label.color = color
-        label.x = x
-        label.y = y
+        if label.x != x:
+            label.x = x
+        if label.y != y:
+            label.y = y
 
     def begin_trade_text_frame(self):
         self.trade_text_pool_cursor = 0
@@ -8631,8 +8523,8 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                     icon_x = row_rect[0] + 22
                     icon_y = row_rect[1] + row_rect[3] / 2
                     if rebuild_geometry:
-                        self.append_division_template_icon(
-                            shapes, division.template_key, icon_x, icon_y + 2, 27,
+                        self.append_division_icon(
+                            shapes, self.division_icon_key(division), icon_x, icon_y + 2, 27,
                             (210, 224, 232) if selected else (152, 168, 184),
                         )
                     text_color = arcade.color.WHITE if selected else (176, 190, 204)
@@ -10068,9 +9960,18 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
 
     def set_sound_volume(self, value):
         self.sound_volume = value
+        if self.music and hasattr(self.music, "set_sound_volume"):
+            self.music.set_sound_volume(value)
+
+    def play_audio_effect(self, name, volume=1):
+        path = Path(__file__).parent / "sounds" / name
+        return bool(self.music and path.is_file() and hasattr(self.music, "play_effect")
+                    and self.music.play_effect(path, volume))
 
     def set_music_volume(self, value):
         self.music_volume = value
+        if self.music:
+            self.music.set_volume(value)
 
     def toggle_pending_fullscreen(self):
         self.pending_fullscreen = not self.pending_fullscreen
@@ -10125,6 +10026,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         self.window.show_view(MainMenuView())
 
     def exit_to_desktop(self):
+        self.stop_background_services()
         arcade.exit()
 
     def apply_tile_draw_color(self, tile):
@@ -10148,23 +10050,29 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             base_color = self.get_tile_map_color(tile)
             if tile == self.selected_tile:
                 # Желтая подсветка
-                tile.color = self.blend_colors(base_color, (255, 255, 80), 0.22)
+                color = self.blend_colors(base_color, (255, 255, 80), 0.22)
             elif tile == self.hovered_tile:
                 # Белая подсветка (чуть светлее)
-                tile.color = (
+                color = (
                     min(255, base_color[0] + 50),
                     min(255, base_color[1] + 50),
                     min(255, base_color[2] + 50)
                 )
             else:
-                tile.color = base_color
+                color = base_color
+            if tuple(tile.color[:3]) != tuple(color[:3]):
+                tile.color = color
 
+    @diagnose_frame("update")
     def on_update(self, delta_time):
         profiler = self.profiler
+        diagnostics = getattr(self, "runtime_diagnostics", None)
         profiler.begin_phase("update")
         try:
             with profiler.measure("total"):
                 with profiler.measure("ui_animation"):
+                    if self.music:
+                        self.music.update(self)
                     self.shader_time += delta_time
                     self.update_map_layer_menu_animation(delta_time)
                     self.update_side_panel_animation(delta_time)
@@ -10189,12 +10097,19 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                         self.fps_timer = 0
 
                 with profiler.measure("server_steps"):
-                    self.simulation_server.update(delta_time, self.advance_simulation)
+                    if diagnostics:
+                        diagnostics.stage("server_steps", self.simulation_server.current_time)
+                    self.simulation_server.update(delta_time, self.advance_simulation,
+                                                  max_wall_seconds=self.simulation_frame_budget)
                     self.simulation_client.sync_from_server()
 
                 with profiler.measure("ownership_refresh"):
+                    if diagnostics:
+                        diagnostics.stage("ownership_refresh", self.simulation_server.current_time)
                     self.process_ownership_refresh()
                 with profiler.measure("camera"):
+                    if diagnostics:
+                        diagnostics.stage("camera", self.simulation_server.current_time)
                     self.handle_camera_keys(delta_time)
                     self.clamp_target_camera()
 
@@ -10208,6 +10123,8 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                 current_time = time.time()
                 if current_time - self.last_visible_update > self.visible_update_interval:
                     with profiler.measure("visible_tiles_refresh"):
+                        if diagnostics:
+                            diagnostics.stage("visible_tiles_refresh", self.simulation_server.current_time)
                         if self.use_overview_lod():
                             self.visible_tiles.clear()
                             self.refresh_visible_tiles_signature()
@@ -10220,11 +10137,32 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             profiler.end_phase("update")
 
     def advance_simulation(self, elapsed_hours):
+        self._coverage_step_cache = {}
+        self._population_weight_step_cache = {}
+        self._defer_building_refresh = True
+        self._building_refresh_pending = {}
+        try:
+            self.advance_simulation_step(elapsed_hours)
+        finally:
+            self._defer_building_refresh = False
+            try:
+                with self.profiler.measure("server_building_refresh"):
+                    self.flush_building_refreshes()
+            finally:
+                self._coverage_step_cache = None
+                self._population_weight_step_cache = None
+
+    def advance_simulation_step(self, elapsed_hours):
         """One chronological world step, also used by runtime tests."""
         profiler = self.profiler
+        diagnostics = getattr(self, "runtime_diagnostics", None)
+        if diagnostics:
+            diagnostics.stage("server_politics", self.simulation_server.current_time)
         with profiler.measure("server_politics"):
             self.advance_politics(elapsed_hours)
         with profiler.measure("server_market"):
+            if diagnostics:
+                diagnostics.stage("server_market", self.simulation_server.current_time)
             for _ in range(self.simulation_server.consume_market_ticks()):
                 self.run_weekly_market_tick()
         for label, operation in (("server_economy", self.run_economy_tick),
@@ -10233,7 +10171,11 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                                  ("server_population", self.run_population_tick)):
             with profiler.measure(label):
                 for player in self.players:
+                    if diagnostics:
+                        diagnostics.stage(label, self.simulation_server.current_time, player.id)
                     operation(player, elapsed_hours)
+        with profiler.measure("server_building_refresh"):
+            self.flush_building_refreshes()
         for label, operation in (("server_divisions", self.update_divisions),
                                  ("server_training", self.recruitment.update),
                                  ("server_ground_battles", self.update_battles),
@@ -10244,10 +10186,18 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                                  ("server_air_salvos", self.update_air_salvos),
                                  ("server_army_plans", self.update_army_plans)):
             with profiler.measure(label):
+                if diagnostics:
+                    diagnostics.stage(label, self.simulation_server.current_time)
                 operation(elapsed_hours)
+        with profiler.measure("server_building_refresh"):
+            self.flush_building_refreshes()
         with profiler.measure("ai_total"):
+            if diagnostics:
+                diagnostics.stage("ai_total", self.simulation_server.current_time)
             self.ai_system.update(elapsed_hours)
         with profiler.measure("server_economy_history"):
+            if diagnostics:
+                diagnostics.stage("server_economy_history", self.simulation_server.current_time)
             self.update_economy_month_history(self.simulation_server.current_time)
             self.last_production_tick_count = self.simulation_server.tick_count
 
@@ -10262,7 +10212,10 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         if arcade.key.DOWN in self.keys_pressed:
             self.target_camera_y -= move_distance
 
+    @diagnose_frame("input_mouse_press")
     def on_mouse_press(self, x, y, button, modifiers):
+        if button == arcade.MOUSE_BUTTON_LEFT and self.ai_debug_panel.click(self, x, y):
+            return
         if (not self.paused and button == arcade.MOUSE_BUTTON_RIGHT
                 and getattr(self, "division_site_pick_mode", False)):
             self.division_site_pick_mode = False
@@ -10302,6 +10255,12 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                         return
             return
 
+        if (button == arcade.MOUSE_BUTTON_LEFT and self.map_layer_menu_open
+                and (self.map_layer_option_at(x, y) is not None
+                     or self.map_layer_filter_option_at(x, y) is not None
+                     or self.point_in_rect(x, y, self.map_layer_button_rect()))
+                and self.handle_map_layer_control_click(x, y)):
+            return
         if self.handle_news_click(x, y, button):
             return
         if self.handle_country_click(x, y, button):
@@ -10527,7 +10486,49 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             else:
                 self.close_hex_panel()
 
+    def on_hide_view(self):
+        # A hidden game does not receive frames (e.g. return to main menu).
+        self.runtime_diagnostics.heartbeat = None
+        self.runtime_diagnostics.active = None
+        self.stop_background_services()
+        self.window.remove_handlers(on_close=self.stop_background_services, on_deactivate=self.on_input_deactivate)
+
+    def on_show_view(self):
+        monitor = getattr(self, "runtime_diagnostics", None)
+        if monitor:
+            monitor.heartbeat = time.perf_counter()
+            monitor.start_native_watchdog()
+        if self.music is None:
+            self.music = ProcessAudio(volume=self.music_volume, sound_volume=self.sound_volume,
+                                      report=monitor.write if monitor else None)
+            self.window.push_handlers(on_close=self.stop_background_services, on_deactivate=self.on_input_deactivate)
+        if self.map_size >= 100 and self.ai_system.workers is None:
+            self.ai_system.workers = AIPlanningWorkers()
+
+    def stop_background_services(self):
+        self.runtime_diagnostics.stop_native_watchdog()
+        self.stop_music()
+        self.ai_system.close_workers()
+
+    def on_input_deactivate(self):
+        self.is_dragging = False
+        self.division_selection_drag_active = False
+        self.division_selection_drag_started = False
+        self.pending_map_click = None
+        self.active_pause_slider = None
+        self.country_slider_drag = False
+        self.army_plan_drag_active = False
+        self.keys_pressed.clear()
+
+    def stop_music(self):
+        if self.music is not None:
+            self.music.close()
+            self.music = None
+
+    @diagnose_frame("input_mouse_release")
     def on_mouse_release(self, x, y, button, modifiers):
+        if button in (arcade.MOUSE_BUTTON_RIGHT, arcade.MOUSE_BUTTON_MIDDLE):
+            self.is_dragging = False
         if self.country_dialog and not self.paused:
             self.country_slider_drag = False
             return
@@ -10553,6 +10554,7 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
         if button in (arcade.MOUSE_BUTTON_RIGHT, arcade.MOUSE_BUTTON_MIDDLE):
             self.is_dragging = False
 
+    @diagnose_frame("mouse_drag")
     def on_mouse_drag(self, x, y, dx, dy, buttons, modifiers):
         if self.country_dialog and not self.paused:
             if self.country_slider_drag:
@@ -10582,7 +10584,21 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             self.target_camera_y = self.drag_start_camera_y - (y - self.drag_start_y) / self.world_camera.zoom
             self.clamp_target_camera()
 
+    @diagnose_frame("mouse_motion")
     def on_mouse_motion(self, x, y, dx, dy):
+        self.last_pointer_position = (x, y)
+        if self.news_panel_contains(x, y):
+            self.hovered_tile = None
+            self.hovered_budget_summary = False
+            self.hovered_population_summary = False
+            self.hovered_resource_summary = False
+            self.hovered_warning_key = None
+            self.hovered_top_nav_key = None
+            self.hovered_time_button = None
+            self.hovered_hex_panel_close = False
+            self.hovered_hex_build_button = False
+            self.hovered_hex_specialization_button = False
+            return
         if self.country_dialog and not self.paused:
             self.hovered_tile = None
             return
@@ -10734,7 +10750,10 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
             self.hovered_tile = self.get_tile_at(world_x, world_y)
             self.last_mouse_check = current_time
 
+    @diagnose_frame("input_mouse_scroll")
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
+        if self.ai_debug_panel.wheel(self, x, y, scroll_y):
+            return
         if self.handle_news_scroll(x, y, scroll_y):
             return
         if self.country_dialog and not self.paused:
@@ -10817,7 +10836,12 @@ class Game(DivisionPanelMixin, NewsPanelMixin, CountryPanelMixin, AirSystemMixin
                 return tile
         return None
 
+    @diagnose_frame("input_key_press")
     def on_key_press(self, key, modifiers):
+        if key == arcade.key.F4:
+            self.ai_debug_panel.open = not self.ai_debug_panel.open
+            self.ai_debug_panel.next_refresh = 0
+            return
         if key == arcade.key.ESCAPE and getattr(self, "division_site_pick_mode", False):
             self.division_site_pick_mode = False
             self.recruitment.message = "Выбор гекса отменён"
@@ -10911,4 +10935,6 @@ def main():
 
 
 if __name__ == "__main__":
+    from multiprocessing import freeze_support
+    freeze_support()
     main()

@@ -34,6 +34,7 @@ class AITask:
     reason: str = ""
     retry_hour: float = 0
     command_id: int | None = None
+    motivation: str = ""
 
 
 @dataclass
@@ -62,18 +63,31 @@ class BotState:
     course_bias: dict = field(default_factory=dict)
     offensive_focus: tuple | None = None
     next_peace_deployment: float = 0
+    next_air_refresh: float = 0
+    next_air_defense_move: float = 0
+    air_defense_targets: dict = field(default_factory=dict)
     biases: dict = field(default_factory=dict)
     reports: dict = field(default_factory=dict)
     reviews: dict = field(default_factory=dict)
     tasks: list = field(default_factory=list)
     assignments: dict = field(default_factory=dict)
+    hex_assignments: dict = field(default_factory=dict)
+    front_quotas: dict = field(default_factory=dict)
+    reserve_id: int | None = None
+    resting_ids: set = field(default_factory=set)
+    supply_target: tuple | None = None
     dependencies: dict = field(default_factory=dict)
     influence: dict = field(default_factory=dict)
     regions: dict = field(default_factory=dict)
     history: deque = field(default_factory=lambda: deque(maxlen=100))
     last_orders: dict = field(default_factory=dict)
+    last_order_reasons: dict = field(default_factory=dict)
     urgent: bool = False
     decision_sequence: int = 0
+    course_evidence: dict = field(default_factory=dict)
+    course_decision: dict = field(default_factory=dict)
+    expansion_candidates: list = field(default_factory=list)
+    expansion_observed_hour: float = 0
 
     def note(self, hour, kind, **data):
         self.decision_sequence += 1

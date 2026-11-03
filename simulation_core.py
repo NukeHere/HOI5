@@ -2,6 +2,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from math import ceil
+import time
 
 from Constants import SIMULATION_HOURS_PER_TICK, SIMULATION_REAL_SECONDS_PER_TICK, SIMULATION_START_TIME
 from game_models import MarketState
@@ -57,12 +58,15 @@ class LocalSimulationServer:
             execution_time += timedelta(days=7)
         return execution_time
 
-    def update(self, delta_time, step_callback=None):
+    def update(self, delta_time, step_callback=None, max_wall_seconds=None):
         self.process_pending_commands()
         if self.paused:
             return
 
         self.accumulator += delta_time
+        if max_wall_seconds is not None:
+            # A slow frame must not create an ever larger catch-up frame.
+            self.accumulator = min(self.accumulator, .5)
         hours_per_step = self.hours_per_tick
         if step_callback:
             # At speed 5, advance six hours every .0625 s instead of doing a full
@@ -73,8 +77,11 @@ class LocalSimulationServer:
         if ticks_to_process <= 0:
             return
 
-        self.accumulator = max(0, self.accumulator - ticks_to_process * seconds_per_step)
-        for _ in range(ticks_to_process):
+        started = time.perf_counter()
+        for index in range(ticks_to_process):
+            if index and max_wall_seconds is not None and time.perf_counter() - started >= max_wall_seconds:
+                break
+            self.accumulator = max(0, self.accumulator - seconds_per_step)
             self.tick_count += 1
             remaining = hours_per_step
             while remaining > 1e-9:

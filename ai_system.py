@@ -1,6 +1,6 @@
 """Server-owned baseline country AI. Expensive reviews intentionally span game days."""
 
-from collections import defaultdict
+from collections import defaultdict, Counter
 import math
 import random
 
@@ -8,6 +8,11 @@ from Constants import PRODUCTION_RECIPES, SIMULATION_START_TIME, TRADE_BASE_PRIC
 from simulation_core import SimulationCommand
 from ai_models import BotState, CountryReport, FlowLedger, Intelligence, AITask, Review, choose_close, division_vector
 from ai_regions import RegionMap
+from ai_fronts import deployment_posts
+from ai_supply import supply_site
+from ai_air_operations import configure_air_operations, reposition_air_defense
+from ai_workers import AIPlanningWorkers, regional_profiles
+from defense_infrastructure import air_defense_quote, enqueue_air_defense
 
 
 class CountryAI:
@@ -23,6 +28,7 @@ class CountryAI:
         self.units_by_tile = {}
         self.market_revision = 0
         self.balance_refresh = set()
+        self.workers = None
         for player in game.players:
             self.ledger.sample(player.id, 0)
             if player.is_human:
@@ -31,6 +37,7 @@ class CountryAI:
             self.bots[player.id] = BotState(player.id, rng, rng.uniform(0, 6),
                 rng.uniform(6, 24), rng.uniform(12, 72), rng.uniform(24, 168))
             self.bots[player.id].aggression = rng.random()
+            self.bots[player.id].air_defense_targets = dict(Counter(u.unit_class for u in player.air_defense_units))
             targets = [other for other in game.players if other.id != player.id and other.capital_tile]
             if targets:
                 self.bots[player.id].expansion_target = choose_close(rng, [
@@ -47,7 +54,33 @@ class CountryAI:
         return self.geography.controlled(player)
 
     def profiles(self, player):
+        if self.workers and not self.workers.closed:
+            rows = []
+            for tile in player.tiles:
+                key = self.game.tile_key(tile)
+                if key not in self.geography.tile_region:
+                    continue
+                flows = defaultdict(float)
+                for stage in (getattr(tile, "production_cache", {}) or {}).values():
+                    for resource, amount in stage.get("outputs", {}).items():
+                        flows[resource] += amount
+                neighbors = self.geography.neighbors[key]
+                rows.append((key, self.geography.tile_region[key], self.game.estimated_tile_population(tile) or 0,
+                    getattr(tile, "supply_score", 0), self.game.effective_building_coverage_map(tile), dict(flows),
+                    any(n.owner is not player and not self.game.is_water_tile(n) for n in neighbors),
+                    tuple(self.game.tile_key(n) for n in neighbors if n.owner is player and not self.game.is_water_tile(n))))
+            capital = self.game.tile_key(player.capital_tile) if player.capital_tile else None
+            result = self.workers.request(("regions", player.id), regional_profiles, (rows, player.id, capital), self.hour)
+            owned = {row[0] for row in rows}
+            if result is not None and {key for profile in result.values() for key in profile["tiles"]} == owned:
+                return self.profile_military(player, result)
+            bot = self.bots.get(player.id)
+            if bot and bot.regions and {key for profile in bot.regions.values() for key in profile["tiles"]} == owned:
+                return self.profile_military(player, bot.regions)
         profiles = {key: self.geography.profile(player, tiles) for key, tiles in self.controlled(player).items()}
+        return self.profile_military(player, profiles)
+
+    def profile_military(self, player, profiles):
         lookup = {tile: key for key, profile in profiles.items() for tile in profile["tiles"]}
         for profile in profiles.values():
             profile["military"] = defaultdict(float)
@@ -57,6 +90,11 @@ class CountryAI:
                 for key, value in division_vector(division).items():
                     profiles[region]["military"][key] += value
         return profiles
+
+    def close_workers(self):
+        if self.workers:
+            self.workers.close()
+            self.workers = None
 
     def economy_report(self, bot, target):
         game = self.game
@@ -81,6 +119,10 @@ class CountryAI:
         army = game.estimate_monthly_army_consumption(target)
         for key, amount in army.items():
             demand[key] += amount
+        for unit in target.air_defense_units:
+            ammo_capacity = max(unit.ammo_capacity, int(game.air_defense_class_data(unit.unit_class).get("ammo", 0)))
+            key = "light_aa_ammo" if unit.unit_class == "short_range_aa" else "anti_air_ammo"
+            demand[key] += max(0, ammo_capacity - unit.ammo) + ammo_capacity
         economy = {}
         for key in sorted(keys | set(capacity) | set(demand)):
             values = dict(capacity=capacity[key], required=demand[key],
@@ -141,6 +183,10 @@ class CountryAI:
                     bot.regions = self.profiles(player)
                     self.military_report(bot, player)
                     self.assign_forces(bot, player)
+                    self.supply_tasks(bot, player)
+                    self.defense_infrastructure_tasks(bot, player)
+                    if self.preparation_target(bot, player):
+                        self.prepare_for_war(bot, player)
                     bot.next_daily = now + 24
             if now >= bot.next_micro or bot.urgent:
                 with game.profiler.measure("ai_micro"):
@@ -253,6 +299,7 @@ class CountryAI:
 
     def course_candidates(self, bot, player):
         game = self.game
+        bot.course_evidence = {}
         wars = [p.id for p in game.players if game.countries_hostile(player, p)]
         if wars:
             return {"defense": (100, wars[0])}
@@ -268,6 +315,11 @@ class CountryAI:
             relation = game.politics.relation(player.id, target)
             report = bot.reports.get(target)
             power = report.military.get("attack").value if report and report.military.get("attack") else own_power
+            bot.course_evidence[target] = dict(own_attack=own_power, enemy_attack=power,
+                ratio=own_power / max(1, power), crisis=relation.crisis_level,
+                treaties=sorted(relation.treaties), aggression=bot.aggression,
+                war_ratio_threshold=1.15 - .25 * bot.aggression,
+                observed_hour=report.military["attack"].observed_hour if report and report.military.get("attack") else None)
             own_preparation = (player.id, target) in game.politics.war_goals
             if own_preparation and bot.course == "war_preparation" and bot.target_id == target and own_power >= power * .75:
                 options["war_preparation"] = (75, target)
@@ -283,9 +335,12 @@ class CountryAI:
 
     def select_course(self, bot, player, options):
         # Revalidate emergencies now rather than blindly publish a several-days-old proposal.
+        proposal_evidence = bot.course_evidence
         fresh = self.course_candidates(bot, player)
         if "defense" in fresh or "recovery" in fresh:
             options = fresh
+        else:
+            bot.course_evidence = proposal_evidence
         candidates = []
         for course, (score, target) in options.items():
             score += bot.course_bias.get(course, 0)
@@ -295,17 +350,21 @@ class CountryAI:
                 score -= 20
             candidates.append((score, (course, target)))
         selection = choose_close(bot.rng, candidates)
+        bot.course_decision = dict(hour=self.hour, selected=selection,
+            candidates=[dict(score=score, course=value[0], target=value[1]) for score, value in candidates],
+            continuity_bonus=10, early_change_penalty=20, commitment_hours=1440)
         if selection and selection != (bot.course, bot.target_id):
             bot.course, bot.target_id = selection
             bot.course_since = self.hour
             bot.note(self.hour, "course", course=bot.course, target=bot.target_id)
 
-    def task(self, bot, kind, region_id=None, **payload):
+    def task(self, bot, kind, region_id=None, motivation="", **payload):
         active = [t for t in bot.tasks if t.status in ("planned", "blocked", "executing", "waiting_market", "waiting_offer")]
         if len(active) >= 12 or any(t.kind == kind and t.region_id == region_id and
                                   all(t.payload.get(k) == v for k, v in payload.items()) for t in active):
             return
         bot.tasks.append(AITask(self.next_task_id, kind, region_id, payload, self.hour))
+        bot.tasks[-1].motivation = motivation
         self.next_task_id += 1
         finished = [t for t in bot.tasks if t not in active and t is not bot.tasks[-1]]
         for old in finished[:max(0, len(bot.tasks) - 60)]:
@@ -327,6 +386,7 @@ class CountryAI:
         if not report:
             return
         money, free = self.available(player)
+        preparing = bool(self.preparation_target(bot, player))
         shortages = []
         trade_candidates = []
         for key, data in report.economy.items():
@@ -341,29 +401,46 @@ class CountryAI:
                 shortages.append((score, key))
                 desired = max(deficit, required * .5 - stock)
                 trade_candidates.append((score, key, "buy", desired))
-            elif stock > max(1000, required * 3) and capacity > required and bot.course != "war_preparation":
+            elif stock > max(1000, required * 3) and capacity > required and not preparing:
                 amount = min((stock - required * 3) * .15, capacity - required)
                 trade_candidates.append((.1, key, "sell", amount))
         for score, key, mode, amount in sorted(trade_candidates, reverse=True)[:6]:
-            self.task(bot, "trade", resource=key, mode=mode, amount=amount)
+            self.task(bot, "trade", resource=key, mode=mode, amount=amount,
+                motivation=f"{'Дефицит' if mode == 'buy' else 'Избыток'} {key}; полезность {score:.3f}; "
+                f"нужно {report.economy[key]['required'].value:.1f}/мес, "
+                f"мощность {report.economy[key]['capacity'].value:.1f}/мес, запас {report.economy[key]['stock'].value:.1f}")
         self.recruitment_tasks(bot, player, money, free)
         if bot.course == "development":
             # Neutral land uses the same capture rules as player orders; this also allows
             # initially separated countries to reach one another instead of waiting forever.
-            expansion = []
+            expansion = {}
+            needs = {key: max(0, values["required"].value * .5 - values["stock"].value)
+                     / max(1, values["required"].value * .5)
+                     for key, values in report.economy.items() if values["required"].value > 0}
             focus = game.player_by_id(bot.expansion_target) if bot.expansion_target is not None else None
             for tile in player.tiles:
                 for neighbor in self.geography.neighbors.get(game.tile_key(tile), ()):
                     if neighbor.owner is None and not game.is_water_tile(neighbor):
                         key = game.tile_key(neighbor)
-                        score = .5 + getattr(neighbor, "passability", 0)
-                        score += game.agriculture_score(neighbor) * .3
+                        terrain = .5 + getattr(neighbor, "passability", 0)
+                        agriculture = game.agriculture_score(neighbor) * .3
+                        resources = {name: min(1, math.log1p(max(0, mass)) / math.log(1_000_001)) * needs.get(name, 0) * 4
+                                     for name, _, mass in neighbor.resources}
+                        direction = 0
                         if focus and focus.tiles:
-                            score += 8 / (1 + game.hex_distance(neighbor, focus.capital_tile))
-                        expansion.append((score, key))
-            key = choose_close(bot.rng, expansion)
+                            direction = 8 / (1 + game.hex_distance(neighbor, focus.capital_tile))
+                        score = terrain + agriculture + direction + sum(resources.values())
+                        expansion[key] = dict(score=score, tile=key, terrain=terrain, agriculture=agriculture,
+                            direction=direction, resources={k: v for k, v in resources.items() if v > 0})
+            bot.expansion_candidates = sorted(expansion.values(), key=lambda row: -row["score"])[:12]
+            bot.expansion_observed_hour = self.hour
+            key = choose_close(bot.rng, [(row["score"], key) for key, row in expansion.items()])
             if key is not None and not any(t.kind == "claim" and t.status in ("planned", "blocked", "executing") for t in bot.tasks):
-                self.task(bot, "claim", tile_key=key)
+                row = expansion[key]
+                self.task(bot, "claim", tile_key=key,
+                    motivation=f"Нейтральная клетка {key}: оценка {row['score']:.2f}; "
+                    f"местность {row['terrain']:.2f}, сельхоз. {row['agriculture']:.2f}, "
+                    f"направление к соседу {row['direction']:.2f}, ресурсы {row['resources']}")
         if len(player.construction_queue) >= 4 or money <= 0:
             return
         resource = choose_close(bot.rng, shortages)
@@ -392,16 +469,101 @@ class CountryAI:
                 region = choose_close(bot.rng, front_regions)
         if region:
             profile = bot.regions[region]
-            if profile["supply"] < .55:
-                building, sector = "supply_depot", None
-            self.task(bot, "build", region, building=building, sector=sector)
+            self.task(bot, "build", region, building=building, sector=sector,
+                motivation=f"Выбран дефицит {resource or 'нет, общее развитие'}; здание {building}; район {region}")
             if sector:
                 self.task(bot, "specialize", region, sector=sector)
 
+    def preparation_target(self, bot, player):
+        game = self.game
+        if any(game.countries_hostile(player, other) for other in game.players):
+            return None
+        goals = [target for actor, target in game.politics.war_goals if actor == player.id]
+        target = bot.target_id if bot.target_id in goals else (min(goals) if goals else
+                 bot.target_id if bot.course == "war_preparation" else None)
+        other = game.player_by_id(target) if target is not None else None
+        return other if other and other.tiles else None
+
+    def military_reserve(self, player, preparing=False, extra=None):
+        """Projected stock after training, including divisions already in the queue."""
+        needs = defaultdict(float)
+        templates = [(d.supply_capacity, d.combat_supply_use) for d in player.divisions]
+        templates += [(p["template"]["supply_capacity"], p["template"]["combat_supply_use"])
+                      for p in self.game.recruitment.queues[player.id]]
+        if extra:
+            templates.append((extra["supply_capacity"], extra["combat_supply_use"]))
+        for capacity, combat_use in templates:
+            for key, amount in capacity.items():
+                needs[key] += amount * (.5 if preparing else .15)
+            for key, amount in combat_use.items():
+                needs[key] += amount * (48 if preparing else 12)
+        if preparing:
+            for unit in player.air_defense_units:
+                key = "light_aa_ammo" if unit.unit_class == "short_range_aa" else "anti_air_ammo"
+                needs[key] += max(0, unit.ammo_capacity * 2 - unit.ammo)
+        return needs
+
+    def prepare_for_war(self, bot, player):
+        game = self.game
+        target = self.preparation_target(bot, player)
+        if target is None:
+            return
+        reserve = self.military_reserve(player, preparing=True)
+        for contract in list(player.trade_contracts):
+            key = contract["resource"]
+            if contract["mode"] == "sell" and reserve.get(key, 0) > 0:
+                if game.adjust_trade_contract(player, key, "sell", -contract["amount"], refresh=False):
+                    self.balance_refresh.add(player.id)
+        money, free = self.available(player)
+        shortages = sorted(((amount - free.get(key, 0)) / amount, key, amount - free.get(key, 0))
+                           for key, amount in reserve.items() if amount > max(0, free.get(key, 0)))
+        for _, key, missing in reversed(shortages[-4:]):
+            if not any(t.kind == "trade" and t.payload.get("resource") == key
+                       and t.payload.get("mode") == "buy" and t.status in
+                       ("planned", "blocked", "executing", "waiting_market") for t in bot.tasks):
+                self.task(bot, "trade", resource=key, mode="buy", amount=missing,
+                          motivation="Мобилизационный запас перед войной")
+        self.recruitment_tasks(bot, player, money, free)
+        front = self.preparation_front(player, target)
+        if front:
+            center = max(front, key=lambda t: (t.supply_score, -game.hex_distance(t, target.capital_tile)))
+            sites = [t for t in (center, *game.neighbor_tiles(center)) if t.owner is player
+                     and not game.is_water_tile(t) and t.supply_score >= .25]
+            if sites:
+                reposition_air_defense(game, bot, player, max(sites, key=lambda t: t.supply_score), self.hour)
+        self.diplomatic_tasks(bot, player)
+
+    def preparation_front(self, player, target):
+        game = self.game
+        return [tile for tile in player.tiles if not game.is_water_tile(tile)
+                and any(n.owner is target and not game.is_water_tile(n) for n in game.neighbor_tiles(tile))]
+
+    def war_preparation_blocker(self, player, target):
+        game = self.game
+        front = self.preparation_front(player, target)
+        if not front:
+            return "Нет сухопутного фронта"
+        goal_day = game.politics.war_goals.get((player.id, target.id))
+        if goal_day is not None and game.politics.day < goal_day + 14:
+            if any(0 < project["cost"]["days"] * 24 - project["hours"] <= 14 * 24
+                   for project in game.recruitment.queues[player.id]):
+                return "Завершается подготовка мобилизованных дивизий"
+        near = {game.tile_key(t) for tile in front for t in (tile, *game.neighbor_tiles(tile))}
+        ready = [d for d in player.divisions if d.tile and game.tile_key(d.tile) in near and not d.path
+                 and d.organization >= d.max_organization * .65 and game.division_supply_ratio(d) >= .25]
+        if len(ready) < max(1, (len(player.divisions) + 2) // 3):
+            return "Дивизии ещё не готовы на снабжаемых позициях"
+        if not any(u.ammo > 0 and u.fire_range_cells > 0 and game.air_defense_unit_operational(u)
+                   and any(game.hex_distance(u.tile, d.tile) <= u.fire_range_cells for d in ready)
+                   for u in player.air_defense_units):
+            return "Передовая ещё без действующего ПВО"
+        stocks = self.military_reserve(player)
+        if any(game.stockpile_amount(player, key) < amount for key, amount in stocks.items()):
+            return "Недостаточно минимального запаса снабжения и боеприпасов"
+        return None
+
     def recruitment_tasks(self, bot, player, money, free):
         service = self.game.recruitment
-        if service.queues[player.id] or len(player.divisions) >= service.target_armies[player.id]:
-            return
         if service.site(player) is None:
             return
         options = []
@@ -409,18 +571,103 @@ class CountryAI:
             cost = service.quote(template)
             if cost["money"] > money or cost["manpower"] > player.manpower_reserve:
                 continue
-            coverage = min((free.get(k, 0) / max(1, n) for k, n in cost["equipment"].items()), default=0)
+            reserve = self.military_reserve(player, extra=template)
+            coverage = min((free.get(k, 0) / max(1, reserve.get(k, 0) + cost["equipment"].get(k, 0))
+                            for k in reserve.keys() | cost["equipment"].keys()), default=0)
             options.append((coverage, key))
-        key = choose_close(bot.rng, options)
+        key = choose_close(bot.rng, [option for option in options if option[0] >= 1] or options)
         if key is None:
             return
         cost = service.quote(service.archetypes[key])
-        shortages = [(n - free.get(k, 0), k) for k, n in cost["equipment"].items() if free.get(k, 0) < n]
+        reserve = self.military_reserve(player, extra=service.archetypes[key])
+        shortages = [(n + cost["equipment"].get(k, 0) - free.get(k, 0), k)
+                     for k, n in reserve.items() if free.get(k, 0) < n + cost["equipment"].get(k, 0)]
         if shortages:
             for missing, resource in sorted(shortages, reverse=True)[:4]:
                 self.task(bot, "trade", resource=resource, mode="buy", amount=missing)
         else:
-            self.task(bot, "recruit", key=key)
+            self.task(bot, "recruit", key=key, batch=True, motivation="Оснащение и запас снабжения для всей армии")
+
+    def supply_tasks(self, bot, player):
+        projects = [p for p in player.construction_queue if p["building"] == "supply_depot"]
+        for project in projects:
+            for resource, amount in project.get("resource_costs", {}).items():
+                missing = amount - project.get("resources_spent", {}).get(resource, 0) - self.game.stockpile_amount(player, resource)
+                if missing > 0 and not any(t.kind == "trade" and t.payload.get("mode") == "buy"
+                        and t.payload.get("resource") == resource and t.status in ("planned", "blocked", "waiting_market") for t in bot.tasks):
+                    self.task(bot, "trade", resource=resource, mode="buy", amount=missing,
+                              motivation="Материалы для приоритетного фронтового снабжения")
+        sites = {self.game.tile_key(p["tile"]) for p in projects if p.get("project_type") != "repair"}
+        critical = [d.tile for d in player.divisions if d.tile and d.tile.owner is player
+                    and getattr(d.tile, "supply_score", 0) < .3]
+        protected = any(not p.get("paused") and p.get("project_type") != "repair"
+                        and any(self.game.hex_distance(p["tile"], tile) <= 3 for tile in critical) for p in projects)
+        if len(sites) >= 2 or protected or (sites and not critical):
+            return
+        selected = supply_site(self, bot, player)
+        if selected is None:
+            bot.supply_target = None
+            return
+        gain, key = selected
+        bot.supply_target = key
+        active = [t for t in bot.tasks if t.status in ("planned", "blocked") and t.kind == "supply"]
+        if active:
+            return
+        if len([t for t in bot.tasks if t.status in ("planned", "blocked", "executing", "waiting_market", "waiting_offer")]) >= 12:
+            replace = next((t for t in bot.tasks if t.status in ("planned", "blocked") and t.kind != "supply"), None)
+            if replace:
+                replace.status, replace.reason = "cancelled", "Приоритет фронтового снабжения"
+        before = self.next_task_id
+        self.task(bot, "supply", tile_key=key,
+            motivation=f"Недостаток снабжения занятых/планируемых позиций; ожидаемый взвешенный прирост {gain:.3f}")
+        if self.next_task_id > before:
+            task = bot.tasks.pop()
+            bot.tasks.insert(0, task)
+            bot.note(self.hour, "supply_plan", tile=key, expected_weighted_gain=round(gain, 3))
+
+    def defense_infrastructure_tasks(self, bot, player):
+        game = self.game
+        counts = Counter(u.unit_class for u in player.air_defense_units if u.health > 0)
+        queues = getattr(game, "air_defense_replacements", {})
+        if player.id not in queues:
+            targets = dict(bot.air_defense_targets)
+            if self.preparation_target(bot, player) or any(game.countries_hostile(player, p) for p in game.players):
+                targets["manpads_team"] = targets.get("manpads_team", 0) + max(1, len(player.divisions) // 6)
+            choices = []
+            for kind, count in targets.items():
+                if counts[kind] >= count:
+                    continue
+                quote = air_defense_quote(game, kind)
+                lacks = {key: amount - game.stockpile_amount(player, key)
+                         for key, amount in quote["resources"].items() if game.stockpile_amount(player, key) < amount}
+                choices.append((kind, quote, lacks))
+            missing, quote, shortages = min(choices, key=lambda row: len(row[2]), default=(None, None, {}))
+            if missing:
+                for key, amount in shortages.items():
+                    self.task(bot, "trade", resource=key, mode="buy", amount=amount, motivation="Восстановление уничтоженной ПВО")
+                if not shortages and player.budget >= quote["money"] + 5_000_000:
+                    active = [t for t in bot.tasks if t.status in ("planned", "blocked", "executing", "waiting_market", "waiting_offer")]
+                    if len(active) >= 12:
+                        expendable = next((t for t in active if t.status in ("planned", "blocked")
+                                           and t.kind in ("intelligence", "specialize", "build")), None)
+                        if expendable:
+                            expendable.status, expendable.reason = "cancelled", "Приоритет восстановления ПВО"
+                    self.task(bot, "rebuild_air_defense", unit_class=missing, motivation="Восполнение потери ПВО до исходного состава")
+        if not any(game.countries_hostile(player, p) for p in game.players):
+            return
+        if any(p["building"] == "fortification" for p in player.construction_queue):
+            return
+        if any(t.kind == "build" and t.payload.get("building") == "fortification"
+               and t.status in ("planned", "blocked", "executing") for t in bot.tasks):
+            return
+        positions = Counter(game.tile_key(d.tile) for d in player.divisions if d.tile and d.tile.owner is player)
+        candidates = [t for t in player.tiles if positions[game.tile_key(t)]
+            and getattr(t, "supply_score", 0) >= .25 and t.building_coverage.get("fortification", 0) < .25
+            and not game.is_water_tile(t) and any(n.owner and game.countries_hostile(player, n.owner) for n in game.neighbor_tiles(t))]
+        if candidates:
+            tile = max(candidates, key=lambda t: positions[game.tile_key(t)] + getattr(t, "supply_score", 0))
+            self.task(bot, "build", building="fortification", tile_key=game.tile_key(tile),
+                      motivation="Закрепление занятой снабжаемой позиции на фронте; снабжение имеет приоритет")
 
     def diplomatic_tasks(self, bot, player):
         game = self.game
@@ -429,10 +676,18 @@ class CountryAI:
             bot.course = "defense"
             if player.budget < 0 or player.war_support < .4:
                 self.task(bot, "politics", target=wars[0].id, action="peace")
-        elif bot.course == "war_preparation" and bot.target_id is not None:
-            action = "war" if (player.id, bot.target_id) in game.politics.war_goals else "justify"
-            if not game.politics.reason(player.id, bot.target_id, action):
-                self.task(bot, "politics", target=bot.target_id, action=action)
+        elif target := self.preparation_target(bot, player):
+            action = "war" if (player.id, target.id) in game.politics.war_goals else "justify"
+            if not game.politics.reason(player.id, target.id, action):
+                blocker = self.war_preparation_blocker(player, target) if action == "war" else None
+                if blocker:
+                    bot.note(self.hour, "war_preparation", target=target.id, reason=blocker)
+                    return
+                self.task(bot, "politics", target=target.id, action=action,
+                    motivation=f"Курс war_preparation, цель {bot.target_id}; "
+                    f"оценки при выборе курса: {bot.course_evidence.get(bot.target_id, {})}; "
+                    + ("цель войны подготовлена, юридические условия выполнены" if action == "war"
+                       else "начинаем 30-дневное оправдание цели войны"))
         else:
             candidates = []
             for other in game.players:
@@ -470,12 +725,15 @@ class CountryAI:
     def air_tasks(self, bot, player):
         if not bot.regions:
             return
-        region = max(bot.regions, key=lambda r: bot.regions[r]["importance"])
-        self.task(bot, "air", region)
+        frontline = [r for r, p in bot.regions.items()
+                     if any(n.owner and self.game.countries_hostile(player, n.owner)
+                            for key in p["borders"] for n in self.geography.neighbors[key])]
+        region = max(frontline or list(bot.regions), key=lambda r: bot.regions[r]["importance"])
+        self.task(bot, "air", region, motivation=f"Прикрытие района {region}; приоритет боёв и вражеских целей при войне")
 
-    def send(self, bot, operation, task=None, **payload):
+    def send(self, bot, operation, task=None, rationale="", **payload):
         command = SimulationCommand("ai_action", bot.country_id,
-                                    dict(operation=operation, **payload), client_id="server_ai")
+                                    dict(operation=operation, _rationale=rationale or (task.motivation if task else ""), **payload), client_id="server_ai")
         sequence = self.game.simulation_server.submit_command(command)
         self.pending[sequence] = (command, task)
         if task:
@@ -511,7 +769,7 @@ class CountryAI:
                     task.status = "succeeded" if filled > 0 else "failed"
                     task.reason = f"Фактически исполнено {filled:.1f}; заявка может исполняться частично"
                 continue
-            if task.status == "executing" and task.kind == "build":
+            if task.status == "executing" and task.kind in ("build", "supply"):
                 tile = game.tile_for_key(task.payload.get("tile_key"))
                 building = task.payload["building"]
                 if not tile or tile.owner is not player:
@@ -529,13 +787,13 @@ class CountryAI:
             payload = dict(task.payload)
             if task.kind == "claim":
                 tile = game.tile_for_key(payload["tile_key"])
-                units = [d for d in player.divisions if not d.path and not d.battle_id and d.route_mode != "retreat"
+                units = [d for d in player.divisions if d.id not in bot.resting_ids and not d.path and not d.battle_id and d.route_mode != "retreat"
                          and d.organization >= d.max_organization * .5]
                 if not tile or tile.owner is not None or not units:
                     task.status, task.reason, task.retry_hour = "blocked", "Нет свободного исполнителя или нейтральной цели", self.hour + 24
                     continue
                 payload["division_id"] = min(units, key=lambda d: game.hex_distance(d.tile, tile)).id
-            if task.kind == "build":
+            if task.kind == "build" and "tile_key" not in payload:
                 choices = []
                 current = self.controlled(player)
                 for key in current.get(task.region_id, ()):
@@ -575,17 +833,21 @@ class CountryAI:
         bot = self.bots[command.player_id]
         player = self.game.player_by_id(command.player_id)
         ok, reason = self.apply_action(bot, player, command.payload)
+        if ok and command.payload.get("division_id") is not None and command.payload.get("_rationale"):
+            bot.last_order_reasons[command.payload["division_id"]] = command.payload["_rationale"]
         if task:
             task.reason = reason
-            task.status = ("executing" if task.kind in ("build", "claim") else
+            task.status = ("executing" if task.kind in ("build", "supply", "claim") else
                            "waiting_market" if task.kind == "trade" else "succeeded") if ok else "blocked"
             if ok and task.kind == "trade":
                 task.payload["market_tick"] = self.game.simulation_server.market_tick_count
             if ok and task.kind == "politics" and any(o[0] == player.id and o[1] == task.payload["target"]
                                                       and o[2] == task.payload["action"] for o in self.game.politics.pending):
                 task.status = "waiting_offer"
-            if ok and task.kind == "build":
+            if ok and task.kind in ("build", "supply"):
                 task.payload["tile_key"] = tuple(command.payload["tile_key"])
+                if task.kind == "supply":
+                    task.payload["building"] = "supply_depot"
                 tile = self.game.tile_for_key(task.payload["tile_key"])
                 task.payload["target_coverage"] = self.game.queued_target_coverage(player, tile, task.payload["building"])
         bot.note(self.hour, "command", operation=command.payload["operation"], accepted=ok, reason=reason,
@@ -595,23 +857,69 @@ class CountryAI:
     def apply_action(self, bot, player, payload):
         game = self.game
         operation = payload["operation"]
+        if operation == "rebuild_air_defense":
+            return enqueue_air_defense(game, player, payload["unit_class"])
+        if operation == "supply":
+            tile = game.tile_for_key(payload.get("tile_key"))
+            if not tile or tile.owner is not player:
+                return False, "Позиция снабжения потеряна"
+            if any(p["tile"] is tile and p["building"] == "supply_depot" for p in player.construction_queue):
+                return False, "На позиции уже есть проект снабжения"
+            reason = game.construction_tile_block_reason(player, tile, "supply_depot")
+            if reason:
+                return False, reason
+            cost = game.construction_cost(player, tile, "supply_depot")
+            if not cost or cost["money_cost"] > max(0, player.budget - 5_000_000):
+                return False, "Недостаточно денег на фронтовой склад"
+            resources = {key: amount for bucket in player.resource_stockpiles.values() for key, amount in bucket.items()}
+            if cost:
+                for key, required in cost["resource_costs"].items():
+                    if resources.get(key, 0) < required:
+                        self.task(bot, "trade", resource=key, mode="buy", amount=required - resources.get(key, 0))
+            ok = game.enqueue_construction(player, tile, "supply_depot", refresh=False)
+            reason = "Фронтовой склад поставлен первым; деньги и материалы списываются правилами строительства" if ok else "Строительство отклонено"
+            if ok:
+                project = player.construction_queue.pop()
+                player.construction_queue.insert(0, project)
+            return ok, reason
         if operation == "recruit":
             service = game.recruitment
             key = payload.get("key")
-            if key not in service.archetypes or service.queues[player.id]:
-                return False, "Подготовка уже идёт или шаблон недоступен"
-            if len(player.divisions) >= service.target_armies[player.id]:
-                return False, "Численность армии восстановлена"
+            if key not in service.archetypes:
+                return False, "Шаблон недоступен"
             cost = service.quote(service.archetypes[key])
             money, resources = self.available(player)
-            if money < cost["money"] or any(resources.get(k, 0) < n for k, n in cost["equipment"].items()):
+            existing = self.military_reserve(player)
+            reserve = self.military_reserve(player, extra=service.archetypes[key])
+            count = min(int(money // max(1, cost["money"])),
+                        int(player.manpower_reserve // max(1, cost["manpower"])))
+            for k in reserve.keys() | cost["equipment"].keys():
+                current = existing.get(k, 0)
+                per_division = reserve.get(k, 0) - current + cost["equipment"].get(k, 0)
+                free = resources.get(k, 0) - current
+                if free < 0:
+                    count = 0
+                elif per_division > 0:
+                    count = min(count, int((free + 1e-8) / per_division))
+            if count <= 0:
                 return False, "Средства или оснащение зарезервированы"
-            return service.enqueue(player, key, service.site(player))
+            tile = service.site(player)
+            started = 0
+            for _ in range(count if payload.get("batch") else 1):
+                ok, reason = service.enqueue(player, key, tile)
+                if not ok:
+                    return (True, f"Начата подготовка дивизий: {started}") if started else (False, reason)
+                started += 1
+            return True, f"Начата подготовка дивизий: {started}"
         if operation == "politics":
             reason = game.politics.reason(player.id, payload["target"], payload["action"],
                                          payload.get("amount"), payload.get("program_term", "ongoing"))
             if reason:
                 return False, reason
+            if payload["action"] == "war":
+                blocker = self.war_preparation_blocker(player, game.player_by_id(payload["target"]))
+                if blocker:
+                    return False, blocker
             quote = game.politics.quote(player.id, payload["target"], payload["action"],
                                        payload.get("amount"), payload.get("program_term", "ongoing"))
             money, resources = self.available(player)
@@ -632,6 +940,8 @@ class CountryAI:
         if operation == "trade":
             key, mode = payload["resource"], payload["mode"]
             amount = max(0, payload["amount"])
+            if mode == "sell" and self.preparation_target(bot, player):
+                return False, "Экспорт приостановлен на время мобилизации"
             money, resources = self.available(player)
             if mode == "buy":
                 committed = sum(c["amount"] * game.trade_unit_price(player, c["resource"], "buy")
@@ -680,29 +990,35 @@ class CountryAI:
             if not members:
                 return False, "Район недоступен"
             center = game.tile_for_key(members[len(members) // 2])
+            combat = any(game.countries_hostile(player, p) for p in game.players)
             # Starting aircraft are in the national stockpile, not already in wings.
             # Deploy existing equipment through the normal capacity/stock checks.
-            for aircraft_type, count in sorted(player.aircraft_stockpile.items()):
+            aircraft = sorted(player.aircraft_stockpile.items(), key=lambda item: (
+                -int("air_superiority" in game.aircraft_type_data(item[0]).get("allowed_missions", [])),
+                -int("cas" in game.aircraft_type_data(item[0]).get("allowed_missions", [])), item[0]))
+            for aircraft_type, count in aircraft:
                 if len(player.air_wings) >= 2:
                     break
+                allowed = game.aircraft_type_data(aircraft_type).get("allowed_missions", [])
+                if not set(allowed).intersection({"air_superiority", "intercept", "patrol", "cas", "strategic_strike"}):
+                    continue
                 if count > 0 and not any(aircraft_type in w.aircraft_composition for w in player.air_wings):
                     game.create_air_wing_from_stockpile(player, aircraft_type, min(8, count))
             for wing in player.air_wings:
                 allowed = set()
                 for kind in (wing.aircraft_composition or {wing.aircraft_type: 1}):
                     allowed.update(game.aircraft_type_data(kind).get("allowed_missions", []))
-                missions = [m for m in ("air_superiority", "intercept", "cas") if m in allowed]
+                missions = [m for m in ("air_superiority", "intercept", "patrol", "cas", "strategic_strike") if m in allowed]
                 if missions:
-                    wing.enabled_missions = missions
-                    wing.mission = missions[0]
-                    wing.operation_area_tile_keys = list(members)
+                    configure_air_operations(game, bot, player, wing, members, combat)
+                    bases = [b.tile for b in player.airbases if b.owner is player
+                             and game.air_wing_fits_base(wing, b.tile)[0]]
+                    if bases and wing.base_tile:
+                        base = min(bases, key=lambda t: game.hex_distance(t, center))
+                        if game.hex_distance(base, center) + 2 < game.hex_distance(wing.base_tile, center):
+                            game.rebase_air_wing(wing, base)
             game.air_asset_revision += 1
-            for unit in player.air_defense_units:
-                if not unit.path and game.air_defense_unit_is_movable(unit) and game.hex_distance(unit.tile, center) > 2:
-                    ok, message = game.move_air_defense_unit(unit, center)
-                    if ok:
-                        return True, "Миссии назначены; " + message
-            return True, "Район прикрытия назначен"
+            return True, "Миссии назначены; " + reposition_air_defense(game, bot, player, center, self.hour)
         if operation in ("move", "attack", "withdraw", "claim"):
             division = game.division_by_id(payload["division_id"])
             tile = game.tile_for_key(payload["tile_key"])
@@ -742,62 +1058,18 @@ class CountryAI:
         return [d for key in keys for d in self.units_by_tile.get(key, ()) if game.countries_hostile(player, d.owner)]
 
     def assign_forces(self, bot, player):
-        """Macro chooses districts and force quotas; tactical chooses actual hexes."""
+        """Macro records regional demand; actual reachable hex posts are tactical."""
         game = self.game
-        if not bot.regions:
-            bot.assignments = {}
-            return
-        candidates = list(player.divisions)
-        assignments = {}
-        requests = []
-        focus_candidates = []
-        for region, profile in bot.regions.items():
-            enemies = {}
-            hostile_border = False
-            for key in profile["borders"]:
-                tile = game.tile_for_key(key)
-                for enemy in self.nearby_enemies(player, tile):
-                    enemies[enemy.id] = enemy
-                hostile_border |= any(n.owner and game.countries_hostile(player, n.owner)
-                                      for n in self.geography.neighbors[key])
-                if any(n.owner and game.countries_hostile(player, n.owner) for n in self.geography.neighbors[key]):
-                    focus_candidates.append((max(.01, getattr(tile, "supply_score", 0)) ** 2, (region, key)))
+        region_for = {key: region for region, profile in bot.regions.items() for key in profile["tiles"]}
+        bot.assignments = {d.id: region_for.get(bot.hex_assignments.get(d.id, game.tile_key(d.tile)))
+                           for d in player.divisions if d.tile}
+        at_war = any(game.countries_hostile(player, other) for other in game.players)
+        for profile in bot.regions.values():
+            enemies = ({d.id: d for key in profile["borders"]
+                        for d in self.nearby_enemies(player, game.tile_for_key(key))} if at_war else {})
             threat = sum(division_vector(d)["attack"] for d in enemies.values())
             profile["threat"] = threat
-            profile["desired_defense"] = max(12, threat * 1.15) if hostile_border or enemies else 0
-            if profile["desired_defense"]:
-                requests.append((profile["importance"] + threat * 2, region))
-        focus_region = None
-        if bot.aggression >= .3 and len(player.divisions) >= 5 and focus_candidates:
-            current = next((item for score, item in focus_candidates if item[1] == bot.offensive_focus), None)
-            focus_region, bot.offensive_focus = current or choose_close(bot.rng, focus_candidates)
-            average_defense = sum(division_vector(d)["defense"] for d in player.divisions) / len(player.divisions)
-            bot.regions[focus_region]["desired_defense"] = max(bot.regions[focus_region]["desired_defense"], average_defense * 4)
-        else:
-            bot.offensive_focus = None
-        reserve = max(1, len(candidates) // 5)
-        for score, region in sorted(requests, reverse=True):
-            profile = bot.regions[region]
-            center = game.tile_for_key(profile["tiles"][0])
-            total = 0
-            while total < profile["desired_defense"] and len(candidates) > reserve:
-                division = min(candidates, key=lambda d: game.hex_distance(d.tile, center) / max(.1, d.speed)
-                               - division_vector(d)["defense"] * .1
-                               - (3 if bot.assignments.get(d.id) == region else 0))
-                candidates.remove(division)
-                assignments[division.id] = region
-                total += division_vector(division)["defense"]
-        counts = defaultdict(int)
-        for region in assignments.values():
-            counts[region] += 1
-        for index, division in enumerate(candidates):
-            choices = [(profile["importance"] / (1 + counts[region]) +
-                        (2 if bot.assignments.get(division.id) == region else 0), region)
-                       for region, profile in bot.regions.items()]
-            region = focus_region if focus_region is not None and index >= reserve else choose_close(bot.rng, choices)
-            assignments[division.id] = region
-            counts[region] += 1
-        bot.assignments = assignments
+            profile["desired_defense"] = max(12, threat * 1.15) if enemies else 0
 
     def tactical(self, bot, player):
         game = self.game
@@ -806,23 +1078,13 @@ class CountryAI:
             return
         if not wars:
             bot.next_peace_deployment = self.hour + 48
-        if wars and bot.course not in ("defense", "war_preparation"):
+        if wars and bot.course != "defense":
             bot.course, bot.target_id, bot.course_since = "defense", wars[0].id, self.hour
             bot.note(self.hour, "emergency_course", target=wars[0].id)
-        borders = []
-        border_regions = {}
         positions = self.controlled(player)
-        for region, members in (positions.items() if wars else ()):
-            profile = bot.regions.get(region, {})
-            for key in profile.get("borders", members):
-                tile = game.tile_for_key(key)
-                enemies = self.nearby_enemies(player, tile)
-                adjacent_hostile = any(n.owner and game.countries_hostile(player, n.owner) for n in self.geography.neighbors[key])
-                if enemies or adjacent_hostile:
-                    threat = sum(division_vector(d)["attack"] for d in enemies)
-                    borders.append((threat + 2 + profile.get("importance", 0) * .15 +
-                                    (100 if key == bot.offensive_focus else 0), key, threat))
-                    border_regions[key] = region
+        if wars and self.hour >= bot.next_air_refresh:
+            self.air_tasks(bot, player)
+            bot.next_air_refresh = self.hour + 24
         used = set()
         # First prevent immediate local traps; this path is never deferred by the weekly review.
         for division in (player.divisions if wars else ()):
@@ -836,54 +1098,71 @@ class CountryAI:
                                 self.units_by_tile.get(game.tile_key(division.tile), ()) if d.owner is player)
             hostile_sides = sum(bool(n.owner and game.countries_hostile(player, n.owner))
                                 for n in game.neighbor_tiles(division.tile))
-            weak = division.organization < division.max_organization * .25 or division.last_supply_ratio < .25
+            weak = division.organization < division.max_organization * .25 or division.last_supply_ratio < .12
             trapped = len(own_exits) <= 1 and hostile_sides >= 3
             pressure_limit = (division_vector(division)["defense"] if weak else local_defense) * .8
             if enemies and (weak or trapped or threat > local_defense * 1.8) and own_exits and threat > pressure_limit:
                 target = min(own_exits, key=lambda t: (len(self.nearby_enemies(player, t)), -getattr(t, "supply_score", 0)))
-                self.send(bot, "withdraw", division_id=division.id, tile_key=game.tile_key(target))
+                self.send(bot, "withdraw", division_id=division.id, tile_key=game.tile_key(target),
+                    rationale=f"Угроза обхода/истощения: атака врага {threat:.1f}, местная оборона {local_defense:.1f}; "
+                    f"безопасных выходов {len(own_exits)}, слабая дивизия {weak}, окружение {trapped}")
                 used.add(division.id)
             elif division.path and division.route_mode == "attack" and not division.battle_id:
                 defense = sum(division_vector(d)["defense"] for d in
                               self.units_by_tile.get(game.tile_key(division.target_tile), ())
                               if game.countries_hostile(player, d.owner)) if division.target_tile else 0
                 committed_attack = sum(division_vector(d)["attack"] for d in player.divisions
-                                       if d.target_tile is division.target_tile and d.route_mode == "attack"
-                                       and d.path and not d.battle_id)
+                                       if ((d.target_tile is division.target_tile and d.route_mode == "attack" and d.path)
+                                           or (d.battle_id in game.battles and d.battle_side == "attacker"
+                                               and game.battles[d.battle_id].tile is division.target_tile)))
                 if weak or defense > committed_attack * 1.2:
-                    self.send(bot, "move", division_id=division.id, tile_key=game.tile_key(division.tile))
+                    self.send(bot, "move", division_id=division.id, tile_key=game.tile_key(division.tile),
+                        rationale=f"Отмена атаки: слабая дивизия {weak}; оборона цели {defense:.1f}, наша атака {committed_attack:.1f}")
                     used.add(division.id)
-        available = [d for d in player.divisions if d.id not in used and not d.battle_id and not d.path and d.route_mode != "retreat"
-                     and d.organization >= d.max_organization * .65]
-        front_keys = {key for score, key, threat in borders}
-        # Don't count a unit as present on two fronts, or steal the only existing guard.
-        guards = {d.id for d in available if game.tile_key(d.tile) in front_keys}
-        available = [d for d in available if d.id not in guards]
-        # Each front position requests useful defense, not one evenly spaced division.
-        assigned = defaultdict(float)
-        for score, key, threat in sorted(borders, reverse=True):
-            tile = game.tile_for_key(key)
-            assigned[key] = sum(division_vector(d)["defense"] for d in player.divisions
-                                if d.id not in used and ((d.tile is tile and d.target_tile is None) or d.target_tile is tile))
-            desired = max(12, threat * 1.15)
-            if key == bot.offensive_focus:
-                desired = max(desired, sum(division_vector(d)["defense"] for d in player.divisions) * .4)
-            while assigned[key] < desired and available:
-                eligible = [d for d in available if bot.assignments.get(d.id) == border_regions[key]
-                            or game.hex_distance(d.tile, tile) <= 2]
-                if not eligible:
+        bot.resting_ids.intersection_update(d.id for d in player.divisions)
+        for division in player.divisions:
+            organization = division.organization / max(1, division.max_organization)
+            if organization < .4 or division.last_supply_ratio < .12:
+                bot.resting_ids.add(division.id)
+            elif organization >= .8 and division.last_supply_ratio >= .25:
+                bot.resting_ids.discard(division.id)
+            if division.id not in bot.resting_ids or division.id in used:
+                continue
+            used.add(division.id)
+            if division.battle_id or division.route_mode == "retreat":
+                continue
+            target = division.target_tile
+            if (division.path and target and target.owner is player
+                    and getattr(target, "supply_score", 0) >= .35 and not self.nearby_enemies(player, target)):
+                continue
+            sites = [t for t in player.tiles if not game.is_water_tile(t)
+                     and getattr(t, "supply_score", 0) >= .35 and not self.nearby_enemies(player, t)]
+            sites.sort(key=lambda t: game.hex_distance(division.tile, t) - getattr(t, "supply_score", 0))
+            for tile in sites[:5]:
+                if tile is division.tile:
+                    if division.path:
+                        self.send(bot, "move", division_id=division.id, tile_key=game.tile_key(tile), rationale="Отдых: переход на безопасную снабжаемую позицию")
                     break
-                division = min(eligible, key=lambda d: game.hex_distance(d.tile, tile) * 4
-                               - division_vector(d)["defense"] * .15
-                               + (10 if d.target_tile and d.target_tile is not tile else 0))
-                available.remove(division)
-                if division.tile is tile:
-                    continue
-                if self.hour - bot.last_orders.get(division.id, -1000) < 12 and division.target_tile is not None:
-                    continue
-                self.send(bot, "move", division_id=division.id, tile_key=key)
+                if game.find_division_path(division, tile):
+                    self.send(bot, "move", division_id=division.id, tile_key=game.tile_key(tile), rationale="Отдых: восстановление организации и снабжения")
+                    break
+        posts, pinned = deployment_posts(self, bot, player, wars, used)
+        bot.hex_assignments = posts
+        region_for = {key: region for region, members in positions.items() for key in members}
+        bot.assignments = {identifier: region_for.get(key) for identifier, key in posts.items()}
+        # Cover every reachable front hex before adding a second or third unit
+        # to a concentration. Already travelling reinforcements keep their route.
+        for division in player.divisions:
+            key = posts.get(division.id)
+            if key is None or division.id in used or division.id in pinned:
+                continue
+            if division.battle_id or division.route_mode == "retreat":
+                continue
+            target = game.tile_for_key(key)
+            if target is division.tile or division.organization < division.max_organization * .65:
+                continue
+            if self.send(bot, "move", division_id=division.id, tile_key=key, rationale="Назначение пограничного поста: сначала закрываем свободные участки фронта"):
                 bot.last_orders[division.id] = self.hour
-                assigned[key] += division_vector(division)["defense"]
                 used.add(division.id)
         # Use surplus guards or a lone guard covered by stationary neighbors;
         # keep the capital guarded and retain a national reserve.
@@ -893,7 +1172,7 @@ class CountryAI:
                      and d.route_mode != "retreat" and d.organization >= d.max_organization * .65
                      # Supply already scales attack in division_vector. Do not
                      # require near-rear-area logistics on every front hex.
-                     and d.last_supply_ratio >= .25]
+                     and d.last_supply_ratio >= .12]
             targets = {game.tile_key(n) for d in ready for n in game.neighbor_tiles(d.tile)
                        if n.owner and game.countries_hostile(player, n.owner) and not game.is_water_tile(n)}
             for key in sorted(targets):
@@ -901,9 +1180,11 @@ class CountryAI:
                 pool = [d for d in ready if tile in game.neighbor_tiles(d.tile)]
                 defense = sum(division_vector(d)["defense"] for d in self.units_by_tile.get(key, ())
                               if game.countries_hostile(player, d.owner))
+                if defense > 0:
+                    pool = [d for d in pool if d.last_supply_ratio >= .25]
                 source_counts = defaultdict(int)
                 for d in player.divisions:
-                    if d.tile and not d.battle_id and not d.path and d.route_mode != "retreat":
+                    if d.id not in used and d.tile and not d.battle_id and not d.path and d.route_mode != "retreat":
                         source_counts[game.tile_key(d.tile)] += 1
                 package = []
                 protected = set()
@@ -920,9 +1201,12 @@ class CountryAI:
                                    if other.owner is player and other.id not in used
                                    and all(other.id != selected.id for selected in package)
                                    and not other.path and not other.battle_id and other.route_mode != "retreat"]
-                        if d.tile is player.capital_tile or len(support) < (1 if defense == 0 else 2):
+                        exposed = any(n is not tile and self.game.enemy_divisions_on_tile(n, player)
+                                      for n in game.neighbor_tiles(d.tile))
+                        if d.tile is player.capital_tile or (defense == 0 and exposed) or (defense > 0 and len(support) < 2):
                             continue
-                        protected.add(support[0].id)
+                        if support:
+                            protected.add(support[0].id)
                     package.append(d)
                     source_counts[source] -= 1
                     if len(package) >= limit:
@@ -936,20 +1220,7 @@ class CountryAI:
             if selection:
                 key, package = selection
                 for d in package:
-                    self.send(bot, "attack", division_id=d.id, tile_key=key)
-        if not wars and not borders:
-            # During peace hold important own districts; don't run old evenly distributed army plans.
-            for division in available:
-                if division.path or self.hour - bot.last_orders.get(division.id, -1000) < 48:
-                    continue
-                if bot.regions:
-                    region = bot.assignments.get(division.id)
-                    members = positions.get(region, ())
-                    if members:
-                        key = max(members, key=lambda k: getattr(game.tile_for_key(k), "supply_score", 0))
-                        if game.tile_for_key(key) is not division.tile:
-                            self.send(bot, "move", division_id=division.id, tile_key=key)
-                            bot.last_orders[division.id] = self.hour
+                    self.send(bot, "attack", division_id=d.id, tile_key=key, rationale="Локальная атака: допустимое соотношение сил, тыл и соседние посты прикрыты")
 
     def ownership_changed(self, old_owner, new_owner):
         for owner in (old_owner, new_owner):
@@ -959,6 +1230,10 @@ class CountryAI:
     def snapshot(self):
         return {bot.country_id: dict(course=bot.course, target=bot.target_id, intelligence=bot.intelligence,
                     offensive_focus=bot.offensive_focus,
+                    hex_assignments=dict(bot.hex_assignments),
+                    front_quotas=[dict(tile=key, count=value) for key, value in bot.front_quotas.items()],
+                    resting_ids=sorted(bot.resting_ids),
+                    supply_target=bot.supply_target,
                     reviews={k: dict(stage=v.stage, started=v.started_hour, next=v.next_hour) for k, v in bot.reviews.items()},
                     regions=len(bot.regions), assignments=dict(bot.assignments),
                     tasks=[dict(id=t.id, kind=t.kind, status=t.status, reason=t.reason) for t in bot.tasks],

@@ -11,10 +11,12 @@ class RegionMap:
         self.max_tiles = max_tiles
         self.neighbors = {key: tuple(game.neighbor_tiles(tile)) for key, tile in game.hex_lookup.items()}
         self.revision = 0
+        self.controlled_cache = {}
         self.build()
 
     def build(self):
         game = self.game
+        self.controlled_cache.clear()
         remaining = {game.tile_key(tile) for tile in game.hex_lookup.values() if not game.is_water_tile(tile)}
         index = 0
         while remaining:
@@ -40,7 +42,11 @@ class RegionMap:
 
     def controlled(self, player):
         game = self.game
-        remaining = {game.tile_key(tile) for tile in player.tiles if game.tile_key(tile) in self.tile_region}
+        owned = tuple(player.tiles)
+        cached = self.controlled_cache.get(player.id)
+        if cached and cached[0] == owned:
+            return cached[1]
+        remaining = {key for tile in owned if (key := game.tile_key(tile)) in self.tile_region}
         result = {}
         while remaining:
             seed = min(remaining)
@@ -58,6 +64,7 @@ class RegionMap:
                         queue.append(other)
             # Base ID is stable; fragment anchor can change after a capture.
             result[(base, player.id, min(members))] = tuple(members)
+        self.controlled_cache[player.id] = owned, result
         return result
 
     def profile(self, player, members):

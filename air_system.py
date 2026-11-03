@@ -3,6 +3,7 @@ import random
 import heapq
 
 from Constants import *
+from defense_infrastructure import update_air_defense_replacements
 from game_models import (
     AirAttackSalvo,
     AirCombatEstimate,
@@ -557,6 +558,9 @@ class AirSystemMixin:
         raw_keys = getattr(wing, "operation_area_tile_keys", None)
         if raw_keys is None:
             raw_keys = [self.tile_key(wing.target_tile)] if getattr(wing, "target_tile", None) else []
+        cached = getattr(wing, "_normalized_area_keys", None)
+        if cached is not None and tuple(raw_keys) == cached:
+            return wing.operation_area_tile_keys if wing.operation_area_tile_keys is not None else raw_keys
         normalized = []
         seen = set()
         for raw_key in raw_keys or []:
@@ -569,6 +573,7 @@ class AirSystemMixin:
             seen.add(key)
             normalized.append(key)
         wing.operation_area_tile_keys = normalized
+        wing._normalized_area_keys = tuple(normalized)
         return normalized
 
     def air_wing_operation_area_tiles(self, wing):
@@ -643,8 +648,7 @@ class AirSystemMixin:
         if not wing or not tile or not wing.owner:
             return False
         if mission_type == "cas":
-            battle = self.battles.get(self.battle_key_for_tile(tile))
-            return self.battle_has_enemy_for_owner(battle, wing.owner)
+            return bool(self.enemy_divisions_on_tile(tile, wing.owner))
         if mission_type == "strategic_strike":
             return self.air_mission_tile_is_hostile(wing.owner, tile)
         return self.air_mission_tile_is_hostile(wing.owner, tile) or bool(self.enemy_divisions_on_tile(tile, wing.owner))
@@ -1056,7 +1060,9 @@ class AirSystemMixin:
         max_range = float(munition.get("max_range", 0.0))
         optimal = float(munition.get("optimal_range", max_range))
         target_distance = max(0.0, float(target_distance))
-        if target_distance > max_range:
+        # Aircraft reach is checked separately. A carrier can approach the
+        # target before releasing a shorter-range weapon.
+        if max_range < min_range or max_range <= 0:
             return None
 
         safe_edge = max(0.0, float(known_or_suspected_air_defense_radius))
@@ -1117,6 +1123,8 @@ class AirSystemMixin:
         return self.tile_between(origin_tile, target_tile, progress_from_origin) or origin_tile
 
     def air_defense_fire_tiles(self, unit):
+        if not self.air_defense_unit_operational(unit):
+            return []
         if not unit or not unit.tile or unit.fire_range_cells <= 0:
             return []
         return [
@@ -1125,6 +1133,8 @@ class AirSystemMixin:
         ]
 
     def air_defense_detection_tiles(self, unit):
+        if not self.air_defense_unit_operational(unit):
+            return []
         if not unit or not unit.tile:
             return []
         radius = max(unit.radar_range_cells, unit.fire_range_cells if not unit.radar_active else 0)
@@ -1135,7 +1145,7 @@ class AirSystemMixin:
             return []
         return [
             unit for unit in getattr(owner, "air_defense_units", []) or []
-            if unit.fire_range_cells > 0
+            if self.air_defense_unit_operational(unit) and unit.fire_range_cells > 0
             and unit.readiness > 0
             and unit.tile
             and self.hex_distance(unit.tile, tile) <= unit.fire_range_cells
@@ -1147,13 +1157,15 @@ class AirSystemMixin:
             return []
         return [
             unit for unit in getattr(owner, "air_defense_units", []) or []
-            if unit.tile
+            if self.air_defense_unit_operational(unit) and unit.tile
             and unit.radar_range_cells > 0
             and unit.radar_active
             and self.hex_distance(unit.tile, tile) <= unit.radar_range_cells
         ]
 
     def air_defense_range_factor(self, unit, target_tile):
+        if not self.air_defense_unit_operational(unit):
+            return 0.0
         if not unit or not unit.tile or not target_tile:
             return 0.0
         distance = self.hex_distance(unit.tile, target_tile)
@@ -1227,6 +1239,16 @@ class AirSystemMixin:
         if priority >= 2.6 and chance >= AIR_ESTIMATE_MINIMAL_FIRE_THRESHOLD * scarcity:
             return True
         return False
+
+    @staticmethod
+    def sample_air_hits(count, chance):
+        count = max(0, int(count))
+        chance = max(0, min(1, chance))
+        if chance <= 0:
+            return 0
+        if chance >= 1:
+            return count
+        return sum(random.random() < chance for _ in range(count))
 
     def estimate_intercept_or_hit_chance(self, attacker, weapon, target, launch_context=None):
         context = launch_context or {}
@@ -1672,7 +1694,7 @@ class AirSystemMixin:
             return []
         fixed_units = [
             unit for unit in getattr(self, "air_defense_units", []) or []
-            if self.countries_hostile(unit.owner, owner)
+            if self.air_defense_unit_operational(unit) and self.countries_hostile(unit.owner, owner)
             and unit.tile
             and unit.fire_range_cells > 0
             and unit.readiness > 0
@@ -1908,7 +1930,7 @@ class AirSystemMixin:
                 continue
             ammo_cost = engaged_count * max(1, getattr(unit, "interceptors_per_target", 1))
             self.spend_air_defense_unit_ammo(unit, ammo_cost)
-            hits = min(remaining_sorties, int(engaged_count * hit_chance + 0.5))
+            hits = min(remaining_sorties, self.sample_air_hits(engaged_count, hit_chance))
             destroyed, damaged, aborted = self.apply_air_wing_air_defense_hits(wing, aircraft_type, hits)
             engaged_total += engaged_count
             hits_total += hits
@@ -2323,7 +2345,7 @@ class AirSystemMixin:
             if not target_salvo or target_salvo.count <= 0 or not self.countries_hostile(salvo.owner, target_salvo.owner):
                 return False
             engaged_count = min(salvo.count, target_salvo.count)
-            hits = min(target_salvo.count, int(engaged_count * self.clamp01(salvo.hit_chance) + 0.5))
+            hits = min(target_salvo.count, self.sample_air_hits(engaged_count, salvo.hit_chance))
             target_salvo.count = max(0, target_salvo.count - hits)
             if launcher:
                 if hits > 0:
@@ -2347,7 +2369,7 @@ class AirSystemMixin:
                 engaged_count,
                 salvo.hit_chance,
             )
-            hits = min(engaged_count, int(engaged_count * self.clamp01(terminal_hit_chance) + 0.5))
+            hits = self.sample_air_hits(engaged_count, terminal_hit_chance)
             destroyed, damaged, aborted = self.apply_air_wing_air_defense_hits(target_wing, target_type, hits)
             if hits > 0:
                 target_wing.aborted_hours = max(getattr(target_wing, "aborted_hours", 0.0), AIR_CARRIER_ABORTED_COOLDOWN_HOURS)
@@ -2859,7 +2881,7 @@ class AirSystemMixin:
             return 0.0
         supporting_radars = [
             unit for unit in getattr(owner, "air_defense_units", []) or []
-            if unit.unit_class == "radar_unit"
+            if self.air_defense_unit_operational(unit) and unit.unit_class == "radar_unit"
             and unit.radar_active
             and unit.readiness > 0
             and unit.health > 0
@@ -2952,7 +2974,7 @@ class AirSystemMixin:
             if not estimate.should_fire:
                 continue
             chance = self.clamp01(estimate.intercept_chance)
-            intercepted = min(salvo.count, int(engaged_count * chance + 0.5))
+            intercepted = min(salvo.count, self.sample_air_hits(engaged_count, chance))
             self.spend_air_defense_unit_ammo(unit, engaged_count * max(1, unit.interceptors_per_target))
             salvo.count = max(0, salvo.count - intercepted)
             intercepted_total += intercepted
@@ -3145,13 +3167,47 @@ class AirSystemMixin:
         for salvo in completed:
             self.unregister_air_salvo(salvo)
 
+    @staticmethod
+    def air_defense_unit_operational(unit):
+        return bool(unit and unit.tile and not getattr(unit, "path", ())
+                    and unit.health > 0 and unit.readiness > 0)
+
+    def replenish_air_defense_ammo(self, unit, elapsed_hours):
+        unit.last_ammo_received = 0
+        capacity = max(unit.ammo_capacity, int(self.air_defense_class_data(unit.unit_class).get("ammo", 0)))
+        unit.ammo_capacity = capacity
+        if not capacity or unit.ammo >= capacity:
+            unit.reload_credit = 0
+            unit.resupply_status = "БК полный" if capacity else "Боеприпасы не требуются"
+            return
+        if not self.air_defense_unit_operational(unit) or unit.tile.owner is not unit.owner:
+            unit.resupply_status = "Пополнение недоступно: движение/не своя позиция/небоеспособность"
+            return
+        supply = getattr(unit.tile, "supply_score", 0)
+        if supply < .15:
+            unit.resupply_status = "Недостаточное снабжение клетки"
+            return
+        key = "light_aa_ammo" if unit.unit_class == "short_range_aa" else "anti_air_ammo"
+        unit.reload_credit = min(capacity, unit.reload_credit + capacity * elapsed_hours / 6 * supply)
+        available = max(0, int(self.stockpile_amount(unit.owner, key)))
+        count = min(capacity - unit.ammo, int(unit.reload_credit + 1e-9), available)
+        if count > 0:
+            received = int(self.consume_from_stockpile(unit.owner, key, count))
+            unit.ammo += received
+            unit.reload_credit = max(0, unit.reload_credit - received)
+            unit.last_ammo_received = received
+            self.record_ai_flow(unit.owner, "consumption", key, received)
+        unit.resupply_status = f"Пополнение: +{unit.last_ammo_received} ({key})" if available else f"Нет {key} на складах"
+
     def update_air_defense_units(self, elapsed_hours):
         if elapsed_hours <= 0:
             return
+        update_air_defense_replacements(self, elapsed_hours)
         changed = False
         for unit in getattr(self, "air_defense_units", []) or []:
             if not unit.tile:
                 continue
+            self.replenish_air_defense_ammo(unit, elapsed_hours)
             if not unit.path:
                 unit.target_tile = None
                 unit.route_tiles = []
@@ -3398,31 +3454,42 @@ class AirSystemMixin:
     def select_air_wing_cas_target(self, wing):
         if not wing or not wing.base_tile:
             return None
-        area_keys = set(self.normalize_air_wing_operation_area_keys(wing))
-        owned_battles = [
-            battle for battle in self.battles.values()
-            if battle.attacker is wing.owner or battle.defender is wing.owner
-        ]
-        owned_battles = [
-            battle for battle in owned_battles
-            if self.battle_has_enemy_for_owner(battle, wing.owner)
-        ]
-        if area_keys:
-            owned_battles = [
-                battle for battle in owned_battles
-                if battle.tile and self.tile_key(battle.tile) in area_keys
-            ]
-        if not owned_battles:
-            return None
-        scored = [
-            (self.air_wing_cas_battle_score(wing, battle), self.hex_distance(wing.base_tile, battle.tile), battle)
-            for battle in owned_battles
-        ]
-        scored = [item for item in scored if item[0] > 0]
+        planned = {self.tile_key(d.target_tile) for d in wing.owner.divisions
+                   if d.target_tile and d.route_mode == "attack" and (d.path or d.battle_id)}
+        scored = []
+        for tile in self.air_wing_cas_candidate_tiles(wing):
+            enemies = self.enemy_divisions_on_tile(tile, wing.owner)
+            battles = {d.battle_id: self.battles[d.battle_id] for d in enemies if d.battle_id in self.battles}
+            supporting = [b for b in battles.values() if b.attacker is wing.owner or b.defender is wing.owner]
+            value = 1 + len(enemies) * 2
+            if supporting:
+                value += 12 + max(self.air_wing_cas_battle_score(wing, battle) for battle in supporting)
+            if self.tile_key(tile) in planned:
+                value += 6
+            distance = self.hex_distance(wing.base_tile, tile)
+            value *= self.air_wing_target_repeat_factor(wing, "cas", tile) / (1 + distance * .1)
+            scored.append((value, distance, tile))
         if not scored:
             return None
         scored.sort(key=lambda item: (-item[0], item[1]))
-        return scored[0][2].tile
+        return scored[0][2]
+
+    def air_wing_cas_candidate_tiles(self, wing):
+        if not wing or not wing.base_tile or not self.air_wing_primary_type_for_mission(wing, "cas"):
+            return []
+        area = self.air_wing_reachable_operation_tiles(wing, "cas")
+        candidates = {self.tile_key(t): t for t in area}
+        aircraft = self.air_wing_primary_type_for_mission(wing, "cas")
+        for battle in self.battles.values():
+            if (not battle.tile or self.tile_key(battle.tile) not in candidates
+                    or (battle.attacker is not wing.owner and battle.defender is not wing.owner)):
+                continue
+            for side in ("attacker", "defender"):
+                for division in self.battle_side_present(battle, side):
+                    if (division.tile and self.countries_hostile(wing.owner, division.owner)
+                            and self.aircraft_type_can_reach_tile(wing.base_tile, aircraft, division.tile)):
+                        candidates[self.tile_key(division.tile)] = division.tile
+        return [t for t in candidates.values() if self.air_wing_can_attack_tile(wing, t, "cas")]
 
     def select_air_wing_active_mission(self, wing):
         enabled = self.air_wing_enabled_missions(wing)
@@ -3547,6 +3614,11 @@ class AirSystemMixin:
             )
             self.set_air_wing_mission_cooldown(wing, mission_type, cooldown)
         self.mark_air_wing_mission_target(wing, mission_type, target_tile)
+        ai = getattr(self, "ai_system", None)
+        bot = ai.bots.get(wing.owner.id) if ai else None
+        if bot:
+            bot.note(ai.hour, "air_sortie", wing_id=wing.id, mission=mission_type,
+                     target=self.tile_key(target_tile), aircraft=mission_aircraft_type, sorties=sorties)
         if used_aircraft_counts is not None:
             used_aircraft_counts[mission_aircraft_type] = used_aircraft_counts.get(mission_aircraft_type, 0) + sorties
         return sorties
@@ -3554,18 +3626,15 @@ class AirSystemMixin:
     def launch_air_wing_mission_packages(self, wing, mission_type, used_aircraft_counts=None):
         if not wing or mission_type not in self.air_wing_enabled_missions(wing):
             return 0
+        if self.air_wing_has_global_sortie_cooldown(wing) or getattr(wing, "aborted_hours", 0) > 0:
+            return 0
         if self.air_wing_mission_cooldown(wing, mission_type) > 0:
             return 0
         launched_packages = 0
         launched_sorties = 0
         max_packages = 4
         if mission_type == "cas":
-            max_packages = max(1, min(5, len([
-                battle for battle in self.battles.values()
-                if battle.tile
-                and self.battle_has_enemy_for_owner(battle, wing.owner)
-                and self.tile_key(battle.tile) in set(self.normalize_air_wing_operation_area_keys(wing))
-            ]) or 1))
+            max_packages = max(1, min(5, len(self.air_wing_cas_candidate_tiles(wing)) or 1))
         elif mission_type == "strategic_strike":
             max_packages = max(1, min(5, len([
                 tile for tile in self.air_wing_reachable_operation_tiles(wing, "strategic_strike")
@@ -3573,6 +3642,8 @@ class AirSystemMixin:
                 and self.air_wing_strike_tile_score(wing, tile)[0] > 0
             ]) or 1))
         for _package_index in range(max_packages):
+            if self.air_wing_has_global_sortie_cooldown(wing) or getattr(wing, "aborted_hours", 0) > 0:
+                break
             target_tile = (
                 self.select_air_wing_cas_target(wing)
                 if mission_type == "cas"
@@ -3615,6 +3686,16 @@ class AirSystemMixin:
                 continue
             launched_any = False
             used_aircraft_counts = {}
+            reserved_strike = 0
+            cas_type = self.air_wing_primary_type_for_mission(wing, "cas")
+            strike_type = self.air_wing_primary_type_for_mission(wing, "strategic_strike")
+            if (cas_type and cas_type == strike_type and "cas" in self.air_wing_enabled_missions(wing)
+                    and "strategic_strike" in self.air_wing_enabled_missions(wing)
+                    and self.air_wing_mission_cooldown(wing, "strategic_strike") <= 0
+                    and self.select_air_wing_strike_target(wing)):
+                ready = self.air_wing_ready_count_for_type(wing, strike_type)
+                reserved_strike = max(1, int(ready * .4)) if ready >= 2 else 0
+                used_aircraft_counts[strike_type] = reserved_strike
             if "cas" in self.air_wing_enabled_missions(wing):
                 launched_any = self.launch_air_wing_mission_packages(
                     wing,
@@ -3622,6 +3703,8 @@ class AirSystemMixin:
                     used_aircraft_counts=used_aircraft_counts,
                 ) > 0 or launched_any
             if "strategic_strike" in self.air_wing_enabled_missions(wing):
+                if reserved_strike:
+                    used_aircraft_counts[strike_type] -= reserved_strike
                 launched_any = self.launch_air_wing_mission_packages(
                     wing,
                     "strategic_strike",

@@ -16,6 +16,7 @@ class CountryIntegrationTests(unittest.TestCase):
         random.seed(1729)
         try:
             cls.game = Game(bot_count=1, map_size=32)
+            cls.game.simulation_frame_budget = None  # deterministic elapsed-time assertions
             cls.window.show_view(cls.game)
         except Exception:
             cls.window.close()

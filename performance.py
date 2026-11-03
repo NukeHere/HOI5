@@ -35,6 +35,7 @@ class PerformanceProfiler:
         self.average = {}
         self.peak = {}
         self.disabled_timer = _NoPerformanceTimer()
+        self.diagnostic_stage = None
 
     def set_visible(self, visible):
         self.visible = bool(visible)
@@ -61,6 +62,8 @@ class PerformanceProfiler:
         self.current_samples = {}
 
     def measure(self, name):
+        if self.diagnostic_stage is not None:
+            self.diagnostic_stage(name)
         if not self.enabled:
             return self.disabled_timer
         return _PerformanceTimer(self, name)

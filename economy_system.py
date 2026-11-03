@@ -4,8 +4,37 @@ import time
 
 from Constants import *
 
+SUPPLY_DISTANCE_FACTORS = tuple(SUPPLY_DECAY_PER_HEX ** d for d in range(SUPPLY_SOURCE_RADIUS + 1))
+SUPPLY_OFFSETS = tuple((q, r, SUPPLY_DISTANCE_FACTORS[max(abs(q), abs(r), abs(q + r))])
+                       for q in range(-SUPPLY_SOURCE_RADIUS, SUPPLY_SOURCE_RADIUS + 1)
+                       for r in range(-SUPPLY_SOURCE_RADIUS, SUPPLY_SOURCE_RADIUS + 1)
+                       if abs(q + r) <= SUPPLY_SOURCE_RADIUS)
+STORAGE_RATES_BY_BUILDING = {}
+for category, rates in (*STORAGE_CAPACITY_BY_COVERAGE.items(), ("fuel", FUEL_STORAGE_CAPACITY_BY_COVERAGE)):
+    for building, rate in rates.items():
+        STORAGE_RATES_BY_BUILDING.setdefault(building, []).append((category, rate))
 
 class EconomySystemMixin:
+    def effective_coverage_totals(self, player):
+        cache = getattr(self, "_coverage_step_cache", None)
+        if cache is not None and player.id in cache:
+            return cache[player.id]
+        totals = {}
+        for tile in player.tiles:
+            for key, value in (getattr(tile, "building_coverage", {}) or {}).items():
+                totals[key] = totals.get(key, 0.0) + self.effective_building_coverage(tile, key, value)
+        if cache is not None:
+            cache[player.id] = totals
+        return totals
+
+    def invalidate_coverage_totals(self, player):
+        cache = getattr(self, "_coverage_step_cache", None)
+        if cache is not None and player:
+            cache.pop(player.id, None)
+        population_cache = getattr(self, "_population_weight_step_cache", None)
+        if population_cache is not None and player:
+            population_cache.pop(player.id, None)
+
     @staticmethod
     def empty_resource_totals():
         return {"raw": {}}
@@ -78,9 +107,12 @@ class EconomySystemMixin:
                 stockpiles[category_key][resource_key] = amount
 
         player.resource_stockpiles = stockpiles
+        player._initialized_stockpiles = stockpiles
         return stockpiles
 
     def ensure_player_stockpiles(self, player):
+        if player.resource_stockpiles is not None and player.resource_stockpiles is getattr(player, "_initialized_stockpiles", None):
+            return player.resource_stockpiles
         stockpiles = player.resource_stockpiles or self.empty_resource_stockpiles()
         changed = False
         scale = getattr(player, "starting_scale", None)
@@ -101,6 +133,7 @@ class EconomySystemMixin:
         if changed or player.resource_stockpiles is None:
             player.resource_stockpiles = stockpiles
             self.mark_player_stockpiles_changed(player)
+        player._initialized_stockpiles = stockpiles
         return stockpiles
 
     @staticmethod
@@ -168,17 +201,12 @@ class EconomySystemMixin:
     def tile_storage_capacity_by_category(self, tile):
         coverage = getattr(tile, "building_coverage", {}) or {}
         capacities = self.empty_storage_summary()
-        for category_key, building_values in STORAGE_CAPACITY_BY_COVERAGE.items():
-            for building_key, capacity_per_coverage in building_values.items():
-                capacities[category_key] += (
-                    self.effective_building_coverage(tile, building_key, coverage.get(building_key, 0.0))
-                    * capacity_per_coverage
-                )
-        for building_key, capacity_per_coverage in FUEL_STORAGE_CAPACITY_BY_COVERAGE.items():
-            capacities["fuel"] += (
-                self.effective_building_coverage(tile, building_key, coverage.get(building_key, 0.0))
-                * capacity_per_coverage
-            )
+        for building, raw in coverage.items():
+            rates = STORAGE_RATES_BY_BUILDING.get(building)
+            if rates and raw > 0:
+                effective = self.effective_building_coverage(tile, building, raw)
+                for category, rate in rates:
+                    capacities[category] += effective * rate
         return capacities
 
     def tile_storage_capacity(self, tile, category_key=None):
@@ -214,10 +242,11 @@ class EconomySystemMixin:
         used = self.empty_storage_summary()
         efficiency = (player.production_modifiers or {}).get("storage_efficiency", 1.0)
 
-        for tile in player.tiles:
-            tile_capacity = self.tile_storage_capacity_by_category(tile)
-            for category_key, amount in tile_capacity.items():
-                capacity[category_key] += amount * efficiency
+        coverage = self.effective_coverage_totals(player)
+        for category_key, buildings in STORAGE_CAPACITY_BY_COVERAGE.items():
+            capacity[category_key] = sum(coverage.get(key, 0) * amount for key, amount in buildings.items()) * efficiency
+        capacity["fuel"] = sum(coverage.get(key, 0) * amount
+                               for key, amount in FUEL_STORAGE_CAPACITY_BY_COVERAGE.items()) * efficiency
 
         stockpiles = self.ensure_player_stockpiles(player)
         for category_key, bucket in stockpiles.items():
@@ -359,8 +388,10 @@ class EconomySystemMixin:
             return 0.0
         coverage = getattr(tile, "building_coverage", {}) or {}
         strength = 0.0
-        for building_key, weight in SUPPLY_SOURCE_WEIGHTS.items():
-            strength += self.effective_building_coverage(tile, building_key, coverage.get(building_key, 0.0)) * weight
+        for building_key, raw in coverage.items():
+            weight = SUPPLY_SOURCE_WEIGHTS.get(building_key)
+            if weight and raw > 0:
+                strength += self.effective_building_coverage(tile, building_key, raw) * weight
         if tile == player.capital_tile:
             strength += 0.85
         return self.clamp01(strength)
@@ -380,40 +411,39 @@ class EconomySystemMixin:
         if not sources and player.capital_tile:
             sources = [(player.capital_tile, 0.65)]
 
-        total_supply = 0.0
-        low_tiles = 0
-        critical_tiles = 0
+        land = {(tile.q, tile.r): tile for tile in land_tiles}
         for tile in land_tiles:
-            passability = self.clamp01(getattr(tile, "passability", 0.0))
-            best = 0.0
-            for source_tile, strength in sources:
-                distance = self.hex_distance(tile, source_tile)
-                if distance > SUPPLY_SOURCE_RADIUS:
-                    continue
-                distance_factor = SUPPLY_DECAY_PER_HEX ** distance
-                passability_factor = 0.42 + passability * 0.58
-                best = max(best, strength * distance_factor * passability_factor)
-            tile.supply_score = self.clamp01(best)
-            total_supply += tile.supply_score
-            if tile.supply_score < 0.25:
-                critical_tiles += 1
-            elif tile.supply_score < 0.50:
-                low_tiles += 1
+            tile.supply_score = 0.0
+        if len(land) >= 48:
+            for source, strength in sources:
+                q, r = source.q, source.r
+                for dq, dr, factor in SUPPLY_OFFSETS:
+                    tile = land.get((q + dq, r + dr))
+                    if tile is not None:
+                        value = strength * factor
+                        if value > tile.supply_score:
+                            tile.supply_score = value
+        else:
+            for tile in land_tiles:
+                for source, strength in sources:
+                    distance = self.hex_distance(tile, source)
+                    if distance <= SUPPLY_SOURCE_RADIUS:
+                        tile.supply_score = max(tile.supply_score, strength * SUPPLY_DISTANCE_FACTORS[distance])
+        for tile in land_tiles:
+            tile.supply_score = self.clamp01(tile.supply_score * (0.42 + self.clamp01(tile.passability) * 0.58))
 
+        relays = []
+        for tile in land_tiles:
+            coverage = getattr(tile, "building_coverage", {}) or {}
+            relay_strength = sum(self.effective_building_coverage(tile, key, coverage[key]) * weight
+                                 for key, weight in SUPPLY_RELAY_BUILDING_WEIGHTS.items() if key in coverage)
+            if relay_strength > 0:
+                neighbors = [n for n in self.neighbor_tiles(tile) if n.owner is player and not self.is_water_tile(n)]
+                relays.append((tile, relay_strength, self.clamp01(tile.passability), neighbors))
         for _pass_index in range(2):
             changed_tiles = []
-            for tile in land_tiles:
-                coverage = getattr(tile, "building_coverage", {}) or {}
-                relay_strength = sum(
-                    self.effective_building_coverage(tile, building_key, coverage.get(building_key, 0.0)) * weight
-                    for building_key, weight in SUPPLY_RELAY_BUILDING_WEIGHTS.items()
-                )
-                if relay_strength <= 0:
-                    continue
-                tile_passability = self.clamp01(getattr(tile, "passability", 0.0))
-                for neighbor in self.neighbor_tiles(tile):
-                    if neighbor.owner != player or self.is_water_tile(neighbor):
-                        continue
+            for tile, relay_strength, tile_passability, neighbors in relays:
+                for neighbor in neighbors:
                     inbound = getattr(neighbor, "supply_score", 0.0) * (0.46 + relay_strength * 0.38) * (
                         0.62 + tile_passability * 0.28
                     )
@@ -422,9 +452,7 @@ class EconomySystemMixin:
                 if getattr(tile, "supply_score", 0.0) <= 0.35:
                     continue
                 relay_value = self.clamp01(tile.supply_score * (0.42 + relay_strength))
-                for neighbor in self.neighbor_tiles(tile):
-                    if neighbor.owner != player or self.is_water_tile(neighbor):
-                        continue
+                for neighbor in neighbors:
                     passability = self.clamp01(getattr(neighbor, "passability", 0.0))
                     candidate = relay_value * (0.58 + passability * 0.30)
                     if candidate > getattr(neighbor, "supply_score", 0.0) + 0.001:
@@ -613,6 +641,7 @@ class EconomySystemMixin:
         self.ensure_starting_consumer_goods_industry(player)
 
     def calculate_tile_production_cache(self, player, tile):
+        tile._production_signature = None
         cache = self.empty_production_cache()
         raw_coverage = getattr(tile, "building_coverage", {}) or {}
         coverage = self.effective_building_coverage_map(tile)
@@ -724,25 +753,27 @@ class EconomySystemMixin:
                 amount * population_millions,
             )
 
-        for tile in player.tiles:
-            coverage = self.effective_building_coverage_map(tile)
-            for building, upkeep in SETTLEMENT_UPKEEP_PER_COVERAGE.items():
-                building_coverage = coverage.get(building, 0.0)
-                if building_coverage <= 0:
-                    continue
-                for key, amount in upkeep.items():
-                    self.add_production_amount(
-                        player.production_cache,
-                        "upkeep",
-                        "inputs",
-                        key,
-                        amount * building_coverage,
-                    )
+        coverage = self.effective_coverage_totals(player)
+        for building, upkeep in SETTLEMENT_UPKEEP_PER_COVERAGE.items():
+            building_coverage = coverage.get(building, 0.0)
+            for key, amount in upkeep.items():
+                self.add_production_amount(player.production_cache, "upkeep", "inputs", key,
+                                           amount * building_coverage)
 
     def recalculate_state_production_cache(self, player):
         player.production_cache = self.empty_production_cache()
+        policy = (player.id, tuple(player.production_modifiers.items()), frozenset(getattr(player, "technologies", ())))
         for tile in player.tiles:
-            cache = self.calculate_tile_production_cache(player, tile)
+            coverage = getattr(tile, "building_coverage", {}) or {}
+            signature = (policy, tuple(coverage.items()), tuple((getattr(tile, "building_health", None) or {}).items()),
+                         tuple((getattr(tile, "industry_allocation", None) or {}).items()),
+                         tuple(getattr(tile, "resources", ())) if coverage.get("mine") or coverage.get("oil_gas_rig") else ())
+            if getattr(tile, "_production_signature", None) != signature:
+                cache = self.calculate_tile_production_cache(player, tile)
+                # Calculation can initialize or normalize the allocation.
+                tile._production_signature = signature
+            else:
+                cache = tile.production_cache
             self.merge_production_cache(player.production_cache, cache)
         self.add_state_life_support_to_production_cache(player)
         return player.production_cache
@@ -755,6 +786,7 @@ class EconomySystemMixin:
         player = getattr(tile, "owner", None)
         if not player:
             tile.production_cache = self.empty_production_cache()
+            tile._production_signature = None
             return tile.production_cache
         self.recalculate_state_production_cache(player)
         return getattr(tile, "production_cache", None) or self.empty_production_cache()
@@ -1144,9 +1176,7 @@ class EconomySystemMixin:
         if strength_delta <= 0:
             return 0.0, {}
         strength_ratio = strength_delta / max(1.0, division.max_strength)
-        manpower_needed = max(0.0, division.max_manpower - division.manpower) * strength_ratio
-        if manpower_needed <= 0:
-            manpower_needed = division.max_manpower * strength_ratio * 0.85
+        manpower_needed = min(max(0.0, division.max_manpower - division.manpower), division.max_manpower * strength_ratio)
         resources = {}
         for key in DIVISION_EQUIPMENT_LOSS_KEYS:
             capacity = (division.supply_capacity or {}).get(key, 0.0)
@@ -1179,7 +1209,7 @@ class EconomySystemMixin:
             if consumed > 0:
                 division.supply_stock[key] = current + consumed
 
-        if division.strength >= division.max_strength or division.manpower >= division.max_manpower:
+        if division.strength >= division.max_strength and division.manpower >= division.max_manpower:
             division.last_reinforcement_ratio = 1.0
             return 0.0
 
@@ -1190,8 +1220,13 @@ class EconomySystemMixin:
             * supply
             * in_battle_mult
         )
-        strength_delta = min(max_strength_delta, division.max_strength - division.strength)
-        manpower_needed, resource_needs = self.division_strength_reinforcement_requirements(division, strength_delta)
+        missing_strength = max(0, division.max_strength - division.strength)
+        missing_manpower = max(0, division.max_manpower - division.manpower)
+        equivalent_delta = min(max_strength_delta, max(missing_strength,
+                               missing_manpower / max(1, division.max_manpower) * division.max_strength))
+        strength_delta = min(equivalent_delta, missing_strength)
+        _, resource_needs = self.division_strength_reinforcement_requirements(division, strength_delta)
+        manpower_needed = min(missing_manpower, division.max_manpower * equivalent_delta / max(1, division.max_strength))
         ratios = []
         if manpower_needed > 0:
             ratios.append(max(0.0, division.owner.manpower_reserve) / manpower_needed)
@@ -1200,12 +1235,12 @@ class EconomySystemMixin:
                 ratios.append(self.stockpile_amount(division.owner, key) / required)
         actual_ratio = self.clamp01(min(ratios) if ratios else 1.0)
         actual_strength = strength_delta * actual_ratio
-        if actual_strength <= 0:
+        if actual_strength <= 0 and manpower_needed * actual_ratio < 1:
             division.last_reinforcement_ratio = 0.0
             return 0.0
 
         if manpower_needed > 0:
-            manpower_used = min(division.owner.manpower_reserve, manpower_needed * actual_ratio)
+            manpower_used = int(min(division.owner.manpower_reserve, manpower_needed * actual_ratio) + 1e-9)
             division.owner.manpower_reserve = max(0.0, division.owner.manpower_reserve - manpower_used)
             division.manpower = min(division.max_manpower, division.manpower + int(round(manpower_used)))
         for key, required in resource_needs.items():
@@ -1567,10 +1602,7 @@ class EconomySystemMixin:
         return 1.0 + TRADE_SELL_LIMIT_MULTIPLIER
 
     def trade_logistics_capacity_per_month(self, player, mode=None):
-        coverage_totals = {}
-        for tile in player.tiles:
-            for key, value in (getattr(tile, "building_coverage", {}) or {}).items():
-                coverage_totals[key] = coverage_totals.get(key, 0.0) + self.effective_building_coverage(tile, key, value)
+        coverage_totals = self.effective_coverage_totals(player)
         supply = (player.supply_summary or {}).get("average", 1.0)
         logistics = (player.production_modifiers or {}).get("logistics_efficiency", 1.0)
         port_capacity = coverage_totals.get("port", 0.0) * TRADE_PORT_CAPACITY_PER_COVERAGE

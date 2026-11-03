@@ -2717,7 +2717,7 @@ class UIPanelsMixin:
                 value_text = self.format_tile_coverage_total(value) if multi_selected else f"{value:.0%}"
                 damage = damage_by_building.get(key, 0.0)
                 if damage > 0.001:
-                    value_text += f" | повр. {damage:.0%}"
+                    value_text += f" | разрушено {damage:.0%}"
                 panel_text(f"{label}: {value_text}", panel_x + 16, y, (224, 234, 244), 11)
                 y -= 16
         elif buildings:
@@ -2808,7 +2808,7 @@ class UIPanelsMixin:
                     self.hex_air_defense_row_rects.append(((panel_x + 12, row_y, content_width + 8, row_height), unit.id))
                 radar_state = "РЛС+" if unit.radar_active else "РЛС-"
                 panel_text(
-                    f"{unit_name}: огонь {unit.fire_range_cells}, {radar_state}, БК {unit.ammo}",
+                    f"{unit_name}: огонь {unit.fire_range_cells}, {'марш' if unit.path else radar_state}, БК {unit.ammo}/{unit.ammo_capacity}",
                     panel_x + 18,
                     y,
                     (238, 228, 198) if selected else (224, 214, 184),

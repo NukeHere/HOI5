@@ -402,6 +402,10 @@ class AirDefenseUnit:
     fire_range_cells: int = 0
     min_range_cells: int = 0
     ammo: int = 0
+    ammo_capacity: int = 0
+    reload_credit: float = 0
+    last_ammo_received: int = 0
+    resupply_status: str = ""
     readiness: float = 1.0
     camouflage: float = 0.0
     radar_active: bool = False
@@ -422,6 +426,7 @@ class AirDefenseUnit:
     y: float = 0.0
 
     def __post_init__(self):
+        self.ammo_capacity = max(self.ammo_capacity, self.ammo)
         if self.tile is not None and self.x == 0.0 and self.y == 0.0:
             self.x = self.tile.center_x
             self.y = self.tile.center_y

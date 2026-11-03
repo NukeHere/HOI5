@@ -16,6 +16,38 @@ class HeadlessTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             return HeadlessGame(seed, countries=4, map_size=32)
 
+    def test_production_cache_reuses_tiles_and_refreshes_after_damage(self):
+        game = self.game()
+        player = game.players[0]
+        tile = player.capital_tile
+        tile.building_coverage["farms"] = 1.0
+        game.recalculate_state_production_cache(player)
+        game.recalculate_state_production_cache(player)
+        with patch.object(game, "calculate_tile_production_cache", wraps=game.calculate_tile_production_cache) as calculate:
+            original = game.production_amount_for_key(player, "food", "outputs")
+            game.recalculate_state_production_cache(player)
+            calculate.assert_not_called()
+            game.set_building_health(tile, "farms", .5)
+            game.recalculate_state_production_cache(player)
+            calculate.assert_called_once_with(player, tile)
+            self.assertLess(game.production_amount_for_key(player, "food", "outputs"), original)
+
+    def test_fort_repair_does_not_recalculate_unrelated_country_caches(self):
+        game = self.game()
+        player = game.players[0]
+        tile = player.capital_tile
+        tile.building_coverage["fortification"] = 1.0
+        game._defer_building_refresh = True
+        game._building_refresh_pending = {}
+        with patch.object(game, "recalculate_state_production_cache") as production, \
+             patch.object(game, "recalculate_player_supply") as supply, \
+             patch.object(game, "distribute_player_stockpiles_to_tiles") as storage:
+            game.damage_building(tile, "fortification", .2, queue_repair=False)
+            game.flush_building_refreshes()
+            for refresh in (production, supply, storage):
+                refresh.assert_not_called()
+        self.assertAlmostEqual(game.building_health(tile, "fortification"), .8)
+
     def test_no_window_texture_sprite_or_text_and_all_countries_are_bots(self):
         with patch("arcade.Window", side_effect=AssertionError("window created")), \
              patch("arcade.load_texture", side_effect=AssertionError("texture loaded")), \
@@ -135,6 +167,7 @@ class HeadlessTests(unittest.TestCase):
         bot = game.ai_system.bots[player.id]
         division = player.divisions[-1]
         target = next(t for t in player.tiles if t is not division.tile
+                      and any(n.owner and game.countries_hostile(player, n.owner) for n in game.neighbor_tiles(t))
                       and game.find_division_path(division, t))
         self.assertTrue(game.issue_division_plan_order(division, target))
         division.movement_progress = .37

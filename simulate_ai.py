@@ -21,6 +21,19 @@ def run_directory(output, seed, ai_seed):
     return Path(output) / (f"seed-{seed}" if ai_seed is None else f"seed-{seed}-ai-{ai_seed}")
 
 
+def front_metrics(game, player):
+    front = {game.tile_key(t) for t in player.tiles if not game.is_water_tile(t)
+             and any(n.owner and game.countries_hostile(player, n.owner) for n in game.neighbor_tiles(t))}
+    occupied = {game.tile_key(d.tile) for d in player.divisions if d.tile and d.route_mode != "retreat"}
+    inbound = {game.tile_key(d.target_tile) for d in player.divisions if d.path and d.target_tile
+               and d.target_tile.owner is player and d.route_mode != "retreat"}
+    stacks = Counter(game.tile_key(d.tile) for d in player.divisions if d.tile)
+    return dict(hexes=len(front), occupied=len(front & occupied), assigned=len(front & (occupied | inbound)),
+                largest_stack=max(stacks.values(), default=0),
+                organization=round(sum(d.organization / max(1, d.max_organization) for d in player.divisions)
+                                   / max(1, len(player.divisions)), 3))
+
+
 def audit_world(game):
     """Fail at the first corrupt state, before a long run conceals its origin."""
     def require(condition, message):
@@ -105,6 +118,7 @@ def run(seed, days, countries, size, output, scenario="natural", ai_seed=None):
                 countries=[dict(id=p.id, tiles=len(p.tiles), divisions=len(p.divisions), budget=round(p.budget),
                                 training=len(game.recruitment.queues[p.id]),
                                 recruited=game.recruitment.completed[p.id],
+                                front=front_metrics(game, p),
                                 course=game.ai_system.bots[p.id].course,
                                 offensive_focus=game.ai_system.bots[p.id].offensive_focus,
                                 units=[dict(id=d.id, tile=game.tile_key(d.tile), organization=round(d.organization, 2),

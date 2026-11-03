@@ -13,7 +13,6 @@ class DivisionRecruitment:
                            ("basic_infantry", "tank", "motorized", "anti_tank", "anti_air")}
         self.designs = {p.id: [] for p in game.players}
         self.queues = {p.id: [] for p in game.players}
-        self.target_armies = {p.id: len(p.divisions) for p in game.players}
         self.next_id = 1
         self.completed = {p.id: 0 for p in game.players}
         self.message = ""
@@ -80,8 +79,6 @@ class DivisionRecruitment:
         game = self.game
         if not self.allowed(player, key):
             return False, "Чужой или неизвестный шаблон"
-        if len(self.queues[player.id]) >= 4:
-            return False, "Очередь подготовки заполнена (4)"
         if not self.safe_site(player, tile):
             return False, "Нужна своя снабжаемая клетка вне боя"
         template = deepcopy(game.division_template(key))
@@ -132,32 +129,34 @@ class DivisionRecruitment:
                 for project in list(queue):
                     self.cancel(player, project["id"])
                 continue
-            project = queue[0]
-            duration = project["cost"]["days"] * 24
-            project["hours"] = min(duration, project["hours"] + max(0, hours))
-            if project["hours"] < duration:
-                continue
-            tile = game.tile_for_key(project["tile_key"])
-            if not self.safe_site(player, tile):
-                tile = None if project.get("manual_site") else self.site(player)
-            if tile is None:
-                project["status"] = "waiting_site"
-                continue
-            # Freeze each deployed unit's design: editing a saved design cannot
-            # change the display or characteristics of an existing division.
-            key = f"trained-{player.id}-{project['id']}"
-            game.register_division_template(key, project["template"])
-            division = game.create_division_from_template(player, tile, key)
-            division.organization = division.max_organization * .5
-            game.register_division(division)
-            game.invalidate_division_render_cache()
-            queue.pop(0)
-            self.completed[player.id] += 1
-            game.mark_player_resource_balance_dirty(player)
-            game.recalculate_monthly_balance(player, include_trade=False)
-            game.politics.news.publish(game.politics.day, "division_deployed", "Дивизия завершила подготовку",
-                f"{player.name}: {project['template']['name']} развёрнута в ({tile.q}, {tile.r}).",
-                country_ids=(player.id,))
+            remaining = []
+            for project in queue:
+                duration = project["cost"]["days"] * 24
+                project["hours"] = min(duration, project["hours"] + max(0, hours))
+                if project["hours"] < duration:
+                    remaining.append(project)
+                    continue
+                tile = game.tile_for_key(project["tile_key"])
+                if not self.safe_site(player, tile):
+                    tile = None if project.get("manual_site") else self.site(player)
+                if tile is None:
+                    project["status"] = "waiting_site"
+                    remaining.append(project)
+                    continue
+                key = f"trained-{player.id}-{project['id']}"
+                game.register_division_template(key, project["template"])
+                division = game.create_division_from_template(player, tile, key)
+                division.organization = division.max_organization * .5
+                game.register_division(division)
+                self.completed[player.id] += 1
+                game.politics.news.publish(game.politics.day, "division_deployed", "Дивизия завершила подготовку",
+                    f"{player.name}: {project['template']['name']} развёрнута в ({tile.q}, {tile.r}).",
+                    country_ids=(player.id,))
+            if len(remaining) != len(queue):
+                queue[:] = remaining
+                game.invalidate_division_render_cache()
+                game.mark_player_resource_balance_dirty(player)
+                game.recalculate_monthly_balance(player, include_trade=False)
 
     def handle_command(self, command):
         game = self.game

@@ -4,6 +4,7 @@ import math
 import textwrap
 
 import arcade
+from pyglet.graphics import Batch
 
 from news_system import PRIORITIES
 
@@ -30,17 +31,45 @@ class NewsPanelMixin:
         self.news_ticker_position = 0.0
         self.news_text_pool = []
         self.news_text_cursor = 0
+        self.news_text_pools = {}
+        self.news_text_cursors = {}
+        self.news_text_section = "ticker"
+        self.news_batch = Batch()
+        self.news_used_labels = set()
+        self.news_visible_cache_key = None
+        self.news_visible_cache = []
+        self.news_item_cache = {}
+        self.news_last_update_key = None
 
     def news_visible_items(self):
         if not self.human_player or not hasattr(self, "politics"):
             return []
-        return self.politics.news.visible(self.human_player.id)
+        news = self.politics.news
+        items = news.items
+        key = (id(items), len(items), items[0].id if items else None, items[-1].id if items else None, self.human_player.id)
+        if key != self.news_visible_cache_key:
+            self.news_visible_cache = news.visible(self.human_player.id)
+            self.news_item_cache = {item.id: item for item in self.news_visible_cache}
+            self.news_visible_cache_key = key
+        return self.news_visible_cache
+
+    def news_panel_contains(self, x, y):
+        if self.paused:
+            return False
+        rect = self.news_archive_rect() if self.news_archive_open else self.news_popup_rect() if self.news_popup_id is not None else None
+        return self.point_in_rect(x, y, self.news_ticker_rect()) or bool(rect and self.point_in_rect(x, y, rect))
 
     def update_news_ui(self, delta_time):
         if not self.human_player or not hasattr(self, "politics"):
             return
         items = self.news_visible_items()
-        recent = [item for item in reversed(items) if item.id > self.news_seen_id]
+        recent = []
+        if self.news_last_update_key != self.news_visible_cache_key:
+            recent = [item for item in reversed(items) if item.id > self.news_seen_id]
+            self.news_popup_queue = [identifier for identifier in self.news_popup_queue if identifier in self.news_item_cache]
+            self.news_last_update_key = self.news_visible_cache_key
+        if self.news_popup_id is not None and self.news_popup_id not in self.news_item_cache:
+            self.news_popup_id = None
         if recent:
             self.news_seen_id = max(item.id for item in recent)
             self.news_popup_queue.extend(item.id for item in recent if PRIORITIES[item.priority] >= 2)
@@ -84,27 +113,38 @@ class NewsPanelMixin:
         return self.window.width - width - 14, 125, width, height
 
     def news_item_by_id(self, item_id):
-        return next((item for item in self.news_visible_items() if item.id == item_id), None)
+        self.news_visible_items()
+        return self.news_item_cache.get(item_id)
 
     def draw_news_text(self, value, x, y, color=(222, 233, 242), size=12):
-        index = self.news_text_cursor
+        # Archive rows, popup titles and the ticker keep separate fixed-font
+        # labels. Closing a view must not rebuild every label with a new size.
+        key = (self.news_text_section, size)
+        pool = self.news_text_pools.setdefault(key, [])
+        index = self.news_text_cursors.get(key, 0)
+        self.news_text_cursors[key] = index + 1
         self.news_text_cursor += 1
-        if index == len(self.news_text_pool):
-            self.news_text_pool.append(arcade.Text("", x, y, font_size=size, anchor_y="center"))
-        label = self.news_text_pool[index]
+        if index == len(pool):
+            label = arcade.Text("", x, y, font_size=size, anchor_y="center", batch=self.news_batch)
+            pool.append(label)
+            self.news_text_pool.append(label)
+        label = pool[index]
         rgba = (*color, 255) if len(color) == 3 else color
         changes = [(key, wanted) for key, wanted in (("text", str(value)), ("x", x), ("y", y),
-                   ("color", rgba), ("font_size", size)) if getattr(label, key) != wanted]
+                   ("color", rgba)) if getattr(label, key) != wanted]
         if changes:
             with label:
                 for key, wanted in changes:
                     setattr(label, key, wanted)
-        label.draw()
+        self.news_used_labels.add(id(label))
 
     def draw_news_overlay(self):
         if self.paused or not self.window:
             return
         self.news_text_cursor = 0
+        self.news_text_cursors = {}
+        self.news_used_labels.clear()
+        self.news_text_section = "ticker"
         items = self.news_visible_items()
         x, y, width, height = self.news_ticker_rect()
         arcade.draw_lbwh_rectangle_filled(x, y, width, height, (20, 29, 39, 240))
@@ -128,8 +168,13 @@ class NewsPanelMixin:
             self.draw_news_archive()
         elif self.news_popup_id is not None:
             self.draw_news_popup()
+        for label in self.news_text_pool:
+            if id(label) not in self.news_used_labels and label.text:
+                label.text = ""
+        self.news_batch.draw()
 
     def draw_news_archive(self):
+        self.news_text_section = "archive"
         x, y, width, height = self.news_archive_rect()
         arcade.draw_lbwh_rectangle_filled(x, y, width, height, (21, 29, 39, 248))
         arcade.draw_lbwh_rectangle_outline(x, y, width, height, (110, 137, 165), 2)
@@ -152,6 +197,7 @@ class NewsPanelMixin:
                                 x + 14, y + 18, (170, 188, 202), 10)
 
     def draw_news_popup(self):
+        self.news_text_section = "popup"
         item = self.news_item_by_id(self.news_popup_id)
         if item is None:
             return
@@ -176,8 +222,10 @@ class NewsPanelMixin:
                                 x + width - 76, y + 19, (170, 188, 202), 10)
 
     def handle_news_click(self, x, y, button):
-        if self.paused or button != arcade.MOUSE_BUTTON_LEFT:
+        if self.paused:
             return False
+        if button != arcade.MOUSE_BUTTON_LEFT:
+            return bool(self.news_panel_contains(x, y))
         if self.news_archive_open:
             rect = self.news_archive_rect()
             if self.point_in_rect(x, y, rect):

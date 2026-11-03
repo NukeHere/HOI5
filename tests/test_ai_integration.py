@@ -20,6 +20,7 @@ class AIIntegrationTests(unittest.TestCase):
         from MainGame import Game
         random.seed(103)
         self.game = Game(bot_count=3, map_size=32)
+        self.game.simulation_frame_budget = None  # deterministic elapsed-time assertions
         self.window.show_view(self.game)
 
     def test_staged_reviews_execute_real_actions_and_keep_human_state_unassigned(self):
@@ -106,6 +107,69 @@ class AIIntegrationTests(unittest.TestCase):
         self.assertEqual(game.side_panel_target, 1)
         self.assertIsNone(game.division_deployment_key)
 
+    def test_news_close_with_layer_menu_does_not_rebuild_font_pools(self):
+        import arcade
+        game = self.game
+        for index in range(300):
+            game.politics.news.publish(index, "test", f"Новость {index}: проверка мирового архива",
+                "Описание события, население и снабжение. " * 8)
+        allocation = None
+        for index in range(20):
+            rect = game.news_ticker_rect()
+            game.on_mouse_press(rect[0] + 8, rect[1] + 8, arcade.MOUSE_BUTTON_LEFT, 0)
+            self.assertTrue(game.news_archive_open)
+            game.on_draw()
+            rect = game.map_layer_button_rect()
+            game.on_mouse_press(rect[0] + 8, rect[1] + 8, arcade.MOUSE_BUTTON_LEFT, 0)
+            self.assertTrue(game.map_layer_menu_open)
+            x, y, width, height = game.news_archive_rect()
+            game.on_mouse_press(x + width - 25, y + height - 25, arcade.MOUSE_BUTTON_LEFT, 0)
+            self.assertFalse(game.news_archive_open)
+            self.assertTrue(game.map_layer_menu_open)
+            game.on_draw()
+            rect = game.map_layer_button_rect()
+            game.on_mouse_press(rect[0] + 8, rect[1] + 8, arcade.MOUSE_BUTTON_LEFT, 0)
+            if allocation is None:
+                allocation = len(game.news_text_pool)
+            else:
+                self.assertEqual(len(game.news_text_pool), allocation)
+            for (section, size), pool in game.news_text_pools.items():
+                self.assertTrue(all(label.font_size == size for label in pool))
+
+    def test_map_layer_changes_reuse_texture_and_update_gpu_pixels(self):
+        game = self.game
+        sprite = game.map_overview_sprite
+        texture = sprite.texture
+        game.map_overview_sprite_list.initialize()
+        for layer in ("political", "height", "resources", "supply", "terrain") * 3:
+            game.set_map_layer(layer)
+            self.assertIs(game.map_overview_sprite, sprite)
+            self.assertIs(sprite.texture, texture)
+            atlas = game.map_overview_sprite_list.atlas
+            self.assertEqual(atlas.read_texture_image_from_atlas(texture).tobytes(),
+                             game.map_overview_image.tobytes())
+
+    def test_far_zoom_uses_overview_without_hiding_aircraft(self):
+        game = self.game
+        wing = game.create_air_wing(game.human_player, game.human_player.capital_tile, "multirole_fighter", 4)
+        wing.enabled_missions = ["patrol"]
+        wing.mission_state = "attack_run"
+        wing.mission_target_tile_key = game.tile_key(wing.base_tile)
+        game.world_camera.zoom = .20000000000000036
+        self.assertTrue(game.use_overview_lod())
+        game.refresh_visible_tiles()
+        self.assertEqual(len(game.visible_tiles), 0)
+        game.on_draw()
+        self.assertGreater(len(game._air_lod_flight_shapes), 0)
+        self.assertGreater(len(game._air_lod_static_shapes), 0)
+
+    def test_fixed_camera_reuses_visible_sprite_membership(self):
+        from unittest.mock import patch
+        import arcade
+        game = self.game
+        game.get_visible_tiles()
+        with patch.object(arcade.SpriteList, "clear", side_effect=AssertionError("unchanged visible list rebuilt")):
+            game.get_visible_tiles()
     def test_build_duplicate_and_untrusted_command_are_rejected(self):
         from simulation_core import SimulationCommand
         game = self.game

@@ -326,6 +326,7 @@ BUILDING_TYPES = [
     ("field_helipad", "Полевая вертолетная площадка"),
     ("warehouse", "Склад"),
     ("supply_depot", "Пункт снабжения"),
+    ("fortification", "Укрепления / бункеры"),
     ("fuel_storage", "Топливохранилище"),
     ("refinery", "НПЗ"),
     ("oil_gas_rig", "Нефтегазовая вышка"),
@@ -620,6 +621,11 @@ BUILDING_CONSTRUCTION_BASE = {
             "machinery": 240,
             "refined_fuel": 110,
         },
+    },
+    "fortification": {
+        "work": 180.0,
+        "money": 4_000_000,
+        "resources": {"construction_goods": 9_000, "steel": 2_000, "machinery": 180, "refined_fuel": 80},
     },
     "fuel_storage": {
         "work": 190.0,
@@ -1685,6 +1691,7 @@ TILE_VISUAL_ASSETS = {
     "village": "village.png",
     "warehouse": "warehouse.png",
     "supply_depot": "warehouse.png",
+    "fortification": "warehouse.png",
     "fuel_storage": "fuel_storage.png",
     "refinery": "refinery.png",
     "oil_gas_rig": "refinery.png",

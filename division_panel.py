@@ -14,6 +14,7 @@ class DivisionPanelMixin:
         self.division_panel_key = "basic_infantry"
         self.division_panel_hits = []
         self.division_equipment_scroll = 0
+        self.division_training_page = 0
         self.division_deployment_key = None
         self.division_site_pick_mode = False
         self.division_site_project_id = None
@@ -89,8 +90,16 @@ class DivisionPanelMixin:
         button("Начать подготовку", left, cursor + 10, width - 36, "recruit")
         cursor -= 32
         line(service.message[:65], (240, 203, 130))
-        line("Очередь (последовательно, максимум 4):")
-        for project in service.queues[player.id]:
+        projects = service.queues[player.id]
+        page_size = 3
+        last_page = max(0, (len(projects) - 1) // page_size)
+        self.division_training_page = min(self.division_training_page, last_page)
+        if last_page:
+            button("<", right - 60, cursor + 10, 26, "training_page", -1)
+            button(">", right - 28, cursor + 10, 26, "training_page", 1)
+        line(f"Параллельная подготовка: {len(projects)}  ·  {self.division_training_page + 1}/{last_page + 1}")
+        start = self.division_training_page * page_size
+        for project in projects[start:start + page_size]:
             progress = project["hours"] / (project["cost"]["days"] * 24)
             label = f"{project['template']['name'][:22]}: {progress:.0%}"
             if project["status"] == "waiting_site":
@@ -130,6 +139,9 @@ class DivisionPanelMixin:
                 keys = list(self.recruitment.archetypes) + self.recruitment.designs[self.human_player.id]
                 self.division_panel_key = keys[(keys.index(self.division_panel_key) + value) % len(keys)]
                 self.division_equipment_scroll = 0
+            elif action == "training_page":
+                last_page = max(0, (len(self.recruitment.queues[self.human_player.id]) - 1) // 3)
+                self.division_training_page = max(0, min(last_page, self.division_training_page + value))
             elif action == "edit":
                 template = self.division_template(self.division_panel_key)
                 self.division_draft = dict(template.get("composition", {self.division_panel_key: 10}))

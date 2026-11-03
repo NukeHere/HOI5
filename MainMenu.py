@@ -1,10 +1,14 @@
 from dataclasses import dataclass
 from typing import Callable
+from pathlib import Path
+import random
 
 import arcade
 
 from Constants import MAX_BOTS, RESOLUTIONS
 from MainGame import Game
+from audio_process import ProcessAudio
+from map_generation_job import MapGenerationJob
 from Settings import apply_window_settings_safely, create_window_with_fallback, load_settings, save_settings
 
 
@@ -241,10 +245,50 @@ class MainMenuView(arcade.View):
         self.difficulty_index = 1
         self.bot_count_index = 3
         self.map_size_index = 2
+        self.music = None
+        self.generation_job = None
+        self.generation_options = None
 
     def on_show_view(self):
         arcade.set_background_color((13, 18, 24))
         self.rebuild_layout()
+        if self.music is None:
+            self.music = ProcessAudio(volume=self.music_volume, sound_volume=self.sound_volume,
+                playlists={"economy": [Path(__file__).parent / "music/hoi3maintheme.ogg"]})
+            self.window.remove_handlers(on_close=self.stop_menu)
+            self.window.push_handlers(on_close=self.stop_menu)
+
+    def on_hide_view(self):
+        self.stop_menu()
+        self.window.remove_handlers(on_close=self.stop_menu)
+
+    def on_update(self, delta_time):
+        if self.generation_job is not None:
+            try:
+                data = self.generation_job.poll()
+                if data is not None:
+                    self.generation_job = None
+                    self.message = "Подготовка государств и интерфейса..."
+                    game = Game(**self.generation_options, map_data=data)
+                    self.window.show_view(game)
+            except Exception as error:
+                self.stop_menu()
+                self.message = f"Ошибка создания мира: {error}"
+                self.on_show_view()
+            return
+        if self.music:
+            self.music.update()
+
+    def stop_menu(self):
+        self.stop_music()
+        if self.generation_job is not None:
+            self.generation_job.close()
+            self.generation_job = None
+
+    def stop_music(self):
+        if self.music is not None:
+            self.music.close()
+            self.music = None
 
     def on_show(self):
         self.on_show_view()
@@ -331,9 +375,13 @@ class MainMenuView(arcade.View):
 
     def set_sound_volume(self, value):
         self.sound_volume = value
+        if self.music:
+            self.music.set_sound_volume(value)
 
     def set_music_volume(self, value):
         self.music_volume = value
+        if self.music:
+            self.music.set_volume(value)
 
     def toggle_pending_fullscreen(self):
         self.pending_fullscreen = not self.pending_fullscreen
@@ -371,15 +419,20 @@ class MainMenuView(arcade.View):
         self.message = "Мультиплеер пока не доступен."
 
     def exit_game(self):
+        self.stop_menu()
         arcade.exit()
 
     def start_new_game(self):
-        game_view = Game(
-            difficulty=DIFFICULTIES[self.difficulty_index],
-            bot_count=BOT_COUNTS[self.bot_count_index],
-            map_size=MAP_SIZES[self.map_size_index],
-        )
-        self.window.show_view(game_view)
+        if self.generation_job is not None:
+            return
+        # Generation is CPU-bound; don't leave an audio stream competing for
+        # the GIL while the next world is being initialized.
+        self.stop_music()
+        self.generation_options = dict(difficulty=DIFFICULTIES[self.difficulty_index],
+            bot_count=BOT_COUNTS[self.bot_count_index], map_size=MAP_SIZES[self.map_size_index],
+            world_seed=random.randint(0, 999999))
+        self.generation_job = MapGenerationJob(self.generation_options["map_size"], self.generation_options["world_seed"])
+        self.message = "Генерация карты в процессах... ESC: отмена"
 
     def on_draw(self):
         self.clear()
@@ -451,6 +504,8 @@ class MainMenuView(arcade.View):
                 break
 
     def on_mouse_press(self, x, y, button, modifiers):
+        if self.generation_job is not None:
+            return
         if button != arcade.MOUSE_BUTTON_LEFT:
             return
 
@@ -503,6 +558,12 @@ class MainMenuView(arcade.View):
                 return
 
     def on_key_press(self, key, modifiers):
+        if self.generation_job is not None:
+            if key == arcade.key.ESCAPE:
+                self.stop_menu()
+                self.message = "Генерация отменена"
+                self.on_show_view()
+            return
         if key == arcade.key.ESCAPE and self.open_dropdown:
             for dropdown in self.dropdowns:
                 dropdown.hovered_index = None
@@ -520,4 +581,6 @@ def main():
 
 
 if __name__ == "__main__":
+    from multiprocessing import freeze_support
+    freeze_support()
     main()

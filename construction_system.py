@@ -4,6 +4,12 @@ import arcade
 
 from Constants import *
 
+SUPPLY_BUILDINGS = SUPPLY_SOURCE_WEIGHTS.keys() | SUPPLY_RELAY_BUILDING_WEIGHTS.keys()
+STORAGE_BUILDINGS = set(FUEL_STORAGE_CAPACITY_BY_COVERAGE).union(*STORAGE_CAPACITY_BY_COVERAGE.values())
+PRODUCTION_BUILDINGS = {"mine", "oil_gas_rig", "farms"} | SETTLEMENT_UPKEEP_PER_COVERAGE.keys() | {
+    recipe.get("building", "industry") for stage in PRODUCTION_RECIPES.values() for recipe in stage.values()
+}
+
 
 class ConstructionSystemMixin:
     @staticmethod
@@ -31,7 +37,10 @@ class ConstructionSystemMixin:
         coverage = (getattr(tile, "building_coverage", {}) or {}).get(building_key, 0.0)
         if coverage <= 0:
             return 1.0
-        health = self.building_health_map(tile).get(building_key, 1.0)
+        health_map = getattr(tile, "building_health", None)
+        if not health_map:
+            return 1.0
+        health = health_map.get(building_key, 1.0)
         return max(0.0, min(1.0, health))
 
     def set_building_health(self, tile, building_key, health):
@@ -49,11 +58,14 @@ class ConstructionSystemMixin:
             health_map.pop(building_key, None)
         else:
             health_map[building_key] = health
+        self.invalidate_coverage_totals(getattr(tile, "owner", None))
         return True
 
     def effective_building_coverage(self, tile, building_key, coverage=None):
         if coverage is None:
             coverage = (getattr(tile, "building_coverage", {}) or {}).get(building_key, 0.0)
+        if coverage <= 0:
+            return 0.0
         return max(0.0, coverage) * self.building_health(tile, building_key)
 
     def effective_building_coverage_map(self, tile):
@@ -74,8 +86,14 @@ class ConstructionSystemMixin:
             if value > 0 and self.building_damage_fraction(tile, key) > threshold
         ]
 
-    def refresh_tile_after_building_health_change(self, tile, owner=None):
+    def refresh_tile_after_building_health_change(self, tile, owner=None, building_key=None):
         owner = owner or getattr(tile, "owner", None)
+        self.invalidate_coverage_totals(owner)
+        if getattr(self, "_defer_building_refresh", False) and owner:
+            _, buildings, tiles = self._building_refresh_pending.setdefault(owner.id, (owner, set(), set()))
+            buildings.add(building_key)
+            tiles.add(tile)
+            return
         if owner:
             self.update_tile_production_cache(tile)
             self.recalculate_player_supply(owner)
@@ -84,8 +102,38 @@ class ConstructionSystemMixin:
             self.recalculate_resource_balance_breakdown(owner)
             self.recalculate_monthly_balance(owner)
         self.tile_visual_revision += 1
-        self.invalidate_tile_visual_cache()
+        if tile in getattr(self, "visible_tiles", ()):
+            self.invalidate_tile_visual_cache()
         self.invalidate_construction_placement_cache()
+
+    def flush_building_refreshes(self):
+        pending = getattr(self, "_building_refresh_pending", {})
+        self._building_refresh_pending = {}
+        for owner, buildings, _ in pending.values():
+            unknown = None in buildings
+            if unknown or buildings & PRODUCTION_BUILDINGS:
+                self.recalculate_state_production_cache(owner)
+            if unknown or buildings & SUPPLY_BUILDINGS:
+                self.recalculate_player_supply(owner)
+            if unknown or buildings & STORAGE_BUILDINGS:
+                self.mark_player_storage_dirty(owner)
+                self.distribute_player_stockpiles_to_tiles(owner)
+        if pending:
+            previous = getattr(self, "_trade_forecast_batch", None)
+            try:
+                if previous is None:
+                    orders = [order for player in self.players for order in self.collect_player_market_orders(player, 1.0)]
+                    self._trade_forecast_batch = self.plan_market_orders(orders, 1.0)[0]
+                for owner, _, _ in pending.values():
+                    self.recalculate_resource_balance_breakdown(owner)
+                    self.recalculate_monthly_balance(owner)
+            finally:
+                self._trade_forecast_batch = previous
+            self.tile_visual_revision += 1
+            visible = getattr(self, "visible_tiles", ())
+            if any(tile in visible for _, _, tiles in pending.values() for tile in tiles):
+                self.invalidate_tile_visual_cache()
+            self.invalidate_construction_placement_cache()
 
     def damage_building(self, tile, building_key, damage_fraction, queue_repair=True):
         if damage_fraction <= 0:
@@ -97,7 +145,7 @@ class ConstructionSystemMixin:
         changed = self.set_building_health(tile, building_key, new_health)
         if changed:
             owner = getattr(tile, "owner", None)
-            self.refresh_tile_after_building_health_change(tile, owner)
+            self.refresh_tile_after_building_health_change(tile, owner, building_key)
             self.politics.news.record_logistics_damage(
                 self.politics.day, owner, tile, building_key, old_health, new_health)
             if queue_repair and owner:
@@ -109,10 +157,7 @@ class ConstructionSystemMixin:
         return max(1.0, float(getattr(tile, "movement_cost", 1.0) or 1.0))
 
     def build_power(self, player):
-        coverage_totals = {}
-        for tile in player.tiles:
-            for key, value in (getattr(tile, "building_coverage", {}) or {}).items():
-                coverage_totals[key] = coverage_totals.get(key, 0.0) + self.effective_building_coverage(tile, key, value)
+        coverage_totals = self.effective_coverage_totals(player)
 
         modifiers = player.construction_modifiers or {}
         industry_efficiency = (player.production_modifiers or {}).get("industry_efficiency", 1.0)
@@ -240,7 +285,9 @@ class ConstructionSystemMixin:
         if not player or not tile or tile.owner is not player:
             return 0
         added = 0
-        for building_key in self.damaged_building_keys(tile):
+        for building_key in tuple(getattr(tile, "building_health", {}) or {}):
+            if self.building_damage_fraction(tile, building_key) <= 0.001:
+                continue
             if self.enqueue_auto_repair(player, tile, building_key):
                 added += 1
         return added
@@ -1034,7 +1081,7 @@ class ConstructionSystemMixin:
         if health_gain <= 0:
             return
         if self.set_building_health(tile, building_key, self.building_health(tile, building_key) + health_gain):
-            self.refresh_tile_after_building_health_change(tile, player)
+            self.refresh_tile_after_building_health_change(tile, player, building_key)
 
     def complete_construction_project(self, player, project):
         tile = project.get("tile")
@@ -1048,7 +1095,7 @@ class ConstructionSystemMixin:
             f"Работы на участке ({tile.q}, {tile.r}) завершены.")
         if project.get("project_type") == "repair":
             self.set_building_health(tile, building_key, cost.get("target_health", 1.0))
-            self.refresh_tile_after_building_health_change(tile, player)
+            self.refresh_tile_after_building_health_change(tile, player, building_key)
             return
         coverage = getattr(tile, "building_coverage", None)
         if coverage is None:
@@ -1061,16 +1108,7 @@ class ConstructionSystemMixin:
             tile.buildings.append(building_key)
         if building_key == "airbase" and not self.airbase_on_tile(tile):
             self.create_airbase(player, tile, coverage.get("airbase", 0.0))
-        self.recalculate_state_resources(player)
-        self.update_tile_production_cache(tile)
-        self.recalculate_player_supply(player)
-        self.mark_player_storage_dirty(player)
-        self.distribute_player_stockpiles_to_tiles(player)
-        self.recalculate_resource_balance_breakdown(player)
-        self.recalculate_monthly_balance(player)
-        self.tile_visual_revision += 1
-        self.invalidate_tile_visual_cache()
-        self.invalidate_construction_placement_cache()
+        self.refresh_tile_after_building_health_change(tile, player, building_key)
 
     def run_construction_tick(self, player, elapsed_hours=None):
         with self.profiler.measure("construction_auto_repairs"):
