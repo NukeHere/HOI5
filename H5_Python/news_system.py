@@ -1,6 +1,6 @@
 """Simulation-owned news feed. Headlines have no gameplay effects."""
 
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 import random
 from datetime import datetime, timedelta
@@ -9,6 +9,8 @@ import warnings
 
 
 PRIORITIES = {"flavor": 0, "regular": 1, "important": 2, "critical": 3}
+BATCHED_NOTICES = {"construction_complete", "air_defense_completed", "aircraft_losses",
+                   "division_destroyed", "territory_lost", "territory_gained"}
 
 
 @dataclass(frozen=True)
@@ -217,6 +219,7 @@ class NewsSystem:
         self.last_logistics_news_day = {}
         self.alert_states = {}
         self.notice_days = {}
+        self.pending_notices = None
         self.log_path = None
         self.log_error = None
         self.log_start_time = datetime(2000, 1, 1)
@@ -250,7 +253,29 @@ class NewsSystem:
             self.log_error = str(error)
             warnings.warn(f"Не удалось записать новость: {error}", RuntimeWarning)
 
-    def notice(self, day, owner, key, title, body, important=False, cooldown=0):
+    def begin_notice_batch(self):
+        self.pending_notices = {}
+
+    def end_notice_batch(self):
+        pending, self.pending_notices = self.pending_notices, None
+        for (day, owner_id, key), entries in (pending or {}).items():
+            title, body, _, _ = entries[0]
+            if len(entries) > 1:
+                total = sum(quantity for _, _, _, quantity in entries)
+                if key == "construction_complete":
+                    title = "Завершены строительные и ремонтные работы"
+                title = f"{title} ({total})"
+                body = "\n".join(f"{detail} ×{count}" if count > 1 else detail
+                                 for detail, count in Counter(detail for _, detail, _, _ in entries).items())
+            self.notice_days[owner_id, key] = day
+            self.publish(day, key, title, body,
+                         "important" if any(item[2] for item in entries) else "regular",
+                         scope="local", country_ids=(owner_id,))
+
+    def notice(self, day, owner, key, title, body, important=False, cooldown=0, quantity=1):
+        if self.pending_notices is not None and key in BATCHED_NOTICES:
+            self.pending_notices.setdefault((day, owner.id, key), []).append((title, body, important, quantity))
+            return None
         token = owner.id, key
         if day - self.notice_days.get(token, -10000) < cooldown:
             return None

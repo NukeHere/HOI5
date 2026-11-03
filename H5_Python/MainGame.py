@@ -10200,6 +10200,8 @@ class Game(AirRenderLODMixin, DivisionPanelMixin, NewsPanelMixin, CountryPanelMi
             profiler.end_phase("update")
 
     def advance_simulation(self, elapsed_hours):
+        news = self.politics.news
+        news.begin_notice_batch()
         self._coverage_step_cache = {}
         self._population_weight_step_cache = {}
         self._defer_building_refresh = True
@@ -10214,6 +10216,7 @@ class Game(AirRenderLODMixin, DivisionPanelMixin, NewsPanelMixin, CountryPanelMi
             finally:
                 self._coverage_step_cache = None
                 self._population_weight_step_cache = None
+                news.end_notice_batch()
 
     def advance_simulation_step(self, elapsed_hours):
         """One chronological world step, also used by runtime tests."""

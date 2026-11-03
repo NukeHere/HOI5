@@ -577,6 +577,12 @@ class MainMenuView(arcade.View):
 
 
 def main():
+    from log_cleanup import prune_logs
+    from pathlib import Path
+    try:
+        prune_logs(Path(__file__).resolve().parent / "logs")
+    except OSError as error:
+        print(f"Не удалось очистить старые журналы: {error}")
     settings = load_settings(RESOLUTIONS)
     window = create_window_with_fallback(arcade, "HOI 5", settings, RESOLUTIONS)
     start_view = MainMenuView()

@@ -36,9 +36,9 @@ class SimulationTile:
 
 
 class HeadlessGame(Game):
-    def __init__(self, seed=1, countries=4, map_size=32, news_path=None, ai_seed=None):
-        if not 2 <= countries <= MAX_BOTS + 1:
-            raise ValueError(f"countries must be between 2 and {MAX_BOTS + 1}")
+    def __init__(self, seed=1, countries=4, map_size=32, news_path=None, ai_seed=None, difficulty="Normal"):
+        if not 1 <= countries <= MAX_BOTS + 1:
+            raise ValueError(f"countries must be between 1 and {MAX_BOTS + 1}")
         if not 16 <= map_size <= 150:
             raise ValueError("map_size must be between 16 and 150")
         # Do NOT call arcade.View/Game.__init__: neither a real nor hidden GL window.
@@ -46,7 +46,7 @@ class HeadlessGame(Game):
         self.world_seed = seed
         self.bot_count = countries - 1
         self.map_size = self.grid_width = self.grid_height = map_size
-        self.difficulty = "Normal"
+        self.difficulty = difficulty
         self.paused = self.game_over = False
         self.human_player = None
         self._window = None

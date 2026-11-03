@@ -254,6 +254,13 @@ class FrontTests(unittest.TestCase):
         self.assertEqual([p["hours"] for p in service.queues[self.a.id]], [24] * 10)
         game.recruitment.update(service.quote(template)["days"] * 24)
         self.assertEqual(len(self.a.divisions), original + 10)
+        news = game.politics.news
+        deployed = [item for item in news.visible(self.a.id) if item.key == "division_deployed"]
+        self.assertEqual(len(deployed), 1)
+        self.assertIn("10", deployed[0].title)
+        self.assertIn("×10", deployed[0].body)
+        self.assertFalse(any(item.key in {"division_training", "division_deployed"}
+                             for item in news.visible(self.b.id)))
 
     def test_justification_targets_deployment_and_blocks_unprepared_declaration(self):
         game = self.game

@@ -1,5 +1,6 @@
 """Server-owned division designs, paid training and deployment."""
 
+from collections import Counter
 from copy import deepcopy
 import math
 
@@ -99,7 +100,7 @@ class DivisionRecruitment:
         self.queues[player.id].append(project)
         game.politics.news.publish(game.politics.day, "division_training", "Начата подготовка дивизии",
             f"{player.name}: {template['name']}, {cost['manpower']} человек, срок {cost['days']} суток.",
-            country_ids=(player.id,))
+            scope="local", country_ids=(player.id,))
         return True, "Подготовка начата; люди, деньги и оснащение зарезервированы"
 
     def cancel(self, player, project_id):
@@ -116,7 +117,7 @@ class DivisionRecruitment:
             self.game.add_to_stockpile_unsafe(player, k, amount)
         self.game.politics.news.publish(self.game.politics.day, "division_training_cancelled", "Подготовка дивизии отменена",
             f"{player.name}: {project['template']['name']}. Люди и оснащение возвращены; возврат денег {cost['money'] * fraction:.0f}.",
-            country_ids=(player.id,))
+            scope="local", country_ids=(player.id,))
         return True, "Набор отменён; люди, оснащение и неистраченные деньги возвращены"
 
     def update(self, hours):
@@ -130,6 +131,7 @@ class DivisionRecruitment:
                     self.cancel(player, project["id"])
                 continue
             remaining = []
+            deployed = []
             for project in queue:
                 duration = project["cost"]["days"] * 24
                 project["hours"] = min(duration, project["hours"] + max(0, hours))
@@ -149,14 +151,23 @@ class DivisionRecruitment:
                 division.organization = division.max_organization * .5
                 game.register_division(division)
                 self.completed[player.id] += 1
-                game.politics.news.publish(game.politics.day, "division_deployed", "Дивизия завершила подготовку",
-                    f"{player.name}: {project['template']['name']} развёрнута в ({tile.q}, {tile.r}).",
-                    country_ids=(player.id,))
-            if len(remaining) != len(queue):
+                deployed.append((project["template"]["name"], tile.q, tile.r))
+            if deployed:
                 queue[:] = remaining
                 game.invalidate_division_render_cache()
                 game.mark_player_resource_balance_dirty(player)
                 game.recalculate_monthly_balance(player, include_trade=False)
+                if len(deployed) == 1:
+                    name, q, r = deployed[0]
+                    title = "Дивизия завершила подготовку"
+                    body = f"{name}. Место развёртывания: ({q}, {r})."
+                else:
+                    title = f"Подготовку завершили дивизии: {len(deployed)}"
+                    body = "Развёрнуты: " + "; ".join(
+                        f"{name} ×{count} ({q}, {r})"
+                        for (name, q, r), count in Counter(deployed).items()) + "."
+                game.politics.news.publish(game.politics.day, "division_deployed", title, body,
+                                          scope="local", country_ids=(player.id,))
 
     def handle_command(self, command):
         game = self.game

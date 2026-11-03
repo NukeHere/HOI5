@@ -13,6 +13,18 @@ def player(pid):
 
 
 class NewsTests(unittest.TestCase):
+    def test_batch_groups_losses_by_owner_and_preserves_total(self):
+        news, a, b = NewsSystem(1), player(0), player(1)
+        news.begin_notice_batch()
+        news.notice(1, a, "aircraft_losses", "Потери авиации", "Потеряно 2", important=True, quantity=2)
+        news.notice(1, a, "aircraft_losses", "Потери авиации", "Потеряно 3", important=True, quantity=3)
+        news.notice(1, b, "aircraft_losses", "Потери авиации", "Потеряно 1")
+        news.end_notice_batch()
+        self.assertEqual(len(news.visible(a.id)), 1)
+        self.assertEqual(news.visible(a.id)[0].title, "Потери авиации (5)")
+        self.assertEqual(news.visible(a.id)[0].priority, "important")
+        self.assertEqual(news.visible(b.id)[0].body, "Потеряно 1")
+
     def test_alert_reports_problem_once_and_reports_recovery(self):
         news, owner = NewsSystem(1), player(0)
         for day in range(10):
