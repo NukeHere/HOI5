@@ -88,47 +88,51 @@ void assignStartingIndustry(std::vector<Tile>& tiles, int size, const std::vecto
 }
 
 template<class Tile>
+void accumulateTileProduction(Production& result,const Tile& tile,
+                              const std::set<std::string_view>& technologies) {
+    const auto effective = [&](Building building) {
+        const auto& b = tile.buildings[building];
+        return b.area * b.health;
+    };
+    for (const auto& deposit : tile.deposits) {
+        const bool liquid = deposit.resource == "oil" || deposit.resource == "natural_gas";
+        const double area = effective(liquid ? oilGasRig : mine);
+        if (area <= 0) continue;
+        const double abundance = std::min(1.,std::log10(deposit.mass+1)/std::log10(1500001.));
+        const auto found = mineWeights.find(deposit.resource);
+        const double weight = found == mineWeights.end() ? .35 : found->second;
+        result[raw].outputs[deposit.resource] += area * abundance *
+            (liquid ? (.62+weight)*5600 : (.55+weight)*5200);
+    }
+    const double farmCoverage = effective(farms);
+    if (farmCoverage > 0) {
+        const double food = farmCoverage * agricultureScore(tile.natural) * 30000;
+        result[raw].outputs["food"] += food;
+        result[agriculture].inputs["fertilizer"] += farmCoverage*950;
+        result[agriculture].outputs["food"] += food*.30;
+    }
+    for (const auto& recipe : recipes) {
+        if (!recipe.technology.empty() && !technologies.contains(recipe.technology)) continue;
+        double units = recipe.rate * effective(recipe.building);
+        if (units <= 0) continue;
+        if (recipe.building == industry) {
+            const auto& allocation = tile.industries;
+            if (std::find(allocation.begin(),allocation.end(),recipe.sector) == allocation.end()) continue;
+            units *= std::pow(.9, allocation.size()-1) / allocation.size();
+        }
+        for (const auto& [name,amount] : recipe.inputs) result[recipe.stage].inputs[name] += amount*units;
+        for (const auto& [name,amount] : recipe.outputs) result[recipe.stage].outputs[name] += amount*units;
+    }
+    for (const auto& [name,amount] : cityUpkeep) result[upkeep].inputs[name] += effective(city)*amount;
+    for (const auto& [name,amount] : villageUpkeep) result[upkeep].inputs[name] += effective(village)*amount;
+}
+
+template<class Tile>
 Production buildProduction(const std::vector<Tile>& tiles, int country, double population,
                            const std::set<std::string_view>& technologies) {
     Production result;
-    for (const auto& tile : tiles) {
-        if (tile.owner != country) continue;
-        const auto effective = [&](Building building) {
-            const auto& b = tile.buildings[building];
-            return b.area * b.health;
-        };
-        for (const auto& deposit : tile.deposits) {
-            const bool liquid = deposit.resource == "oil" || deposit.resource == "natural_gas";
-            const double area = effective(liquid ? oilGasRig : mine);
-            if (area <= 0) continue;
-            const double abundance = std::min(1.,std::log10(deposit.mass+1)/std::log10(1500001.));
-            const auto found = mineWeights.find(deposit.resource);
-            const double weight = found == mineWeights.end() ? .35 : found->second;
-            result[raw].outputs[deposit.resource] += area * abundance *
-                (liquid ? (.62+weight)*5600 : (.55+weight)*5200);
-        }
-        const double farmCoverage = effective(farms);
-        if (farmCoverage > 0) {
-            const double food = farmCoverage * agricultureScore(tile.natural) * 30000;
-            result[raw].outputs["food"] += food;
-            result[agriculture].inputs["fertilizer"] += farmCoverage*950;
-            result[agriculture].outputs["food"] += food*.30;
-        }
-        for (const auto& recipe : recipes) {
-            if (!recipe.technology.empty() && !technologies.contains(recipe.technology)) continue;
-            double units = recipe.rate * effective(recipe.building);
-            if (units <= 0) continue;
-            if (recipe.building == industry) {
-                const auto& allocation = tile.industries;
-                if (std::find(allocation.begin(),allocation.end(),recipe.sector) == allocation.end()) continue;
-                units *= std::pow(.9, allocation.size()-1) / allocation.size();
-            }
-            for (const auto& [name,amount] : recipe.inputs) result[recipe.stage].inputs[name] += amount*units;
-            for (const auto& [name,amount] : recipe.outputs) result[recipe.stage].outputs[name] += amount*units;
-        }
-        for (const auto& [name,amount] : cityUpkeep) result[upkeep].inputs[name] += effective(city)*amount;
-        for (const auto& [name,amount] : villageUpkeep) result[upkeep].inputs[name] += effective(village)*amount;
-    }
+    for (const auto& tile : tiles)
+        if (tile.owner == country) accumulateTileProduction(result,tile,technologies);
     for (const auto& [name,amount] : lifeSupport) result[upkeep].inputs[name] += population/1e6*amount;
     return result;
 }

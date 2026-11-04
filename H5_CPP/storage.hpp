@@ -18,7 +18,7 @@ inline std::string_view storageBucket(std::string_view resource) {
 }
 
 template<class Tile>
-Stockpile storageCapacity(const std::vector<Tile>& tiles, int country) {
+Stockpile tileStorageCapacity(const Tile& tile) {
     constexpr std::array<std::string_view,4> buckets{"raw","semi_finished","finished","fuel"};
     constexpr int rates[][buildingCount] = {
         {520000,180000,1050000,240000,280000},
@@ -27,12 +27,21 @@ Stockpile storageCapacity(const std::vector<Tile>& tiles, int country) {
         {180000,35000,0,120000,220000,3200000,850000,420000}
     };
     Stockpile result;
-    for (auto bucket : buckets) result[bucket] = 0;
+    for (std::size_t bucket = 0; bucket < buckets.size(); ++bucket) {
+        double capacity = 0;
+        for (int b = 0; b < buildingCount; ++b)
+            capacity += tile.buildings[b].area * tile.buildings[b].health * rates[bucket][b];
+        result[buckets[bucket]] = capacity;
+    }
+    return result;
+}
+
+template<class Tile>
+Stockpile storageCapacity(const std::vector<Tile>& tiles,int country) {
+    Stockpile result{{"raw",0},{"semi_finished",0},{"finished",0},{"fuel",0}};
     for (const auto& tile : tiles) {
         if (tile.owner != country) continue;
-        for (std::size_t bucket = 0; bucket < buckets.size(); ++bucket)
-            for (int b = 0; b < buildingCount; ++b)
-                result[buckets[bucket]] += tile.buildings[b].area * tile.buildings[b].health * rates[bucket][b];
+        for (const auto& [bucket,capacity] : tileStorageCapacity(tile)) result[bucket] += capacity;
     }
     return result;
 }

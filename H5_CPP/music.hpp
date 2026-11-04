@@ -22,6 +22,7 @@ class DynamicMusic {
     std::mt19937 random{std::random_device{}()};
     sf::Music music;
     Path current;
+    float volume = 60;
     int peakTerritory{}, lastBattleCount{}, lastEscalation = -30, escalationUntil = -1;
     bool pendingEscalation{};
 
@@ -45,6 +46,8 @@ public:
             std::sort(tracks[i].begin(),tracks[i].end());
         }
     }
+
+    void setVolume(float value) { volume = value; music.setVolume(volume); }
 
     void newWorld() {
         seenWars.clear();
@@ -123,7 +126,7 @@ public:
                     failed.insert(path);
                     continue;
                 }
-                music.setVolume(60);
+                music.setVolume(volume);
                 music.play();
                 current = path;
                 if (category == openingMusic) {

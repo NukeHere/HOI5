@@ -21,6 +21,15 @@ public:
     int speed = 1;
     bool paused = true;
 
+    void setPaused(bool value) {
+        paused = value;
+        if (paused) accumulator = 0;
+    }
+
+    void togglePause() { setPaused(!paused); }
+    void setSpeed(int value) { speed = std::clamp(value,1,5); }
+    void changeSpeed(int delta) { setSpeed(speed+delta); }
+
     template<class Step>
     void update(double deltaTime, Step step) {
         if (paused) return;

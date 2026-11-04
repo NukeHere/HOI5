@@ -25,22 +25,29 @@ void recalculateSupply(std::span<Tile> tiles, int size, const std::vector<int>& 
     const auto effective = [](const BuildingCoverage& building) {
         return building.area * building.health;
     };
-    for (int index = 0; index < static_cast<int>(tiles.size()); ++index) {
-        const auto& source = tiles[index];
-        if (source.water || source.owner < 0) continue;
-        double strength = index == capitals[source.owner] ? .85 : 0.;
-        for (int b = 0; b < buildingCount; ++b) strength += effective(source.buildings[b]) * sourceWeights[b];
-        strength = std::clamp(strength, 0., 1.);
-        if (strength <= 0) continue;
+    const auto spread = [&](int index,int country,double strength) {
         const int q = index % size, r = index / size;
         for (int dr = -7; dr <= 7; ++dr) for (int dq = -7; dq <= 7; ++dq) {
             const int distance = std::max({std::abs(dq), std::abs(dr), std::abs(dq + dr)});
             if (distance > 7 || q + dq < 0 || q + dq >= size || r + dr < 0 || r + dr >= size) continue;
             auto& tile = tiles[(r + dr) * size + q + dq];
-            if (tile.owner == source.owner && !tile.water)
+            if (tile.owner == country && !tile.water)
                 tile.supply = std::max(tile.supply, strength * decay[distance]);
         }
+    };
+    std::vector<bool> hasSource(capitals.size());
+    for (int index = 0; index < static_cast<int>(tiles.size()); ++index) {
+        const auto& source = tiles[index];
+        if (source.water || source.owner < 0) continue;
+        double strength = index == capitals[source.owner] ? .85 : 0.;
+        for (int b = 0; b < buildingCount; ++b) strength += effective(source.buildings[b]) * sourceWeights[b];
+        if (strength <= 0) continue;
+        hasSource[source.owner] = true;
+        spread(index,source.owner,std::clamp(strength,0.,1.));
     }
+    for (int country = 0; country < static_cast<int>(capitals.size()); ++country)
+        if (!hasSource[country] && capitals[country] >= 0)
+            spread(capitals[country],country,.65);
     const auto passability = [](const Tile& tile) { return std::clamp(1. / tile.movementCost, 0., 1.); };
     for (auto& tile : tiles) tile.supply *= .42 + passability(tile) * .58;
 

@@ -20,10 +20,12 @@ struct Battle {
     int attacker, defender;
     double advance{};
     std::vector<int> attackers, defenders;
+    std::vector<int> activeAttackers, activeDefenders;
 };
 
-inline double combatDamage(const CombatStats& attacker, const CombatStats& target, bool defending, std::array<double,3> ammo = {1,1,1}, double supply = 1, double fort = 0) {
-    const double defense = (defending ? target.defense*(1+fort) : target.breakthrough) * std::max(.2,target.widthEfficiency);
+inline double combatDamage(const CombatStats& attacker, const CombatStats& target, bool defending, std::array<double,3> ammo = {1,1,1}, double supply = 1, double fort = 0, double airBonus = 0) {
+    const double defense = (defending ? target.defense*(1+fort) : target.breakthrough*(1+airBonus))
+        * std::max(.2,target.widthEfficiency);
     const auto damage = [&](double attack) {
         attack *= std::max(.2,attacker.widthEfficiency)*(.90+.10*supply);
         return attack*.10+std::max(0.,attack-defense)*.40;

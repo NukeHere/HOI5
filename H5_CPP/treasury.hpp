@@ -6,11 +6,13 @@ namespace hoi5 {
 
 struct TreasuryFlows {
     double population{}, companies{}, government = 450000, social{}, infrastructure{};
+    double pensions{}, children{}, disability{}, localServices{};
+    double expenses() const { return government+social+infrastructure; }
     double balance() const { return population+companies-government-social-infrastructure; }
 };
 
 template<class Tile>
-TreasuryFlows monthlyTreasury(const std::vector<Tile>& tiles,int owner,double population,double stability) {
+TreasuryFlows monthlyTreasury(const std::vector<Tile>& tiles,int owner,double population) {
     TreasuryFlows flows;
     flows.government += population/1e6*48000;
     for (const auto& tile : tiles) {
@@ -26,9 +28,14 @@ TreasuryFlows monthlyTreasury(const std::vector<Tile>& tiles,int owner,double po
             flows.infrastructure += b.area*infrastructureUpkeep[building];
         }
         flows.population += tile.population/1e6 * weightedIncome/totalWeight;
-        flows.social += tile.population/1e6 * (socialBase + tile.buildings[city].area*70000 + tile.buildings[village].area*28000);
+        const double millions = tile.population/1e6;
+        flows.pensions += millions*.16*230000;
+        flows.children += millions*.23*100000;
+        flows.disability += millions*2200;
+        flows.localServices += millions*(std::clamp(tile.buildings[city].area,0.,1.)*70000
+            + std::clamp(tile.buildings[village].area,0.,1.)*28000);
     }
-    flows.companies *= std::clamp(1+.5*(std::clamp(stability,0.,1.)-.72),.65,1.05);
+    flows.social = flows.pensions+flows.children+flows.disability+flows.localServices;
     return flows;
 }
 

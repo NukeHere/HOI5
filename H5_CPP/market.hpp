@@ -57,10 +57,10 @@ struct Market {
         }
     }
 
-    template<class Tile, class TradeAllowed, class TradePriority, class ExternalAccess>
+    template<class Tile, class TradeAllowed, class TradePriority, class ExternalAccess, class ExportLimit>
     void execute(const std::vector<Tile>& tiles, std::vector<StartingProfile>& countries,
                  std::vector<Stockpile>& stocks, const std::vector<Stockpile>& capacities,
-                 int rotation, TradeAllowed allowed, TradePriority priority, ExternalAccess externalAccess) {
+                 int rotation, TradeAllowed allowed, TradePriority priority, ExternalAccess externalAccess, ExportLimit exportLimit, double fraction = 7./30., bool reprice = true) {
         struct Capacity {
             double supply{}, logistics{};
             int land{};
@@ -86,8 +86,8 @@ struct Market {
             const auto& t = totals[i];
             const double scale = std::max(.5,countries[i].scale);
             const double logistics = (8000*scale+t.logistics)*(.35 + .65*t.supply/std::max(1,t.land));
-            const double limit = std::min(logistics,160000*scale)*week;
-            limits[i] = {2*limit,limit};
+            const double limit = std::min(logistics,160000*scale)*fraction;
+            limits[i] = {2*limit*exportLimit(int(i)),limit};
             externalCapacity += 3*limit;
             budgets.push_back(std::max(0.,countries[i].budget));
             for (const auto& [bucket,amount] : capacities[i]) availableStorage[i][bucket] = amount;
@@ -101,7 +101,7 @@ struct Market {
             auto& capacity = limits[i][contract.buy];
             auto& space = availableStorage[i][storageBucket(key)];
             const double unitPrice = base(key)*1.08;
-            double amount = std::min(contract.amount*week,capacity);
+            double amount = std::min(contract.amount*fraction,capacity);
             amount = contract.buy ? std::min({amount,space,budgets[i]/unitPrice})
                                   : std::min(amount,value(stocks[i],key));
             if (amount <= 0) continue;
@@ -112,8 +112,8 @@ struct Market {
         }
         Stockpile quota;
         for (const auto& [key, amount] : stocks.front())
-            quota[key] = std::max(750.,externalCapacity*std::max(.05,value(MARKET_RESOURCE_RARITY,key,.45))*.55);
-        updatePrices(orders,quota);
+            quota[key] = std::max(750.,externalCapacity*week/fraction*std::max(.05,value(MARKET_RESOURCE_RARITY,key,.45))*.55)*fraction/week;
+        if (reprice) updatePrices(orders,quota);
         MarketRules rules;
         rules.allowed = allowed;
         rules.priority = priority;
