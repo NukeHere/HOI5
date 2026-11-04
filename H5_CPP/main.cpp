@@ -151,10 +151,12 @@ struct Division {
     double visualProgress{};
 
     std::deque<int> route;
+    std::deque<int> postBattleRoute;
     std::string icon;
     hoi5::CombatStats combat;
     int battle = -1;
     bool attackRoute = false;
+    bool retreating = false;
     int manpower = 10000;
     const hoi5::DivisionTemplate* design = &hoi5::divisionTemplates[0];
     hoi5::Stockpile supplies = design->capacity;
@@ -400,6 +402,7 @@ struct World {
         });
         if (destination != origin && route.empty()) return false;
         unit.route = std::move(route);
+        unit.retreating = false;
         unit.attackRoute = tiles[destination].owner >= 0 && diplomacy.hostile(unit.owner,tiles[destination].owner);
         unit.progress = unit.visualProgress = 0;
         return true;
@@ -719,24 +722,38 @@ struct World {
         });
     }
 
-    void joinBattle(int target,int index) {
+    bool joinBattle(int target,int index) {
         auto& unit = divisions[index];
+        if (unit.battle >= 0 || tiles[target].water || !diplomacy.hostile(unit.owner,tiles[target].owner))
+            return false;
         auto [entry,created] = battles.try_emplace(target,hoi5::Battle{unit.owner,tiles[target].owner});
         auto& battle = entry->second;
+        if (created) battle.origin = unit.r*size+unit.q;
+        const auto enroll = [&](int participant,bool attacking) {
+            auto& member = divisions[participant];
+            member.postBattleRoute.clear();
+            if (attacking) {
+                const auto step = std::ranges::find(member.route,target);
+                if (step != member.route.end())
+                    member.postBattleRoute.assign(std::next(step),member.route.end());
+            }
+            member.route.clear();
+            member.attackRoute = attacking;
+            member.retreating = false;
+            member.battle = target;
+            member.progress = member.visualProgress = 0.;
+            (attacking ? battle.attackers : battle.defenders).push_back(participant);
+        };
         if (created) {
             for (int i = 0; i < int(divisions.size()); ++i) {
                 auto& defender = divisions[i];
                 if (defender.battle >= 0 || defender.r*size+defender.q != target || defender.combat.strength <= 0
-                    || defender.owner != battle.defender) continue;
-                defender.battle = target;
-                defender.progress = defender.visualProgress = 0;
-                battle.defenders.push_back(i);
+                    || !diplomacy.hostile(defender.owner,battle.attacker)) continue;
+                enroll(i,false);
             }
         }
-        if (unit.owner != battle.attacker) return;
-        unit.battle = target;
-        unit.progress = unit.visualProgress = 0;
-        battle.attackers.push_back(index);
+        enroll(index,unit.owner == battle.attacker);
+        return true;
     }
 
     bool battleCollateral(int target,int hours,int active,double organizationDamage,double strengthDamage) {
@@ -796,10 +813,13 @@ struct World {
             const auto alive = [&](int i) { return divisions[i].combat.strength > 0; };
             const auto ready = [&](int i) { return alive(i) && divisions[i].organization > 0; };
             std::set<int> origins;
-            for (int i : battle.attackers)
-                if (alive(i)) origins.insert(divisions[i].r*size+divisions[i].q);
+            for (int i : battle.attackers) {
+                const int origin = divisions[i].r*size+divisions[i].q;
+                if (alive(i) && hoi5::airHexDistance(origin,target,size) == 1) origins.insert(origin);
+            }
             const double width = 80+40*std::max(0,int(origins.size())-1);
-            const auto active = [&](std::vector<int>& side,bool recoverReserve) {
+            battle.width = width;
+            const auto active = [&](std::vector<int>& side) {
                 std::vector<int> result;
                 std::stable_sort(side.begin(),side.end(),[&](int a,int b) {
                     return std::tuple{-divisions[a].combat.initiative,a} < std::tuple{-divisions[b].combat.initiative,b};
@@ -810,10 +830,12 @@ struct World {
                     if (!alive(i)) continue;
                     if (unit.organization <= 0) unit.combat.recovering = true;
                     const double share = std::min(1.,remaining/std::max(1.,unit.combat.width));
-                    if (recoverReserve && (unit.combat.recovering || share < .6)) recover(unit,hours,.25);
                     if (unit.combat.recovering && unit.organization >= unit.maxOrganization*.30)
                         unit.combat.recovering = false;
-                    if (!ready(i) || unit.combat.recovering || share < .6) continue;
+                    if (!ready(i) || unit.combat.recovering || share < .6) {
+                        unit.combat.widthEfficiency = 1.;
+                        continue;
+                    }
                     unit.combat.widthEfficiency = share;
                     remaining = std::max(0.,remaining-unit.combat.width*share);
                     result.push_back(i);
@@ -822,14 +844,19 @@ struct World {
             };
             const bool war = diplomacy.hostile(battle.attacker,battle.defender);
             if (war) {
-                auto attackers = active(battle.attackers,true), defenders = active(battle.defenders,true);
+                const auto recoverReserves = [&](const auto& side,const auto& front) {
+                    for (int i : side)
+                        if (alive(i) && std::ranges::find(front,i) == front.end()) recover(divisions[i],hours,.25);
+                };
+                recoverReserves(battle.attackers,active(battle.attackers));
+                recoverReserves(battle.defenders,active(battle.defenders));
+                auto attackers = active(battle.attackers), defenders = active(battle.defenders);
                 const int activeCount = int(attackers.size()+defenders.size());
-                double organizationDamage = 0, strengthDamage = 0;
+                battle.organizationDamage = {};
+                battle.strengthDamage = {};
                 const auto attack = [&](const std::vector<int>& side,std::vector<int>& targets,bool defending) {
                     for (int i : side) {
-                        std::erase_if(targets,[&](int j) { return !ready(j); });
                         if (targets.empty()) break;
-                        if (!ready(i)) continue;
                         auto& attacker = divisions[i];
                         auto& defender = divisions[targets[std::uniform_int_distribution<std::size_t>(0,targets.size()-1)(combatRandom)]];
                         const auto& fort = tiles[target].buildings[hoi5::fortification];
@@ -842,16 +869,18 @@ struct World {
                         const double strengthLoss = std::min(defender.combat.strength,damage*.35);
                         defender.organization = std::max(0.,defender.organization-damage);
                         defender.loseStrength(strengthLoss);
-                        organizationDamage += damage;
-                        strengthDamage += strengthLoss;
+                        battle.organizationDamage[defending] += damage;
+                        battle.strengthDamage[defending] += strengthLoss;
                     }
                 };
                 attack(attackers,defenders,true);
                 attack(defenders,attackers,false);
-                infrastructureChanged |= battleCollateral(target,hours,activeCount,organizationDamage,strengthDamage);
-                attackers = active(battle.attackers,false);
-                defenders = active(battle.defenders,false);
-                if (!attackers.empty() && defenders.empty()) battle.advance += .035*hours;
+                infrastructureChanged |= battleCollateral(target,hours,activeCount,
+                    battle.organizationDamage[0]+battle.organizationDamage[1],
+                    battle.strengthDamage[0]+battle.strengthDamage[1]);
+                attackers = active(battle.attackers);
+                defenders = active(battle.defenders);
+                if (!attackers.empty() && defenders.empty()) battle.advance = std::min(1.25,battle.advance+.035*hours);
                 if (!attackers.empty() && !defenders.empty()) battle.advance = std::max(0.,battle.advance-.05*hours);
                 battle.activeAttackers = std::move(attackers);
                 battle.activeDefenders = std::move(defenders);
@@ -865,34 +894,53 @@ struct World {
                 auto& unit = divisions[i];
                 unit.battle = -1;
                 unit.combat.recovering = false;
-                if (!captured || !alive(i)) { unit.route.clear(); continue; }
+                unit.combat.widthEfficiency = 1.;
+                if (!captured || !alive(i)) {
+                    unit.postBattleRoute.clear();
+                    unit.attackRoute = false;
+                    continue;
+                }
                 tiles[target].border = at(unit.q,unit.r).border;
                 unit.q = target % size;
                 unit.r = target / size;
-                if (!unit.route.empty() && unit.route.front() == target) unit.route.pop_front();
+                unit.route = std::move(unit.postBattleRoute);
+                unit.postBattleRoute.clear();
+                unit.attackRoute = !unit.route.empty() && tiles[unit.route.back()].owner >= 0 &&
+                    tiles[unit.route.back()].owner != unit.owner;
+                unit.progress = unit.visualProgress = 0.;
             }
             for (int i : battle.defenders) {
                 auto& unit = divisions[i];
                 unit.battle = -1;
                 unit.combat.recovering = false;
+                unit.combat.widthEfficiency = 1.;
+                unit.postBattleRoute.clear();
                 if (!captured || !alive(i)) continue;
                 unit.route.clear();
                 const int q = unit.q, r = unit.r, shift = r % 2;
+                int retreat = -1;
                 for (const auto [dq,dr] : std::array<std::pair<int,int>,6>{{
                     {shift,1},{shift-1,1},{-1,0},{shift-1,-1},{shift,-1},{1,0}
                 }}) {
                     if (!contains(q+dq,r+dr)) continue;
-                    const auto& next = at(q+dq,r+dr);
-                    if (next.owner != unit.owner || next.water) continue;
-                    unit.q = q+dq;
-                    unit.r = r+dr;
-                    break;
+                    const int next = (r+dr)*size+q+dq;
+                    if (tiles[next].owner != unit.owner || tiles[next].water || defended(next,unit.owner)) continue;
+                    if (retreat < 0 || tiles[next].supply > tiles[retreat].supply) retreat = next;
                 }
-                if (unit.q == q && unit.r == r) unit.combat.strength = 0;
+                if (retreat < 0) unit.combat.strength = 0;
+                else {
+                    unit.route.push_back(retreat);
+                    unit.attackRoute = false;
+                    unit.retreating = true;
+                    unit.organization = unit.progress = unit.visualProgress = 0.;
+                }
             }
             if (captured) {
                 air.transferTile(target,tiles[target].owner,battle.attacker);
                 tiles[target].owner = battle.attacker;
+                for (auto& unit : divisions)
+                    if (unit.r*size+unit.q == target && unit.owner != battle.attacker && !unit.retreating)
+                        unit.combat.strength = 0.;
                 propagateWaterOwnership(target);
                 changed = bordersChanged = true;
             }
@@ -903,6 +951,26 @@ struct World {
 
     bool airTargetValid(int owner,int tile,bool strategic) const {
         return strategic ? tiles[tile].owner >= 0 && diplomacy.hostile(owner,tiles[tile].owner) : defended(tile,owner);
+    }
+
+    double battlePower(const std::vector<int>& participants) const {
+        double score = 0.;
+        for (int index : participants) {
+            const auto& unit = divisions[index];
+            if (unit.combat.strength <= 0) continue;
+            const double org = std::clamp(unit.organization/std::max(1.,unit.maxOrganization),0.,1.);
+            const double hp = std::clamp(unit.combat.strength/std::max(1.,unit.design->combat.strength),0.,1.);
+            score += (unit.combat.softAttack+unit.combat.defense+unit.combat.breakthrough)*.25*(.35+org*.45+hp*.20);
+        }
+        return score;
+    }
+
+    double battleWinRatio(const hoi5::Battle& battle) const {
+        const double attack = battlePower(battle.attackers), defense = battlePower(battle.defenders);
+        const double ratio = attack/std::max(1.,attack+defense);
+        if (battle.attacker == 0) return std::clamp(battle.advance*.55+ratio*.45,0.,1.);
+        if (battle.defender == 0) return std::clamp((1-battle.advance)*.55+(1-ratio)*.45,0.,1.);
+        return ratio;
     }
 
     struct HelipadProject { int owner,tile; double progress{}; };
@@ -1115,8 +1183,12 @@ struct World {
             bool planned = false, supporting = false;
             double supportScore = 0;
             for (const auto& unit : divisions) {
-                if (unit.owner == wing.owner && unit.attackRoute && !unit.route.empty() && unit.route.back() == tile)
-                    planned = true;
+                if (unit.owner == wing.owner && unit.attackRoute) {
+                    const int destination = unit.battle >= 0 ?
+                        (unit.postBattleRoute.empty() ? unit.battle : unit.postBattleRoute.back()) :
+                        (unit.route.empty() ? -1 : unit.route.back());
+                    planned |= destination == tile;
+                }
                 if (unit.r*size+unit.q != tile || unit.combat.strength <= 0 ||
                     !diplomacy.hostile(unit.owner,wing.owner)) continue;
                 ++enemyCount;
@@ -1713,18 +1785,29 @@ struct World {
                 }
             },[&](int index) { return battles.contains(index); });
         bool ownershipChanged = false;
-        for (auto& unit : divisions)
-            if (unit.combat.strength > 0) replenish(unit,hours);
         for (int index = 0; index < int(divisions.size()); ++index) {
             auto& unit = divisions[index];
-            if (unit.battle >= 0 || unit.combat.strength <= 0) continue;
+            if (unit.combat.strength <= 0) continue;
+            const int here = at(unit.q,unit.r).owner;
+            if (unit.retreating && unit.route.empty() && here == unit.owner) unit.retreating = false;
+            const bool invalidRetreat = unit.retreating && (unit.route.empty() ||
+                tiles[unit.route.front()].water || tiles[unit.route.front()].owner != unit.owner);
+            if (invalidRetreat || (!unit.retreating && unit.battle < 0 && here >= 0 &&
+                diplomacy.hostile(unit.owner,here))) {
+                unit.combat.strength = 0.;
+                unit.route.clear();
+                continue;
+            }
+            replenish(unit,hours);
+            if (unit.battle >= 0) continue;
             const double ratio = std::clamp(unit.organization / std::max(1., unit.maxOrganization), 0., 1.);
-            if (unit.route.empty() || ratio < .30) {
+            if (unit.route.empty() || (!unit.retreating && ratio < .30)) {
                 recover(unit,hours);
                 continue;
             }
             const auto canEnter = [&](int index) {
                 const auto& tile = tiles[index];
+                if (unit.retreating) return !tile.water && tile.owner == unit.owner;
                 return !tile.water && (tile.owner < 0 || diplomacy.canTransit(unit.owner,tile.owner)
                     || diplomacy.hostile(unit.owner,tile.owner) || canWithdraw(unit,tile.owner,unit.route.back()));
             };
@@ -1733,17 +1816,18 @@ struct World {
                 unit.progress = unit.visualProgress = 0;
                 continue;
             }
-            if (defended(unit.route.front(),unit.owner)) {
-                joinBattle(unit.route.front(),index);
-                continue;
+            if (!unit.retreating && tiles[unit.route.front()].owner >= 0 &&
+                tiles[unit.route.front()].owner != unit.owner && defended(unit.route.front(),unit.owner)) {
+                if (joinBattle(unit.route.front(),index)) continue;
             }
             double supplies = 1;
             for (const auto& [key,need] : std::array<std::pair<std::string_view,double>,2>{{
                 {"refined_fuel",unit.combat.vehicles*unit.speed*1.8*hours},{"field_supplies",.12*hours}
             }})
                 if (need > 0) supplies = std::min(supplies,unit.consume(key,need)/need);
-            const double progress = unit.speed * std::max(.35, .35 + .65 * ratio) * (.55+.45*supplies)
-                * hours / 24. / tiles[unit.route.front()].movementCost;
+            const double progress = unit.speed * (unit.retreating ? 2. : 1.) *
+                std::max(.35, .35 + .65 * ratio) * (.55+.45*supplies)
+                * hours / 24. / std::max(1.,tiles[unit.route.front()].movementCost);
             unit.progress += progress;
             unit.organization = std::max(0., unit.organization - 1.4 * progress);
             while (!unit.route.empty() && unit.progress >= 1) {
@@ -1752,10 +1836,8 @@ struct World {
                     unit.route.clear();
                     break;
                 }
-                if (defended(next,unit.owner)) {
-                    joinBattle(next,index);
-                    unit.progress = unit.visualProgress = 0;
-                    break;
+                if (!unit.retreating && tiles[next].owner >= 0 && tiles[next].owner != unit.owner && defended(next,unit.owner)) {
+                    if (joinBattle(next,index)) break;
                 }
                 unit.route.pop_front();
                 auto& tile = tiles[next];
@@ -1772,7 +1854,11 @@ struct World {
                 unit.progress -= 1;
                 unit.visualProgress = std::clamp(unit.progress, 0., 1.);
             }
-            if (unit.route.empty()) unit.progress = unit.visualProgress = 0;
+            if (unit.route.empty() && unit.battle < 0) {
+                unit.retreating = false;
+                unit.attackRoute = false;
+                unit.progress = unit.visualProgress = 0;
+            }
         }
         updateTraining(hours);
         bool battleDamage = false;
@@ -2615,8 +2701,12 @@ int main(int argc, char** argv) try {
         }
         test.divisions[1].organization = 1;
         if (!test.orderMove(test.divisions[0],1)) return 1;
+        test.divisions[0].route.push_back(2);
+        test.divisions[1].route = {3};
         test.advance(1);
-        if (!test.battles.contains(1)) return 1;
+        if (!test.battles.contains(1) || !test.divisions[0].route.empty() ||
+            test.divisions[0].postBattleRoute != std::deque<int>{2} ||
+            !test.divisions[1].route.empty() || !test.divisions[1].postBattleRoute.empty()) return 1;
         const auto* weapon = hoi5::missionWeapon(1,false);
         test.air.wings.push_back({0,0,1,1});
         const double vehicles = hoi5::value(test.divisions[1].supplies,"vehicles");
@@ -2637,7 +2727,12 @@ int main(int argc, char** argv) try {
         test.advance(1);
         if (test.breakthroughAirBonus(test.battles.at(1),0,1) != .05) return 1;
         for (int hour = 0; hour < 60 && test.tiles[1].owner != 0; ++hour) test.advance(1);
-        return test.tiles[1].owner == 0 && test.divisions[0].q == 1 && test.divisions[1].r == 1 ? 0 : 1;
+        auto& retreat = test.divisions[1];
+        if (test.tiles[1].owner != 0 || test.divisions[0].q != 1 ||
+            test.divisions[0].route != std::deque<int>{2} || retreat.r != 0 ||
+            !retreat.retreating || retreat.organization != 0 || retreat.route != std::deque<int>{3}) return 1;
+        for (int hour = 0; hour < 60 && retreat.retreating; ++hour) test.advance(1);
+        return !retreat.retreating && retreat.combat.strength > 0 && retreat.r == 1 ? 0 : 1;
     }
     if (mode == "--check-economy") {
         auto generated = generateWorld(50, 2, 823558, 1);
@@ -2721,12 +2816,15 @@ int main(int argc, char** argv) try {
     const bool generationSmoke = mode == "--smoke-generation";
     const bool smoke = mode == "--smoke-window" || generationSmoke || constructionSmoke || resourcesSmoke || wingCreationSmoke;
     const bool settingsCheck = mode == "--check-settings-window" && argc == 3;
-    const auto settingsPath = settingsCheck ? std::filesystem::path(argv[2]) : directory / "user_settings.json";
-    const auto settings = smoke ? hoi5::Settings{} : hoi5::loadSettings(settingsPath,int(resolutions.size()));
+    const auto settingsPath = settingsCheck ? std::filesystem::path(argv[2]) : hoi5::settingsFile(directory);
+    const auto legacySettingsPath = directory / "user_settings.json";
+    const auto readPath = !settingsCheck && !std::filesystem::exists(settingsPath)
+        ? legacySettingsPath : settingsPath;
+    auto settings = smoke ? hoi5::Settings{} : hoi5::loadSettings(readPath,int(resolutions.size()));
     const auto createWindow = [&](sf::RenderWindow& target,int resolution,bool fullscreen) {
         const sf::VideoMode video(resolutions[resolution]);
-        if (fullscreen && video.isValid()) {
-            target.create(video,"HOI5",sf::Style::Default,sf::State::Fullscreen);
+        if (fullscreen) {
+            target.create(sf::VideoMode::getDesktopMode(),"HOI5",sf::Style::Default,sf::State::Fullscreen);
             if (target.isOpen()) return true;
         }
         target.create(video,"HOI5");
@@ -2734,10 +2832,23 @@ int main(int argc, char** argv) try {
     };
     sf::RenderWindow window;
     bool fullscreen = createWindow(window,settings.resolution,settings.fullscreen);
+    const bool requestedFullscreen = settings.fullscreen;
+    const int requestedResolution = settings.resolution;
+    for (const int fallback : {hoi5::Settings{}.resolution,0}) {
+        if (window.isOpen()) break;
+        settings.resolution = fallback;
+        fullscreen = createWindow(window,fallback,false);
+    }
     if (!window.isOpen()) throw std::runtime_error("Could not open HOI5 window");
     if (settingsCheck)
         return settings.soundVolume == 37 && settings.musicVolume == 24 && !fullscreen &&
             window.getSize() == sf::Vector2u{1366,768} ? 0 : 1;
+    if (!smoke && (fullscreen != requestedFullscreen || settings.resolution != requestedResolution ||
+                   (readPath != settingsPath && std::filesystem::exists(readPath)))) {
+        settings.fullscreen = fullscreen;
+        if (!hoi5::saveSettings(settingsPath,settings))
+            std::cerr << "Could not save HOI5 settings: " << settingsPath << '\n';
+    }
     if (smoke) window.setVisible(false);
     window.setVerticalSyncEnabled(true);
     sf::Font font;
@@ -2775,6 +2886,23 @@ int main(int argc, char** argv) try {
     bool hexResourcesExpanded = false;
     sf::FloatRect hexResourcesToggle;
     int selected = -1, sizeChoice = 2, countries = 4;
+    int selectedBattle = -1;
+    const auto battleIndicator = [&](int tile,const hoi5::Battle& battle) {
+        const auto destination = center(tile%world.size,tile/world.size);
+        const auto position = battle.origin >= 0 && battle.origin != tile ?
+            (destination+center(battle.origin%world.size,battle.origin/world.size))*.5f :
+            destination+sf::Vector2f{0,-radius*.45f};
+        const auto pixel = sf::Vector2f(window.mapCoordsToPixel(position,camera));
+        return sf::FloatRect(pixel-sf::Vector2f{22,22},{44,44});
+    };
+    const auto battlePanel = [&] {
+        const auto windowSize = sf::Vector2f(window.getSize());
+        const sf::Vector2f size{std::min(760.f,windowSize.x-80),std::min(560.f,windowSize.y-110)};
+        return sf::FloatRect((windowSize-size)*.5f,size);
+    };
+    const auto battleClose = [&](sf::FloatRect panel) {
+        return sf::FloatRect(panel.position+sf::Vector2f{panel.size.x-36,12},{24,24});
+    };
     int difficulty = 1, dropdown = -1;
     bool tradePanel = false;
     int tradeScroll = 0;
@@ -2975,7 +3103,8 @@ int main(int argc, char** argv) try {
                     if (menuPage == MenuPage::settings) {
                         if (resolutionOpen) resolutionOpen = false;
                         else { menuPage = MenuPage::main; activeSlider = -1; }
-                    } else if (playing) pauseMenu = !pauseMenu;
+                    } else if (playing && selectedBattle >= 0) selectedBattle = -1;
+                    else if (playing) pauseMenu = !pauseMenu;
                     else if (dropdown >= 0) dropdown = -1;
                     else if (!generator.valid()) { setup = false; menuPage = MenuPage::main; }
                 }
@@ -2997,11 +3126,13 @@ int main(int argc, char** argv) try {
                             if (row == 4) menuPage = MenuPage::help;
                             if (row == 5) window.close();
                         }
-                    } else if (menuPage == MenuPage::settings && std::abs(x-cx) < 230) {
+                    } else if (menuPage == MenuPage::settings) {
                         if (resolutionOpen) {
-                            if (x >= cx+10 && y >= cy+80 && y < cy+205)
+                            if (x >= cx+10 && x < cx+230 && y >= cy+80 && y < cy+205)
                                 pendingResolution = (y-cy-80)/25;
                             resolutionOpen = false;
+                        } else if (x < cx-230 || x >= cx+230) {
+                            continue;
                         } else if (std::abs(y-(cy-74)) <= 14 || std::abs(y-(cy-4)) <= 14) {
                             activeSlider = y < cy-39 ? 0 : 1;
                             updateSlider(x);
@@ -3011,16 +3142,19 @@ int main(int argc, char** argv) try {
                         } else if (y >= cy+111 && y < cy+155) {
                             if (x >= cx+10) menuPage = MenuPage::main;
                             else if (x < cx-10) {
-                                const int previousResolution = resolution;
-                                fullscreen = createWindow(window,pendingResolution,pendingFullscreen);
-                                if (!window.isOpen()) {
-                                    fullscreen = createWindow(window,previousResolution,false);
-                                    settingsMessage = "Не удалось применить разрешение.";
-                                    continue;
+                                if (pendingResolution != resolution || pendingFullscreen != fullscreen) {
+                                    const bool previousFullscreen = fullscreen;
+                                    fullscreen = createWindow(window,pendingResolution,pendingFullscreen);
+                                    if (!window.isOpen()) {
+                                        fullscreen = createWindow(window,resolution,previousFullscreen);
+                                        window.setVerticalSyncEnabled(true);
+                                        settingsMessage = "Не удалось применить разрешение.";
+                                        continue;
+                                    }
+                                    resolution = pendingResolution;
+                                    window.setVerticalSyncEnabled(true);
+                                    camera.setSize(sf::Vector2f(window.getSize())/zoom);
                                 }
-                                resolution = pendingResolution;
-                                window.setVerticalSyncEnabled(true);
-                                camera.setSize(sf::Vector2f(window.getSize())/zoom);
                                 const bool fallback = pendingFullscreen && !fullscreen;
                                 pendingFullscreen = fullscreen;
                                 const bool saved = hoi5::saveSettings(settingsPath,{soundVolume,musicVolume,fullscreen,resolution});
@@ -3028,6 +3162,7 @@ int main(int argc, char** argv) try {
                                     fallback ? "Сохранён оконный режим." : "Настройки применены и сохранены.";
                             }
                         }
+                        continue;
                     } else if (menuPage == MenuPage::help &&
                                sf::IntRect({cx-150,cy+100},{300,42}).contains({x,y})) {
                         menuPage = MenuPage::main;
@@ -3068,6 +3203,21 @@ int main(int argc, char** argv) try {
                 } else if (playing && button->button == sf::Mouse::Button::Left) {
                     const int x = button->position.x, y = button->position.y;
                     const int panel = static_cast<int>(window.getSize().x)-312;
+                    if (selectedBattle >= 0 && world.battles.contains(selectedBattle)) {
+                        const auto point = sf::Vector2f(button->position);
+                        if (battleClose(battlePanel()).contains(point) || !battlePanel().contains(point))
+                            selectedBattle = -1;
+                        continue;
+                    }
+                    if (y >= 82) {
+                        const auto picked = std::ranges::find_if(world.battles,[&](const auto& item) {
+                            return battleIndicator(item.first,item.second).contains(sf::Vector2f(button->position));
+                        });
+                        if (picked != world.battles.end()) {
+                            selectedBattle = picked->first;
+                            continue;
+                        }
+                    }
                     if (y >= 40 && y < 78 && ((x >= 12 && x < 50) || (x >= 57 && x < 95) || (x >= 102 && x < 140))
                         && !world.stockpiles.empty()) {
                         const int panelType = x < 50 ? 3 : x < 100 ? 1 : 2;
@@ -3388,7 +3538,8 @@ int main(int argc, char** argv) try {
                         }
                     }
                 }
-                if (playing && !pauseMenu && (button->button == sf::Mouse::Button::Middle || button->button == sf::Mouse::Button::Right)) {
+                if (playing && !pauseMenu && selectedBattle < 0 &&
+                    (button->button == sf::Mouse::Button::Middle || button->button == sf::Mouse::Button::Right)) {
                     dragging = true;
                     dragStart = button->position;
                     dragTarget = target;
@@ -3532,6 +3683,7 @@ int main(int argc, char** argv) try {
                 camera.setSize(sf::Vector2f(window.getSize()));
                 playing = resumable = true;
                 selected = -1;
+                selectedBattle = -1;
                 selectedTiles.clear();
                 simulation = {};
             } catch (const std::exception& error) { errorMessage = error.what(); }
@@ -3755,10 +3907,15 @@ int main(int argc, char** argv) try {
                 label(window,font,"A",point+sf::Vector2f(-4,17),13);
             }
             for (const auto& [tile, battle] : world.battles) {
-                const auto p = sf::Vector2f(window.mapCoordsToPixel(center(tile%world.size,tile/world.size),camera));
-                box(window,p+sf::Vector2f(-30,-42),{60,16},{105,37,36},{194,111,85});
-                box(window,p+sf::Vector2f(-29,-41),{58*float(std::clamp(battle.advance,0.,1.)),14},{76,150,87});
-                label(window,font,"Бой",p+sf::Vector2f(-12,-43),13);
+                const auto rect = battleIndicator(tile,battle);
+                sf::CircleShape marker(22);
+                marker.setPosition(rect.position);
+                marker.setFillColor(battle.attacker == 0 ? sf::Color(72,44,38,235) : sf::Color(38,55,76,235));
+                marker.setOutlineColor({235,215,150});
+                marker.setOutlineThickness(-2);
+                window.draw(marker);
+                label(window,font,std::to_string(int(std::nearbyint(world.battleWinRatio(battle)*100)))+"%",
+                    rect.position+sf::Vector2f{8,12},13);
             }
             box(window,{0,0},{size.x,36},{18,24,31,245});
             box(window,{0,35},{size.x,2},{88,106,128});
@@ -4619,6 +4776,67 @@ int main(int argc, char** argv) try {
                     }
                 }
             }
+            if (const auto found = world.battles.find(selectedBattle); found != world.battles.end()) {
+                const auto& battle = found->second;
+                const auto panel = battlePanel();
+                const auto close = battleClose(panel);
+                const auto [x,y] = panel.position;
+                const auto [width,height] = panel.size;
+                const auto rounded = [](double value) { return std::to_string(int(std::nearbyint(value))); };
+                const auto precise = [](double value) {
+                    std::ostringstream out;
+                    out << std::fixed << std::setprecision(1) << value;
+                    return out.str();
+                };
+                const auto ratio = world.battleWinRatio(battle);
+                const double attack = world.battlePower(battle.attackers), defense = world.battlePower(battle.defenders);
+                const double pressure = std::max(.08,std::abs(attack-defense)/std::max(1.,attack+defense));
+                const int hours = int(std::ceil((1-std::clamp(battle.advance,0.,1.))/.035+
+                    (defense > 0 ? (1-pressure)*36 : 0)));
+                const std::string duration = hours < 24 ? std::to_string(hours)+" ч." :
+                    std::to_string(hours/24)+" дн."+(hours%24 ? " "+std::to_string(hours%24)+" ч." : "");
+                box(window,panel.position,panel.size,{16,24,30,238},{112,142,174});
+                box(window,close.position,close.size,{44,54,66,240},{120,142,164});
+                label(window,font,"X",close.position+sf::Vector2f{8,3},13);
+                label(window,font,"Сражение",{x+20,y+12},19);
+                box(window,{x+20,y+54},{width-40,16},{48,42,42,230},{128,148,168});
+                if (ratio > 0) box(window,{x+20,y+54},{float((width-40)*ratio),16},{72,126,76,235});
+                label(window,font,"Ход сражения: "+rounded(ratio*100)+"%",{x+width*.5f-75,y+53},12);
+                label(window,font,"Соотношение сил: "+rounded(attack)+" / "+rounded(defense)+
+                    "   ШФ: "+rounded(battle.width)+" ("+rounded(1+(battle.width-80)/40)+")",{x+20,y+79},13);
+                label(window,font,"Осталось: "+duration,{x+width-188,y+79},13);
+                label(window,font,"Потери",{x+width*.5f-27,y+112},15);
+                const bool playerAttacks = battle.attacker == 0;
+                const bool playerDefends = battle.defender == 0;
+                for (int column = 0; column < 2; ++column) {
+                    const bool attacking = column == (playerDefends ? 1 : 0);
+                    const int incoming = attacking ? 0 : 1;
+                    const float left = x+20+column*width*.5f;
+                    const auto& participants = attacking ? battle.attackers : battle.defenders;
+                    const auto& active = attacking ? battle.activeAttackers : battle.activeDefenders;
+                    label(window,font,std::string(playerAttacks || playerDefends ? (column ? "Враг" : "Наши") :
+                        (attacking ? "Атакующие" : "Защитники"))+" — орг "+precise(battle.organizationDamage[incoming])+
+                        ", хп "+precise(battle.strengthDamage[incoming]),{left,y+139},13);
+                    float row = y+171;
+                    constexpr std::array groups{"В бою","В резерве","Восстановление"};
+                    for (int group = 0; group < int(groups.size()); ++group) {
+                        if (row+20 > y+height-12) break;
+                        label(window,font,groups[group],{left,row},13);
+                        row += 22;
+                        for (int index : participants) {
+                            const auto& unit = world.divisions[index];
+                            const bool fighting = std::ranges::find(active,index) != active.end();
+                            const int status = fighting ? 0 : unit.combat.recovering ? 2 : 1;
+                            if (unit.combat.strength <= 0 || status != group || row+20 > y+height-12) continue;
+                            box(window,{left,row},{width*.5f-40,19},{30,39,50});
+                            label(window,font,std::string(unit.design->name)+"  "+rounded(unit.organization)+
+                                " / "+rounded(unit.combat.strength),{left+5,row+1},11);
+                            row += 21;
+                        }
+                        row += 6;
+                    }
+                }
+            } else selectedBattle = -1;
             if (pauseMenu) {
                 box(window,{0,0},size,{8,12,17,170});
                 const float x=size.x/2-150, y=size.y/2;

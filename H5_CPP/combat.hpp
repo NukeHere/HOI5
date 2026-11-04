@@ -21,6 +21,9 @@ struct Battle {
     double advance{};
     std::vector<int> attackers, defenders;
     std::vector<int> activeAttackers, activeDefenders;
+    int origin = -1;
+    double width = 80.;
+    std::array<double,2> organizationDamage{}, strengthDamage{};
 };
 
 inline double combatDamage(const CombatStats& attacker, const CombatStats& target, bool defending, std::array<double,3> ammo = {1,1,1}, double supply = 1, double fort = 0, double airBonus = 0) {

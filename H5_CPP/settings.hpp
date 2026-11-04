@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -16,6 +17,14 @@ struct Settings {
     bool fullscreen = false;
     int resolution = 1;
 };
+
+inline std::filesystem::path settingsFile(const std::filesystem::path& executableDirectory) {
+#ifdef _WIN32
+    if (const auto* local = _wgetenv(L"LOCALAPPDATA"); local && *local)
+        return std::filesystem::path(local) / "HOI5" / "user_settings.json";
+#endif
+    return executableDirectory / "user_settings.json";
+}
 
 inline Settings loadSettings(const std::filesystem::path& path,int resolutionCount) {
     Settings result;
@@ -44,6 +53,11 @@ inline Settings loadSettings(const std::filesystem::path& path,int resolutionCou
 }
 
 inline bool saveSettings(const std::filesystem::path& path,const Settings& settings) {
+    std::error_code error;
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path(),error);
+        if (error) return false;
+    }
     auto temporary = path;
     temporary += ".tmp";
     std::ofstream output(temporary,std::ios::trunc);
@@ -53,7 +67,6 @@ inline bool saveSettings(const std::filesystem::path& path,const Settings& setti
            << ",\n  \"fullscreen\": " << std::boolalpha << settings.fullscreen
            << ",\n  \"resolution_index\": " << settings.resolution << "\n}\n";
     output.close();
-    std::error_code error;
     if (output) {
         std::filesystem::rename(temporary,path,error);
         if (!error) return true;
