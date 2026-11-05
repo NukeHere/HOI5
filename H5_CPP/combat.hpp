@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <vector>
 
 namespace hoi5 {
@@ -24,13 +25,14 @@ struct Battle {
     int origin = -1;
     double width = 80.;
     std::array<double,2> organizationDamage{}, strengthDamage{};
+    std::uint64_t creationOrder{};
 };
 
-inline double combatDamage(const CombatStats& attacker, const CombatStats& target, bool defending, std::array<double,3> ammo = {1,1,1}, double supply = 1, double fort = 0, double airBonus = 0) {
+inline double combatDamage(const CombatStats& attacker, const CombatStats& target, bool defending, std::array<double,3> ammo = {1,1,1}, double supply = 1, double fort = 0, double airBonus = 0,double terrainAttack = 1,double terrainDefense = 1) {
     const double defense = (defending ? target.defense*(1+fort) : target.breakthrough*(1+airBonus))
-        * std::max(.2,target.widthEfficiency);
+        * std::max(.2,target.widthEfficiency)*terrainDefense;
     const auto damage = [&](double attack) {
-        attack *= std::max(.2,attacker.widthEfficiency)*(.90+.10*supply);
+        attack *= std::max(.2,attacker.widthEfficiency)*(.90+.10*supply)*terrainAttack;
         return attack*.10+std::max(0.,attack-defense)*.40;
     };
     const double front = damage(attacker.frontAttack*ammo[1])*(attacker.frontPiercing >= target.frontArmor ? 1. : .10);

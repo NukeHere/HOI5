@@ -1,5 +1,7 @@
 #pragma once
 
+#include "python_seed.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -58,48 +60,6 @@ struct Terrain {
         snow /= total;
     }
 
-    double movementCost() const {
-        const double cost = 1 + ridge * 1.5 + rock * 1.2 + snow * .5;
-        if (ridge > .75 && temperature < .35) return cost + 2;
-        if (ridge > .7 || rock > .7) return cost + 1.5;
-        if (ridge > .4 || rock > .45) return cost + .75;
-        return cost;
-    }
-};
-
-// Python random.seed(int) initializes MT19937 with init_by_array.
-struct PythonSeed {
-    using result_type = std::uint32_t;
-    std::uint64_t value;
-
-    template<class Iterator>
-    void generate(Iterator first, Iterator last) {
-        std::array<std::uint32_t, 624> state;
-        state[0] = 19650218;
-        for (std::uint32_t i = 1; i < state.size(); ++i)
-            state[i] = 1812433253u * (state[i-1] ^ (state[i-1] >> 30)) + i;
-        const std::array key{std::uint32_t(value), std::uint32_t(value >> 32)};
-        const unsigned length = key[1] ? 2 : 1;
-        unsigned i = 1, j = 0;
-        const auto next = [&] {
-            if (++i == state.size()) {
-                state[0] = state.back();
-                i = 1;
-            }
-        };
-        for (unsigned k = 0; k < state.size(); ++k) {
-            state[i] = (state[i] ^ ((state[i-1] ^ (state[i-1] >> 30)) * 1664525u)) + key[j] + j;
-            next();
-            j = (j + 1) % length;
-        }
-        for (unsigned k = 1; k < state.size(); ++k) {
-            state[i] = (state[i] ^ ((state[i-1] ^ (state[i-1] >> 30)) * 1566083941u)) - i;
-            next();
-        }
-        state[0] = 0x80000000u;
-        std::copy(state.begin(), state.end(), first);
-        (void)last;
-    }
 };
 
 class WorldGenerator {

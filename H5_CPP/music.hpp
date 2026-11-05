@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <filesystem>
+#include <iostream>
 #include <random>
 #include <set>
 #include <tuple>
@@ -44,6 +45,7 @@ public:
                     tracks[i].push_back(file.path());
             }
             std::sort(tracks[i].begin(),tracks[i].end());
+            if (tracks[i].empty()) std::cerr << "[audio] No music tracks found in " << directory/names[i] << '\n';
         }
     }
 
@@ -123,6 +125,7 @@ public:
                 const Path path = *chosen;
                 bag.erase(chosen);
                 if (!music.openFromFile(path)) {
+                    std::cerr << "[audio] Could not open music file: " << path << '\n';
                     failed.insert(path);
                     continue;
                 }

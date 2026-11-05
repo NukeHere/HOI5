@@ -21,6 +21,8 @@ public:
     int speed = 1;
     bool paused = true;
 
+    int nextMarketExecutionHour() const { return nextMarketHour; }
+
     void setPaused(bool value) {
         paused = value;
         if (paused) accumulator = 0;

@@ -12,6 +12,7 @@ from pyglet.graphics import Batch
 from arcade.gl import BufferDescription
 from Constants import *
 from HexTile import HexTile
+from MapData import ground_terrain_effects
 from Settings import apply_window_settings_safely, create_window_with_fallback, load_settings, save_settings
 
 from air_system import AirSystemMixin
@@ -2593,6 +2594,10 @@ class Game(AirRenderLODMixin, DivisionPanelMixin, NewsPanelMixin, CountryPanelMi
         active_defense_value = target.defense if target_is_defending else target.breakthrough
         fort_bonus = 0
         fort_tile = battle.tile if battle else target.tile
+        if target_is_defending and fort_tile:
+            terrain_attack, terrain_defense, _ = ground_terrain_effects(fort_tile, attacker.vehicle_share)
+            attacker_eff *= terrain_attack
+            active_defense_value *= terrain_defense
         if target_is_defending and fort_tile and fort_tile.owner is target.owner:
             fort_bonus = fortification_bonus(fort_tile.building_coverage.get("fortification", 0),
                 self.building_health(fort_tile, "fortification"), getattr(fort_tile, "supply_score", 0), attacker.vehicle_share)
@@ -3291,6 +3296,7 @@ class Game(AirRenderLODMixin, DivisionPanelMixin, NewsPanelMixin, CountryPanelMi
                 org_ratio = self.clamp01(division.organization / max(1.0, division.max_organization))
                 speed_factor = max(DIVISION_LOW_ORG_SPEED_FLOOR, 0.35 + org_ratio * 0.65)
                 speed_factor *= self.consume_division_movement_supplies(division, elapsed_hours)
+                speed_factor *= ground_terrain_effects(next_tile, division.vehicle_share)[2]
                 retreat_multiplier = 2.0 if division.route_mode == "retreat" else 1.0
                 progress = division.speed * retreat_multiplier * speed_factor * elapsed_hours / 24.0 / movement_cost
                 division.movement_progress += progress

@@ -93,6 +93,7 @@ struct AirDefense {
     std::deque<int> route;
     double progress{}, visualProgress{};
     double readinessLimit = 1.;
+    int id = -1;
     double readiness() const { return std::min(readinessLimit,defenseClasses[type].readiness); }
     bool operational() const { return route.empty() && health > 0 && readiness() > 0; }
 };
@@ -101,7 +102,18 @@ struct AirLayer {
     std::vector<Airbase> bases;
     std::vector<AirWing> wings;
     std::vector<AirDefense> defense;
+    int nextDefenseId = 0;
     std::vector<std::array<int,std::size(aircraftTypes)>> reserves;
+    void registerConstructedBase(int owner,int index,BuildingCoverage& building) {
+        if (std::ranges::any_of(bases,[&](const auto& base) { return base.tile == index; })) return;
+        // Python's first base registration adds the completed coverage again, up to the initial cap.
+        building.area = std::max(building.area,std::min(.42,2*building.area));
+        const double effective = building.area*building.health;
+        bases.push_back({owner,index,1+int(effective>=.32),std::max(18,int(28+effective*90)),
+            std::max(8,int(8+effective*38)),8000+effective*38000,4000+effective*18000,
+            .8+effective*1.4,effective>=.30});
+    }
+
     struct DefenseReplacement { int type,remaining; };
     std::map<int,DefenseReplacement> defenseReplacements;
 
@@ -153,6 +165,7 @@ struct AirLayer {
                 continue;
             }
             defense.push_back({owner,site,project.type,defenseClasses[project.type].ammo});
+            defense.back().id = nextDefenseId++;
             completed(site,project.type);
             it = defenseReplacements.erase(it);
         }
@@ -258,6 +271,7 @@ struct AirLayer {
                     [&](const auto& entry) { return entry.key == name; });
                 if (tile >= 0 && !tiles[tile].water && type != std::end(defenseClasses))
                     defense.push_back({country,tile,int(type-std::begin(defenseClasses)),type->ammo});
+                    defense.back().id = nextDefenseId++;
             };
             deploy(capital,"medium_range_sam");
             deploy(capital,"radar_unit");

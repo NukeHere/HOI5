@@ -138,7 +138,9 @@ Production buildProduction(const std::vector<Tile>& tiles, int country, double p
 }
 
 template<class AddStock>
-void runProduction(const Production& production, Stockpile& stock, int hours, AddStock addStock) {
+std::array<double,productionStages> runProduction(const Production& production, Stockpile& stock,
+                                                  int hours, AddStock addStock) {
+    std::array<double,productionStages> ratios{};
     const double fraction = hours / 720.;
     for (int stage = 0; stage < productionStages; ++stage) {
         const auto& [inputs,outputs] = production[stage];
@@ -146,12 +148,14 @@ void runProduction(const Production& production, Stockpile& stock, int hours, Ad
         for (const auto& [name,amount] : inputs)
             if (amount > 0) ratio = std::min(ratio,stock[name]/(amount*fraction));
         ratio = std::clamp(ratio,0.,1.);
+        ratios[stage] = ratio;
         for (const auto& [name,amount] : inputs) {
             auto& stored = stock[name];
             stored = std::max(0.,stored-amount*fraction*(stage == upkeep ? 1. : ratio));
         }
         for (const auto& [name,amount] : outputs) addStock(name,amount*fraction*ratio);
     }
+    return ratios;
 }
 
 }

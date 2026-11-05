@@ -2,6 +2,7 @@
 
 #include "world_generation.hpp"
 
+#include <limits>
 #include <string_view>
 #include <vector>
 
@@ -13,7 +14,13 @@ inline std::string_view biome(const Terrain& tile) {
         if (tile.water > .9) return tile.elevation < .15 ? "deep_ocean" : "ocean";
         return "shallow_water";
     }
-    if (tile.ridge > .75 && tile.temperature < .35) return "snowy_mountains";
+    if (tile.water > .2 && tile.trees > .3) {
+        if (tile.temperature > .6) return "mangrove";
+        if (tile.temperature > .3) return "swamp";
+        return "bog";
+    }
+    if (tile.temperature < .35 && (tile.ridge > .75 || (tile.elevation > .7 && tile.snow >= .25)))
+        return "snowy_mountains";
     if (tile.ridge > .7 || tile.rock > .7) return "mountains";
     if (tile.ridge > .4 || tile.rock > .45) return "hills";
 
@@ -38,6 +45,35 @@ struct Deposit {
     double mass;
 };
 
+inline double terrainMovementCost(const Terrain& tile) {
+    const auto type = biome(tile);
+    if (type == "deep_ocean" || type == "ocean") return std::numeric_limits<double>::infinity();
+    if (type == "shallow_water" || type == "lake" || type == "swamp" || type == "bog" || type == "mangrove")
+        return 3.;
+    double cost = 1 + tile.ridge * 1.5 + tile.rock * 1.2 + tile.snow * .5;
+    if (type == "mountains") cost += 1.5;
+    else if (type == "snowy_mountains") cost += 2.;
+    else if (type == "hills") cost += .75;
+    return std::max(1.,cost);
+}
+
+struct GroundTerrainEffects { double attack, defense, speed; };
+
+inline GroundTerrainEffects groundTerrainEffects(const Terrain& tile,double vehicleShare) {
+    const auto clamp = [](double value) { return std::clamp(value,0.,1.); };
+    const double vehicles = clamp(vehicleShare);
+    const double highland = std::max(clamp(tile.ridge),clamp((tile.elevation-.45)/.55));
+    const double wetland = clamp(tile.water*2.)*clamp((tile.moisture-.35)/.65);
+    const double forest = clamp(tile.trees), rock = clamp(tile.rock), snow = clamp(tile.snow);
+    const double openGround = clamp(tile.grass)*(1.-highland)*(1.-wetland);
+    const double attackPenalty = highland*.16+forest*.13+rock*.06+snow*.08+wetland*.11;
+    const double vehiclePenalty = highland*.09+forest*.10+wetland*.10+snow*.04;
+    return {std::clamp(1.-attackPenalty-vehicles*vehiclePenalty+vehicles*openGround*.04,.55,1.04),
+        1.+std::min(.15,highland*.07+forest*.08+rock*.04+snow*.03+wetland*.04),
+        std::clamp(1.-forest*.09-snow*.12-wetland*.18-vehicles*(highland*.10+forest*.08+wetland*.09)
+            +vehicles*openGround*.04,.60,1.04)};
+}
+
 inline std::vector<Deposit> generateDeposits(const Terrain& tile, std::uint32_t seed, int q, int r) {
     PythonSeed input{std::uint32_t(seed * 1000003u + q * 9176u + r * 131071u)};
     std::mt19937 rng(input);
@@ -60,10 +96,11 @@ inline std::vector<Deposit> generateDeposits(const Terrain& tile, std::uint32_t 
     const bool rocky = mountains || tile.rock > .35;
     const bool dry = type == "desert" || type == "plains" || tile.sand > .3 || tile.moisture < .3;
     const bool rareGeology = mountains || tile.ridge > .25 || tile.rock > .55;
-    const bool peatland = type == "tundra" || type == "taiga" || type == "lake"
+    const bool peatland = type == "swamp" || type == "bog" || type == "tundra" || type == "taiga" || type == "lake"
         || (tile.moisture > .55 && tile.temperature < .55 && tile.elevation < .55);
     const bool tropicalLatex = tile.temperature > .55 && tile.moisture > .35
-        && (tile.trees > .05 || type == "jungle" || type == "tropical_rainforest" || type == "savanna");
+        && (tile.trees > .05 || type == "jungle" || type == "tropical_rainforest" ||
+            type == "mangrove" || type == "savanna");
 
     if (rocky) {
         add("coal", .22, 100, 800, 5000, 50000);

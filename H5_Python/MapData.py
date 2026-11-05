@@ -3,6 +3,27 @@ from dataclasses import dataclass, field
 from Constants import DEEP_OCEAN_LEVEL, WATER_LEVEL
 
 
+def ground_terrain_effects(tile, vehicle_share):
+    def clamp(value):
+        return max(0.0, min(1.0, value))
+
+    def component(name):
+        return getattr(tile, name, 0.0) or 0.0
+
+    vehicles = clamp(vehicle_share)
+    highland = max(clamp(component("ridge_value")), clamp((component("elevation") - 0.45) / 0.55))
+    wetland = clamp(component("water_cover") * 2) * clamp((component("moisture") - 0.35) / 0.65)
+    forest, rock, snow = (clamp(component(name)) for name in ("tree_cover", "rock_cover", "snow_cover"))
+    open_ground = clamp(component("grass_cover")) * (1 - highland) * (1 - wetland)
+    attack_penalty = highland * 0.16 + forest * 0.13 + rock * 0.06 + snow * 0.08 + wetland * 0.11
+    vehicle_penalty = highland * 0.09 + forest * 0.10 + wetland * 0.10 + snow * 0.04
+    attack = 1 - attack_penalty - vehicles * vehicle_penalty + vehicles * open_ground * 0.04
+    defense = highland * 0.07 + forest * 0.08 + rock * 0.04 + snow * 0.03 + wetland * 0.04
+    speed = (1 - forest * 0.09 - snow * 0.12 - wetland * 0.18
+             - vehicles * (highland * 0.10 + forest * 0.08 + wetland * 0.09) + vehicles * open_ground * 0.04)
+    return max(0.55, min(1.04, attack)), 1 + min(0.15, defense), max(0.60, min(1.04, speed))
+
+
 @dataclass
 class MapTileData:
     q: int
@@ -114,7 +135,9 @@ class MapTileData:
                 return "swamp"
             return "bog"
 
-        if self.ridge_value > 0.75 and self.temperature < 0.35:
+        if self.temperature < 0.35 and (
+            self.ridge_value > 0.75 or (self.elevation > 0.7 and self.snow_cover >= 0.25)
+        ):
             return "snowy_mountains"
         if self.ridge_value > 0.7 or self.rock_cover > 0.7:
             return "mountains"

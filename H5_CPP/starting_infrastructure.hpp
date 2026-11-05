@@ -10,6 +10,8 @@ struct StartingProfile {
     double scale;
     double population;
     double budget;
+    double industryEfficiency = 1., cityBuildMultiplier = 1., buildTechBonus = 0.;
+    double buildEfficiency = 1.;
 };
 
 inline StartingProfile startingProfile(int size, int land) {
@@ -41,7 +43,7 @@ int ownedNeighbors(const std::vector<Tile>& tiles, int size, int index, bool* co
     for (const auto [dq, dr] : offsets) {
         if (q+dq < 0 || q+dq >= size || r+dr < 0 || r+dr >= size) continue;
         const auto& neighbor = tiles[(r+dr)*size + q+dq];
-        if (coastal && neighbor.water) *coastal = true;
+        if (coastal && (neighbor.water || neighbor.natural.water > .55)) *coastal = true;
         count += neighbor.owner == tiles[index].owner;
     }
     return count;

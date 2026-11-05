@@ -1,6 +1,10 @@
 #pragma once
 
+#include "debug_profiler.hpp"
+
 #include "construction_data.hpp"
+
+#include <optional>
 
 namespace hoi5 {
 
@@ -37,40 +41,75 @@ struct Construction {
     std::vector<std::vector<ConstructionProject>> queues;
 
     template<class Tile>
-    static double buildPower(const std::vector<Tile>& tiles,int owner) {
-        double power = 0;
+    static double buildPower(const std::vector<Tile>& tiles,int owner,const StartingProfile& profile) {
+        double industryCoverage = 0, settlementCoverage = 0;
         for (const auto& tile : tiles) {
             if (tile.owner != owner) continue;
             const auto effective = [&](Building type) {
                 const auto& b = tile.buildings[type];
                 return b.area*b.health;
             };
-            power += 100*(effective(industry)+effective(city)+effective(village)*.5);
+            industryCoverage += effective(industry);
+            settlementCoverage += effective(city)+effective(village)*.5;
         }
-        return power;
+        return std::max(0.,100*(industryCoverage*profile.industryEfficiency+
+            settlementCoverage*profile.cityBuildMultiplier)+profile.buildTechBonus);
+    }
+
+    static bool applyRepairProgress(BuildingCoverage& building,const ConstructionProject& project,
+                                    double oldProgress,double newProgress) {
+        if (!project.repair || building.area <= 0) return false;
+        const double from = std::clamp(project.from,0.,1.);
+        const double target = std::clamp(project.target,from,1.);
+        const double gain = std::max(0.,newProgress-oldProgress)*(target-from);
+        const double next = std::clamp(building.health+gain,0.,1.);
+        if (gain <= 0 || std::abs(next-building.health) < .0005) return false;
+        building.health = next >= .999 ? 1. : next;
+        return true;
+    }
+
+    static constexpr double speedMultiplier(bool inBattle) { return inBattle ? .22 : 1.; }
+
+    static double progressDelta(const ConstructionProject& project,double power,double months) {
+        const double progress = std::clamp(project.progress,0.,1.);
+        return std::min(1-progress,std::max(0.,power)*std::max(0.,months)/std::max(1.,project.work));
+    }
+
+    static std::optional<double> remainingMonths(const ConstructionProject& project,double power) {
+        if (power <= 0) return std::nullopt;
+        return std::max(0.,project.work)*(1-std::clamp(project.progress,0.,1.))/power;
+    }
+
+    static Stockpile projectNeeds(const ConstructionProject& project,double delta) {
+        const double progress = std::clamp(project.progress,0.,1.);
+        const double next = std::min(1.,progress+std::max(0.,delta));
+        Stockpile needs;
+        for (const auto& [key,total] : project.resources) {
+            const double amount = total*next-value(project.resourcesSpent,key);
+            if (total > 0 && amount > 0) needs[key] = amount;
+        }
+        return needs;
     }
 
     template<class Tile,class InBattle>
-    Stockpile monthlyNeeds(const std::vector<Tile>& tiles,int owner,double budget,const Stockpile& stock,
+    Stockpile monthlyNeeds(const std::vector<Tile>& tiles,int owner,const StartingProfile& profile,const Stockpile& stock,
                            InBattle inBattle) const {
         const auto& queue = queues[owner];
         const int active = std::min(3,int(std::ranges::count_if(queue,[](const auto& p) { return !p.paused; })));
         Stockpile result;
         if (!active) return result;
-        const double power = buildPower(tiles,owner)/active;
+        const double power = buildPower(tiles,owner,profile)/active;
         int used = 0;
         for (const auto& project : queue) {
             if (project.paused) continue;
             if (++used > active) break;
-            if ((!project.paid && budget < project.money) || power <= 0 || project.progress >= .999) continue;
-            const double speed = power*(inBattle(project.tile) ? .22 : 1.)/std::max(1.,project.work);
-            const auto need = [&](std::string_view key,double total,double month) {
-                return std::max(0.,total*std::min(1.,project.progress+speed*month)-value(project.resourcesSpent,key));
-            };
-            if (std::ranges::any_of(project.resources,[&](const auto& entry) {
-                return value(stock,entry.first)+.001 < need(entry.first,entry.second,1./30.);
+            if ((!project.paid && profile.budget < project.money) || power <= 0 || project.progress >= .999) continue;
+            const double speed = power*speedMultiplier(inBattle(project.tile));
+            const auto required = projectNeeds(project,progressDelta(project,speed,1./30.));
+            if (std::ranges::any_of(required,[&](const auto& entry) {
+                return value(stock,entry.first)+.001 < entry.second;
             })) continue;
-            for (const auto& [key,total] : project.resources) result[key] += need(key,total,1.);
+            for (const auto& [key,amount] : projectNeeds(project,progressDelta(project,speed,1.))) result[key] += amount;
         }
         return result;
     }
@@ -148,16 +187,19 @@ struct Construction {
 
     template<class Tile>
     static std::string_view placementBlock(const std::vector<Tile>& tiles,int size,int owner,int index,int spec,double coverage) {
+        if (owner < 0) return "Нет страны";
+        if (index < 0 || index >= int(tiles.size()) || tiles[index].owner != owner) return "Чужая клетка";
+        if (spec < 0 || spec >= int(std::size(constructionSpecs))) return "Неизвестное строение";
         const auto& tile = tiles[index];
-        if (tile.owner != owner) return "Чужая клетка";
+        const bool water = tile.water || tile.natural.water > .55;
         if (coverage >= 1) return "Уже максимум";
         const auto& data = constructionSpecs[spec];
         if (data.building == port) {
             bool coastal = false;
             ownedNeighbors(tiles,size,index,&coastal);
-            if (tile.water || !coastal) return "Порт только рядом с водой";
+            if (water || !coastal) return "Порт только рядом с водой";
         }
-        if (tile.water) return "Нужна суша";
+        if (water) return "Нужна суша";
         constexpr ResourceWeight solid[] = {{"coal",1},{"peat",.55},{"iron_ore",1},{"copper_ore",.82},
             {"bauxite",.64},{"sulfur",.42},{"phosphorite",.40},{"apatite",.36}};
         constexpr ResourceWeight oil[] = {{"oil",1},{"natural_gas",.95}};
@@ -167,29 +209,38 @@ struct Construction {
     }
 
     template<class Tile>
-    std::string_view enqueue(const std::vector<Tile>& tiles,int size,int owner,int index,int spec) {
+    std::string_view enqueue(const std::vector<Tile>& tiles,int size,int owner,int index,int spec,double buildEfficiency = 1.) {
+        if (owner < 0 || owner >= int(queues.size())) return "Нет страны";
+        if (index < 0 || index >= int(tiles.size()) || tiles[index].owner != owner) return "Чужая клетка";
+        if (spec < 0 || spec >= int(std::size(constructionSpecs))) return "Неизвестное строение";
         const auto& data = constructionSpecs[spec];
         double current = tiles[index].buildings[data.building].area;
         auto& queue = queues[owner];
         for (const auto& project : queue)
             if (!project.repair && project.tile == index && project.spec == spec) current = std::max(current,project.target);
         if (const auto reason = placementBlock(tiles,size,owner,index,spec,current); !reason.empty()) return reason;
+        current = std::clamp(current,0.,1.);
         const double target = std::min(1.,(std::floor(current/.05+1e-9)+1)*.05);
         const double factor = (target-current)*std::pow(1.10,std::floor(current/.05));
         auto resources = data.resources;
-        for (auto& [key,amount] : resources) amount *= factor;
-        queue.push_back({index,spec,current,target,data.work*factor,data.money*factor,std::move(resources)});
+        const double costFactor = factor*std::max(.05,buildEfficiency);
+        for (auto& [key,amount] : resources) amount *= costFactor;
+        queue.push_back({index,spec,current,target,data.work*factor,data.money*costFactor,std::move(resources)});
         return {};
     }
 
     template<class Tile,class Complete,class InBattle>
     bool advance(std::vector<Tile>& tiles,std::vector<StartingProfile>& countries,
-                 std::vector<Stockpile>& stocks,int hours,Complete complete,InBattle inBattle) {
+                 std::vector<Stockpile>& stocks,int hours,Complete complete,InBattle inBattle,DebugProfiler* debug = nullptr) {
         bool changed = false;
-        for (int index = 0; index < int(tiles.size()); ++index)
-            for (int spec = 0; spec < int(std::size(constructionSpecs)); ++spec)
-                if (tiles[index].buildings[constructionSpecs[spec].building].health < .999)
-                    enqueueRepair(tiles[index],index,spec);
+        {
+            DebugMeasure timing(debug,"construction_auto_repairs");
+            for (int index = 0; index < int(tiles.size()); ++index)
+                for (int spec = 0; spec < int(std::size(constructionSpecs)); ++spec)
+                    if (tiles[index].buildings[constructionSpecs[spec].building].health < .999)
+                        enqueueRepair(tiles[index],index,spec);
+        }
+        DebugMeasure projects(debug,"construction_projects");
         for (std::size_t country = 0; country < queues.size(); ++country) {
             auto& queue = queues[country];
             std::erase_if(queue,[&](const auto& project) {
@@ -197,8 +248,8 @@ struct Construction {
                 return tile.owner != int(country) ||
                     (project.repair && 1-tile.buildings[constructionSpecs[project.spec].building].health <= .001);
             });
-            if (queue.empty()) continue;
-            const double power = buildPower(tiles,int(country));
+            if (queue.empty() || hours <= 0) continue;
+            const double power = buildPower(tiles,int(country),countries[country]);
             const int active = std::min(3,int(std::count_if(queue.begin(),queue.end(),[](const auto& p) { return !p.paused; })));
             int used = 0;
             for (auto& project : queue) {
@@ -222,40 +273,39 @@ struct Construction {
                     project.status = ConstructionStatus::waitingPower;
                     continue;
                 }
-                const double speed = inBattle(project.tile) ? .22 : 1.;
-                const double delta = std::min(1-project.progress,power/active*speed*hours/720./std::max(1.,project.work));
+                const double speed = power/active*speedMultiplier(inBattle(project.tile));
+                const double delta = progressDelta(project,speed,hours/720.);
                 if (delta <= 0) continue;
                 auto& stock = stocks[country];
                 const double next = std::min(1.,project.progress+delta);
-                Stockpile needs;
-                for (const auto& [resource,total] : project.resources) {
-                    const double amount = total*next-value(project.resourcesSpent,resource);
-                    if (amount <= 0) continue;
-                    needs[resource] = amount;
-                    const double available = value(stock,resource);
-                    if (available+.001 < amount) project.missingResources[resource] = amount-available;
+                const auto needs = projectNeeds(project,delta);
+                {
+                    DebugMeasure timing(debug,"construction_status_eval");
+                    for (const auto& [resource,amount] : needs) {
+                        const double available = value(stock,resource);
+                        if (available+.001 < amount) project.missingResources[resource] = amount-available;
+                    }
                 }
                 if (!project.missingResources.empty()) {
                     project.status = ConstructionStatus::waitingResources;
                     continue;
                 }
-                for (const auto& [resource,amount] : needs) {
-                    const double consumed = std::clamp(stock[resource],0.,amount);
-                    stock[resource] -= consumed;
-                    project.resourcesSpent[resource] += consumed;
+                {
+                    DebugMeasure timing(debug,"construction_consume_resources");
+                    for (const auto& [resource,amount] : needs) {
+                        const double consumed = std::clamp(stock[resource],0.,amount);
+                        stock[resource] -= consumed;
+                        project.resourcesSpent[resource] += consumed;
+                    }
                 }
                 project.status = project.repair ? ConstructionStatus::repairing : ConstructionStatus::building;
+                const double previousProgress = project.progress;
                 project.progress = next;
-                if (project.repair) {
-                    state.health = std::min(1.,state.health+delta*(project.target-project.from));
-                    changed = true;
-                }
+                changed |= applyRepairProgress(state,project,previousProgress,next);
                 if (project.progress >= .999) {
                     if (project.repair) state.health = project.target;
-                    else {
-                        state.area = std::max(state.area,project.target);
-                        complete(int(country),project.tile,building);
-                    }
+                    else state.area = std::min(1.,std::max(state.area,project.target));
+                    complete(int(country),project.tile,building,project.repair);
                     changed = true;
                 }
             }

@@ -18,12 +18,25 @@ struct Settings {
     int resolution = 1;
 };
 
-inline std::filesystem::path settingsFile(const std::filesystem::path& executableDirectory) {
+struct SettingsFiles {
+    std::filesystem::path preferred, portable;
+
+    std::filesystem::path latest() const {
+        std::error_code preferredError, portableError;
+        const auto preferredTime = std::filesystem::last_write_time(preferred,preferredError);
+        const auto portableTime = std::filesystem::last_write_time(portable,portableError);
+        if (!portableError && (preferredError || portableTime > preferredTime)) return portable;
+        return preferred;
+    }
+};
+
+inline SettingsFiles settingsFiles(const std::filesystem::path& executableDirectory) {
+    const auto portable = executableDirectory / "user_settings.json";
 #ifdef _WIN32
     if (const auto* local = _wgetenv(L"LOCALAPPDATA"); local && *local)
-        return std::filesystem::path(local) / "HOI5" / "user_settings.json";
+        return {std::filesystem::path(local) / "HOI5" / "user_settings.json",portable};
 #endif
-    return executableDirectory / "user_settings.json";
+    return {portable,portable};
 }
 
 inline Settings loadSettings(const std::filesystem::path& path,int resolutionCount) {
@@ -73,6 +86,11 @@ inline bool saveSettings(const std::filesystem::path& path,const Settings& setti
     }
     std::filesystem::remove(temporary,error);
     return false;
+}
+
+inline bool saveSettings(const SettingsFiles& files,const Settings& settings) {
+    if (saveSettings(files.preferred,settings)) return true;
+    return files.portable != files.preferred && saveSettings(files.portable,settings);
 }
 
 }

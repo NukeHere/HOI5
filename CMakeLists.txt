@@ -20,7 +20,6 @@ FetchContent_Declare(vorbis GIT_REPOSITORY https://github.com/xiph/vorbis.git
 FetchContent_MakeAvailable(sfml)
 add_executable(HOI5 H5_CPP/main.cpp)
 target_compile_features(HOI5 PRIVATE cxx_std_20)
-target_compile_definitions(HOI5 PRIVATE HOI5_PYTHON_DIR="${CMAKE_CURRENT_SOURCE_DIR}/H5_Python")
 if(MSVC)
     target_compile_options(HOI5 PRIVATE /utf-8)
 endif()
@@ -40,6 +39,15 @@ add_custom_command(TARGET HOI5 POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_di
     "${CMAKE_CURRENT_SOURCE_DIR}/H5_CPP/reference-map.txt"
     "$<TARGET_FILE_DIR:HOI5>/reference-map.txt")
 set_property(TARGET HOI5 APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/H5_CPP/reference-map.txt")
+file(GLOB_RECURSE HOI5_ASSETS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/H5_Python/assets/*" "${CMAKE_CURRENT_SOURCE_DIR}/H5_Python/music/*")
+set_property(TARGET HOI5 APPEND PROPERTY LINK_DEPENDS "${HOI5_ASSETS}")
+add_custom_command(TARGET HOI5 POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+        "-DRESOURCE_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/H5_Python"
+        "-DRESOURCE_DESTINATION=$<TARGET_FILE_DIR:HOI5>"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/H5_CPP/copy_resources.cmake"
+    VERBATIM)
 add_test(NAME reference_map COMMAND HOI5 --check-map)
 add_test(NAME friendly_movement COMMAND HOI5 --check-movement)
 add_test(NAME neutral_capture COMMAND HOI5 --check-capture)
@@ -51,6 +59,8 @@ add_test(NAME simulation_clock COMMAND HOI5 --check-clock)
 add_test(NAME hex_picking COMMAND HOI5 --check-hex-picking)
 add_test(NAME withdrawal_after_revoked_transit COMMAND HOI5 --check-withdrawal)
 add_test(NAME division_path_python_parity COMMAND HOI5 --check-path-parity)
+add_test(NAME army_front_and_manual_orders COMMAND HOI5 --check-army-front)
+add_test(NAME news_popup_priority COMMAND HOI5 --check-news-popup)
 add_test(NAME supply_python_parity COMMAND HOI5 --check-supply-parity)
 add_test(NAME airbase_capture COMMAND HOI5 --check-airbase-capture)
 add_test(NAME defense_reload COMMAND HOI5 --check-defense-reload)

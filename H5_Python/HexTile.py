@@ -191,7 +191,9 @@ class HexTile(arcade.Sprite):
                 return 'bog'
 
         # Преобладающий компонент определяет биом
-        if self.ridge_value > 0.75 and self.temperature < 0.35:
+        if self.temperature < 0.35 and (
+            self.ridge_value > 0.75 or (self.elevation > 0.7 and self.snow_cover >= 0.25)
+        ):
             return 'snowy_mountains'
         if self.ridge_value > 0.7:
             return 'mountains'
