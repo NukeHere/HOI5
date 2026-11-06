@@ -4,8 +4,14 @@
 #include "format_amount.hpp"
 #include "python_seed.hpp"
 #include "world_news_data.hpp"
+#include <chrono>
 #include <deque>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
 #include <random>
+#include <span>
 #include <string>
 
 namespace hoi5 {
@@ -49,17 +55,72 @@ class News {
     std::map<std::string_view,int> lastTemplateDay;
     std::mt19937 rng;
     std::vector<NoticeBatch> pendingNotices;
+    std::uint64_t worldSeed;
+    std::filesystem::path logPath;
+    bool logFailed{};
+
+    static void writeLogDate(std::ostream& out,int day) {
+        using namespace std::chrono;
+        const year_month_day date{sys_days{year{2000}/1/1}+days{day}};
+        out << int(date.year()) << '-' << std::setfill('0') << std::setw(2) << unsigned(date.month())
+            << '-' << std::setw(2) << unsigned(date.day());
+    }
+
+    void reportLogError(std::string_view message) {
+        logFailed = true;
+        std::cerr << message << ": " << logPath << '\n';
+    }
+
+    void logItem(const NewsItem& item) {
+        if (logPath.empty() || logFailed) return;
+        std::ofstream stream(logPath,std::ios::app);
+        constexpr std::array priorities{"flavor","regular","important","critical"};
+        stream << '[';
+        writeLogDate(stream,item.day);
+        stream << "] #" << item.id << " [" << priorities[static_cast<int>(item.priority)] << "] [";
+        if (item.viewer < 0) stream << "мир";
+        else {
+            stream << "страны " << item.viewer;
+            if (item.otherViewer >= 0 && item.otherViewer != item.viewer) stream << ", " << item.otherViewer;
+        }
+        stream << "] " << item.key << '\n' << item.title << '\n' << item.body << "\n\n";
+        stream.close();
+        if (!stream) reportLogError("Не удалось записать новость");
+    }
 
     void publish(NewsItem item) {
         item.id = nextId++;
         items.push_front(std::move(item));
         if (items.size() > 300) items.pop_back();
+        logItem(items.front());
     }
 
 public:
-    explicit News(std::uint64_t seed = 0) {
+    explicit News(std::uint64_t seed = 0) : worldSeed(seed) {
         PythonSeed pythonSeed{seed};
         rng.seed(pythonSeed);
+    }
+
+    void startLog(const std::filesystem::path& path,std::span<const std::string_view> countries,
+                  std::span<const std::string_view> rulers) {
+        logPath = path;
+        logFailed = false;
+        std::error_code error;
+        if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path(),error);
+        if (error) {
+            reportLogError("Не удалось создать каталог журнала новостей");
+            return;
+        }
+        std::ofstream stream(logPath);
+        stream << "HOI5 — история новостей новой партии\nСид: " << worldSeed << "\nНачало: ";
+        writeLogDate(stream,0);
+        stream << '\n';
+        for (std::size_t i = 0; i < countries.size(); ++i)
+            stream << "Страна " << i << ": " << countries[i] << "; правитель: "
+                   << (i < rulers.size() && !rulers[i].empty() ? rulers[i] : "не указан") << '\n';
+        stream << '\n';
+        stream.close();
+        if (!stream) reportLogError("Не удалось создать журнал новостей");
     }
 
     int report(int day,std::string_view key,std::string title,std::string body,

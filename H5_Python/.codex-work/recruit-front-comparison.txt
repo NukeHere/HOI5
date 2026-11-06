@@ -1,0 +1,30 @@
+Генерация мира с сидом: 424099
+Created 6 states, start territory radius: 4
+seed=424099 day=30/365 wars=0 battles=0
+seed=424099 day=60/365 wars=0 battles=0
+seed=424099 day=90/365 wars=0 battles=0
+seed=424099 day=120/365 wars=0 battles=0
+seed=424099 day=150/365 wars=1 battles=0
+seed=424099 day=180/365 wars=1 battles=1
+seed=424099 day=210/365 wars=1 battles=0
+seed=424099 day=240/365 wars=1 battles=0
+seed=424099 day=270/365 wars=1 battles=0
+seed=424099 day=300/365 wars=1 battles=0
+seed=424099 day=330/365 wars=2 battles=0
+seed=424099 day=360/365 wars=3 battles=0
+before completed 6
+Генерация мира с сидом: 424099
+Created 6 states, start territory radius: 4
+seed=424099 day=30/365 wars=0 battles=0
+seed=424099 day=60/365 wars=0 battles=0
+seed=424099 day=90/365 wars=0 battles=0
+seed=424099 day=120/365 wars=1 battles=0
+seed=424099 day=150/365 wars=1 battles=0
+seed=424099 day=180/365 wars=1 battles=0
+seed=424099 day=210/365 wars=1 battles=0
+seed=424099 day=240/365 wars=1 battles=0
+seed=424099 day=270/365 wars=2 battles=0
+seed=424099 day=300/365 wars=2 battles=0
+seed=424099 day=330/365 wars=3 battles=0
+seed=424099 day=360/365 wars=3 battles=0
+after completed 6

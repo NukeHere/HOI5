@@ -1,0 +1,10 @@
+test_constructed_depot_improves_real_supply_at_held_position (test_ai_supply.SupplyPlanningTests.test_constructed_depot_improves_real_supply_at_held_position) ... ok
+test_newly_owned_hex_without_supply_field_is_supported (test_ai_supply.SupplyPlanningTests.test_newly_owned_hex_without_supply_field_is_supported) ... ok
+test_poor_occupied_hex_is_not_hidden_by_high_country_average (test_ai_supply.SupplyPlanningTests.test_poor_occupied_hex_is_not_hidden_by_high_country_average) ... ok
+test_prewar_depot_uses_normal_queue_and_is_not_duplicated (test_ai_supply.SupplyPlanningTests.test_prewar_depot_uses_normal_queue_and_is_not_duplicated) ... ok
+test_unfunded_depot_does_not_bypass_costs (test_ai_supply.SupplyPlanningTests.test_unfunded_depot_does_not_bypass_costs) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 4.195s
+
+OK

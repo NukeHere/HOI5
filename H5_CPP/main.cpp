@@ -19,6 +19,7 @@
 #include "music.hpp"
 #include "population.hpp"
 #include "python_seed.hpp"
+#include "ai_supply.hpp"
 
 #include <algorithm>
 #include <array>
@@ -283,6 +284,9 @@ struct World {
     };
     static constexpr int armyCapacity = 20;
     std::vector<Army> armies;
+    struct BotSupplyState { int owner; double nextDaily; int target = -1; };
+    std::vector<BotSupplyState> supplyBots;
+    int botHours{};
     std::vector<int> frontOwnershipChanges;
     int size{};
     int capitalQ{}, capitalR{};
@@ -1018,7 +1022,60 @@ struct World {
             "Подд. войны: " + std::to_string(int(std::lround(diplomacy.countries[0].warSupport*100))) + "%"};
     }
 
+    struct TileStorageSnapshot {
+        hoi5::Stockpile national;
+        std::map<int,hoi5::Stockpile> tiles;
+    };
+    std::vector<std::optional<TileStorageSnapshot>> tileStorageSnapshots;
+
+    const hoi5::Stockpile& stockpileAtTile(int index) {
+        static const hoi5::Stockpile empty;
+        const int owner = tiles[index].owner;
+        if (owner < 0 || owner >= int(stockpiles.size())) return empty;
+        auto& snapshot = tileStorageSnapshots[owner];
+        auto& stocks = stockpiles[owner];
+        if (!snapshot || snapshot->national != stocks) {
+            hoi5::enforceStorageCapacity(stocks,capacities[owner]);
+            snapshot.emplace();
+            snapshot->national = stocks;
+        }
+        auto [stored,inserted] = snapshot->tiles.try_emplace(index);
+        if (inserted) stored->second = hoi5::distributeTileStockpile(stocks,capacities[owner],
+            hoi5::tileStorageCapacity(tiles[index]));
+        return stored->second;
+    }
+
     void rebuildEconomy() {
+        auto previousCapacities = std::move(capacities);
+        capacities.clear();
+        bool addedStorage = false;
+        for (int country = 0; country < int(profiles.size()); ++country) {
+            auto capacity = hoi5::storageCapacity(tiles,country);
+            const bool warehouseMissing = hoi5::value(capacity,"raw") <= 0. &&
+                hoi5::value(capacity,"semi_finished") <= 0. && hoi5::value(capacity,"finished") <= 0.;
+            const bool fuelMissing = hoi5::value(capacity,"fuel") <= 0.;
+            if (warehouseMissing || fuelMissing) {
+                int site = capitals[country];
+                if (!frontLand(country,site)) {
+                    const auto fallback = std::ranges::find_if(tiles,[&](const auto& tile) {
+                        return tile.owner == country && !tile.water;
+                    });
+                    site = fallback == tiles.end() ? -1 : int(fallback-tiles.begin());
+                }
+                if (site >= 0) {
+                    auto& buildings = tiles[site].buildings;
+                    if (warehouseMissing) buildings[hoi5::warehouse].area = std::min(.26,buildings[hoi5::warehouse].area+.12);
+                    if (fuelMissing) buildings[hoi5::fuelStorage].area = std::min(.34,buildings[hoi5::fuelStorage].area+.14);
+                    capacity = hoi5::storageCapacity(tiles,country);
+                    addedStorage = true;
+                }
+            }
+            if (country >= int(previousCapacities.size()) || capacity != previousCapacities[country])
+                hoi5::enforceStorageCapacity(stockpiles[country],capacity);
+            capacities.push_back(std::move(capacity));
+        }
+        tileStorageSnapshots.assign(profiles.size(),std::nullopt);
+        if (addedStorage) hoi5::recalculateSupply(std::span(tiles),size,capitals);
         humanSupply = {};
         double totalSupply = 0.;
         int suppliedLand = 0;
@@ -1033,11 +1090,9 @@ struct World {
         const auto tradeCapacity = hoi5::Market::monthlyCapacity(tiles,profiles);
         humanTradeCapacity = tradeCapacity.empty() ? 0. : tradeCapacity.front();
         production.clear();
-        capacities.clear();
         treasury.clear();
         for (int country = 0; country < static_cast<int>(profiles.size()); ++country) {
             production.push_back(hoi5::buildProduction(tiles, country, profiles[country].population, {}));
-            capacities.push_back(hoi5::storageCapacity(tiles, country));
             treasury.push_back(hoi5::monthlyTreasury(tiles,country,profiles[country].population));
         }
     }
@@ -2558,19 +2613,24 @@ struct World {
         return sorties;
     }
 
-    int launchAirMission(int wingIndex,bool strategic,int type,int reserved,bool& infrastructureChanged) {
+    using SortieCounts = std::array<int,std::size(hoi5::aircraftTypes)>;
+
+    int launchAirMission(int wingIndex,bool strategic,int type,SortieCounts& usedAircraft,bool& infrastructureChanged) {
         auto& wing = air.wings[wingIndex];
-        if (type < 0 || !wing.enabledMissions[strategic] || wing.missionCooldowns[strategic] > 0)
+        const auto unavailable = [&] { return wing.cooldown > 0. || wing.abortedHours > 0.; };
+        if (type < 0 || !wing.enabledMissions[strategic] || wing.missionCooldowns[strategic] > 0 || unavailable())
             return 0;
         int candidates = 0;
         int target = strategic ? selectStrategicTarget(wingIndex,&candidates) : selectCasTarget(wingIndex,&candidates);
         const int packages = std::clamp(candidates,1,5);
         int used = 0;
-        for (int i = 0; i < packages && used+reserved < wing.readyForType(type); ++i) {
+        for (int i = 0; i < packages && !unavailable(); ++i) {
+            const int available = wing.readyForType(type)-usedAircraft[type];
+            if (available <= 0) break;
             if (i > 0) target = strategic ? selectStrategicTarget(wingIndex) : selectCasTarget(wingIndex);
-            const int sorties = launchAirPackage(wingIndex,strategic,type,target,wing.readyForType(type)-used-reserved,
-                infrastructureChanged);
+            const int sorties = launchAirPackage(wingIndex,strategic,type,target,available,infrastructureChanged);
             if (!sorties) break;
+            usedAircraft[type] += sorties;
             used += sorties;
         }
         if (used > 0) wing.missionCooldowns[strategic] = std::max(2.,8./std::clamp(wing.sortieIntensity,.1,1.));
@@ -3043,8 +3103,11 @@ struct World {
                 if (shared && strikeReady >= 2 && wing.enabledMissions[0] && wing.enabledMissions[1] &&
                     wing.missionCooldowns[1] <= 0 && selectStrategicTarget(wingIndex) >= 0)
                     reservedStrike = std::max(1,int(strikeReady*.4));
-                const int used = launchAirMission(wingIndex,false,casType,reservedStrike,infrastructureChanged);
-                launchAirMission(wingIndex,true,strikeType,shared ? used : 0,infrastructureChanged);
+                SortieCounts usedAircraft{};
+                if (reservedStrike) usedAircraft[strikeType] = reservedStrike;
+                launchAirMission(wingIndex,false,casType,usedAircraft,infrastructureChanged);
+                if (reservedStrike) usedAircraft[strikeType] -= reservedStrike;
+                launchAirMission(wingIndex,true,strikeType,usedAircraft,infrastructureChanged);
             }
         }
         {
@@ -3154,6 +3217,90 @@ struct World {
             }
         }
         return ownershipChanged;
+    }
+
+    void startBots(unsigned seed) {
+        for (int owner = 1; owner < int(profiles.size()); ++owner) {
+            hoi5::PythonRandom rng(seed^(owner*1000003u));
+            (void)rng.uniform(); // The first Python draw schedules the tactical review.
+            supplyBots.push_back({owner,6.+18.*rng.uniform()});
+        }
+    }
+
+    std::optional<hoi5::BotSupplyChoice> planBotSupply(const BotSupplyState& bot,int spec) const {
+        std::vector<int> occupied(tiles.size());
+        std::vector<int> critical;
+        for (const auto& unit : divisions) {
+            if (unit.owner != bot.owner || unit.combat.strength <= 0) continue;
+            const int index = unit.r*size+unit.q;
+            if (tiles[index].owner != bot.owner) continue;
+            ++occupied[index];
+            if (tiles[index].supply < .30) critical.push_back(index);
+        }
+        std::set<int> queued, sites;
+        for (const auto& project : construction.queues[bot.owner]) {
+            if (project.spec != spec) continue;
+            queued.insert(project.tile);
+            if (project.repair) continue;
+            sites.insert(project.tile);
+            if (!project.paused && std::ranges::any_of(critical,[&](int tile) {
+                return hoi5::supplyHexDistance(project.tile,tile,size) <= 3;
+            })) return std::nullopt;
+        }
+        if (sites.size() >= 2 || (!sites.empty() && critical.empty())) return std::nullopt;
+        std::vector<hoi5::BotSupplyPoint> points;
+        std::vector<hoi5::BotSupplyCandidate> candidates;
+        for (int index = 0; index < int(tiles.size()); ++index) {
+            const auto& tile = tiles[index];
+            if (tile.owner != bot.owner || tile.water) continue;
+            bool border = false, hostileBorder = false;
+            forFrontNeighbor(index,[&](int neighbor) {
+                const auto& other = tiles[neighbor];
+                if (other.water || other.owner < 0 || other.owner == bot.owner) return;
+                border = true;
+                hostileBorder |= diplomacy.hostile(bot.owner,other.owner);
+            });
+            const int weight = occupied[index]+(border ? 3 : 0);
+            if (weight && tile.supply < .55)
+                points.push_back({index,double(weight),1./std::max(1.,tile.movementCost),tile.supply});
+            const double coverage = tile.buildings[hoi5::supplyDepot].area;
+            if (coverage >= .7 || queued.contains(index)) continue;
+            double strength = capitals[bot.owner] == index ? .85 : 0.;
+            for (int b = 0; b < hoi5::buildingCount; ++b)
+                strength += tile.buildings[b].area*tile.buildings[b].health*hoi5::supplySourceWeights[b];
+            strength = std::min(1.,strength+hoi5::supplySourceWeights[hoi5::supplyDepot]*(.7-coverage));
+            double multiplier = hostileBorder ? .85 : 1.;
+            if (battles.contains(index)) multiplier *= .8;
+            if (index == bot.target) multiplier *= 1.2;
+            candidates.push_back({index,strength,multiplier});
+        }
+        return hoi5::bestBotSupplySite(size,points,candidates);
+    }
+
+    void updateBots(int hours,hoi5::DebugProfiler* debug) {
+        if (supplyBots.empty()) return;
+        hoi5::DebugMeasure total(debug,"ai_total");
+        botHours += hours;
+        const int spec = std::ranges::find(hoi5::constructionSpecs,hoi5::supplyDepot,
+            &hoi5::ConstructionSpec::building)-std::begin(hoi5::constructionSpecs);
+        std::vector<std::pair<int,int>> orders;
+        {
+            hoi5::DebugMeasure daily(debug,"ai_daily");
+            for (auto& bot : supplyBots) {
+                if (botHours < bot.nextDaily) continue;
+                bot.nextDaily = botHours+24;
+                const auto choice = planBotSupply(bot,spec);
+                bot.target = choice ? choice->tile : -1;
+                if (choice) orders.emplace_back(bot.owner,choice->tile);
+            }
+        }
+        hoi5::DebugMeasure tasks(debug,"ai_tasks");
+        for (const auto& [owner,tile] : orders) {
+            auto& queue = construction.queues[owner];
+            if (!construction.enqueue(tiles,size,owner,tile,spec,profiles[owner].buildEfficiency).empty()) continue;
+            if (queue.back().money > std::max(0.,profiles[owner].budget-5000000.)) queue.pop_back();
+            else std::rotate(queue.begin(),std::prev(queue.end()),queue.end());
+        }
     }
 
     void advance(int hours,hoi5::DebugProfiler* debug = nullptr,std::optional<int> marketRotation = std::nullopt) {
@@ -3270,6 +3417,7 @@ struct World {
                 if (tile.owner >= 0) profiles[tile.owner].population += tile.population;
         }
         if ((airDamage || battleDamage || helipadBuilt || ownershipChanged) && !capitals.empty()) refreshBuildings();
+        updateBots(hours,debug);
         news.flushNotices();
     }
 
@@ -4564,6 +4712,39 @@ int main(int argc, char** argv) try {
             test.air.defense[0].tile == 3 && test.air.freeCapacity(test.tiles,0,1,0) == 46 ? 0 : 1;
     }
     if (mode == "--check-air-strike") {
+        {
+            World packages;
+            packages.size = 8;
+            packages.tiles.resize(64);
+            packages.diplomacy.countries.resize(2);
+            packages.diplomacy.relation(0,1).war = true;
+            packages.air.wings.push_back({0,0,4,16,3,0,{true,true}});
+            auto& wing = packages.air.wings.front();
+            wing.composition = {{4,8},{2,8}};
+            wing.sortieIntensity = 1.;
+            wing.operationArea = {3,4};
+            for (int tile : wing.operationArea) {
+                packages.tiles[tile].owner = 1;
+                packages.tiles[tile].buildings[hoi5::industry].area = .3;
+                auto& defender = packages.divisions.emplace_back();
+                defender.q = tile;
+                defender.owner = 1;
+            }
+            World::SortieCounts used{};
+            bool changed = false;
+            if (packages.launchAirMission(0,false,wing.missionType(0),used,changed) != 4 ||
+                packages.launchAirMission(0,true,wing.missionType(1),used,changed) != 4 ||
+                used[4] != 4 || used[2] != 4 || packages.salvos.size() != 4 ||
+                wing.missionCooldowns != std::array{8.,8.}) return 1;
+            for (int i = 0; i < 4; i += 2)
+                if (packages.salvos[i].target == packages.salvos[i+1].target ||
+                    packages.salvos[i].sourceAircraft != (i == 0 ? 4 : 2) ||
+                    packages.salvos[i+1].sourceAircraft != packages.salvos[i].sourceAircraft) return 1;
+            wing.missionCooldowns = {};
+            wing.abortedHours = 2.;
+            if (packages.launchAirMission(0,true,wing.missionType(1),used,changed) ||
+                packages.salvos.size() != 4 || wing.missionCooldowns[1] != 0.) return 1;
+        }
         World priorities;
         priorities.size = 2;
         priorities.tiles.resize(4);
@@ -4751,6 +4932,28 @@ int main(int argc, char** argv) try {
             division.combat.strength < strength && city.health < health ? 0 : 1;
     }
     if (mode == "--check-supply-parity") {
+        constexpr std::array points{hoi5::BotSupplyPoint{2,3.,.5,.1},hoi5::BotSupplyPoint{6,2.,1.,.2}};
+        constexpr std::array candidates{hoi5::BotSupplyCandidate{1,.8,1.},hoi5::BotSupplyCandidate{6,.7,.85}};
+        const auto choice = hoi5::bestBotSupplySite(4,points,candidates);
+        if (!choice || choice->tile != 1 || std::abs(choice->gain-1.60256) > 1e-12) return 1;
+        {
+            World bot;
+            bot.size = 3;
+            bot.tiles.resize(9);
+            bot.profiles.resize(2,{1.,1000000.,20000000.});
+            bot.diplomacy.countries.resize(2);
+            bot.construction.queues.resize(2);
+            bot.capitals = {0,1};
+            bot.tiles[1].owner = 1;
+            auto& division = bot.divisions.emplace_back();
+            division.q = division.owner = 1;
+            bot.startBots(7);
+            bot.updateBots(24,nullptr);
+            if (!bot.construction.queues[0].empty() || bot.construction.queues[1].size() != 1 ||
+                bot.construction.queues[1].front().tile != 1) return 1;
+            bot.updateBots(24,nullptr);
+            if (bot.construction.queues[1].size() != 1) return 1;
+        }
         std::vector<Tile> tiles(4);
         tiles[0].owner = 1;
         tiles[1].owner = 0;
@@ -4763,6 +4966,35 @@ int main(int argc, char** argv) try {
         tiles[1].buildings[hoi5::city].area = .1;
         hoi5::recalculateSupply(std::span(tiles),2,capitals);
         return std::abs(tiles[1].supply-.071) < 1e-12 ? 0 : 1;
+    }
+    if (mode == "--check-news-log" && argc == 3) {
+        const std::filesystem::path path(argv[2]);
+        constexpr std::array<std::string_view,2> countries{"Игрок","Сосед"}, rulers{"Правитель",""};
+        const auto read = [&] {
+            std::ifstream stream(path);
+            return std::string(std::istreambuf_iterator<char>(stream),{});
+        };
+        hoi5::News news(123);
+        news.startLog(path,countries,rulers);
+        for (int day = 0; day < 305; ++day)
+            news.report(day,"test","Заголовок "+std::to_string(day),"Описание "+std::to_string(day),
+                hoi5::NewsPriority::important,0,1);
+        news.report(305,"world","Мировая новость","Описание",hoi5::NewsPriority::flavor);
+        const auto journal = read();
+        if (!journal.starts_with("HOI5 — история новостей новой партии\nСид: 123\nНачало: 2000-01-01\n"
+                "Страна 0: Игрок; правитель: Правитель\nСтрана 1: Сосед; правитель: не указан\n\n") ||
+            journal.find("[2000-01-01] #1 [important] [страны 0, 1] test\nЗаголовок 0\nОписание 0\n\n") == std::string::npos ||
+            journal.find("[2000-10-31] #305 [important] [страны 0, 1] test\nЗаголовок 304\nОписание 304\n\n") == std::string::npos ||
+            !journal.ends_with("[2000-11-01] #306 [flavor] [мир] world\nМировая новость\nОписание\n\n") ||
+            news.visible(0).size() != 300) return 1;
+        hoi5::News restarted(456);
+        restarted.startLog(path,countries,rulers);
+        const auto reset = read();
+        if (reset.find("Сид: 456\n") == std::string::npos || reset.find("Заголовок") != std::string::npos) return 1;
+        restarted.startLog(path/"world-news.txt",countries,rulers);
+        restarted.report(0,"still_visible","Игра продолжается","Нет доступа к журналу");
+        const auto* item = restarted.latest(0);
+        return item && item->key == "still_visible" ? 0 : 1;
     }
     if (mode == "--check-news-popup") {
         hoi5::Market steadyMarket;
@@ -5227,6 +5459,29 @@ int main(int argc, char** argv) try {
         return !retreat.retreating && retreat.combat.strength > 0 && retreat.r == 1 ? 0 : 1;
     }
     if (mode == "--check-economy") {
+        {
+            World storage;
+            storage.size = 2;
+            storage.tiles.resize(4);
+            storage.profiles.resize(1,{1.,1000000.,20000000.});
+            storage.capitals = {0};
+            storage.stockpiles = {{{"iron_ore",200000.},{"copper_ore",100000.},{"coal",500000.}}};
+            storage.tiles[0].buildings[hoi5::warehouse] = {.10,1.};
+            storage.tiles[1].buildings[hoi5::warehouse] = {.20,.25};
+            storage.rebuildEconomy();
+            const auto close = [](double a,double b) { return std::abs(a-b) < 1e-8; };
+            if (!close(hoi5::value(storage.stockpiles[0],"coal"),448000.) ||
+                !close(hoi5::value(storage.stockpileAtTile(0),"iron_ore"),70000.) ||
+                !close(hoi5::value(storage.stockpileAtTile(1),"iron_ore"),35000.) ||
+                !close(hoi5::value(storage.stockpileAtTile(0),"copper_ore"),35000.) ||
+                !storage.stockpileAtTile(2).empty()) return 1;
+            storage.stockpiles[0]["iron_ore"] = 15000.;
+            if (!close(hoi5::value(storage.stockpileAtTile(0),"iron_ore"),10000.)) return 1;
+            storage.tiles[0].owner = -1;
+            storage.rebuildEconomy();
+            if (!storage.stockpileAtTile(0).empty() ||
+                !close(hoi5::value(storage.stockpileAtTile(1),"iron_ore"),11666.666666666666)) return 1;
+        }
         if (exportSliderPercent(100) != 0 || exportSliderPercent(235) != 35 ||
             exportSliderPercent(500) != 100 || exportSliderPercent(137) != 0 ||
             exportSliderPercent(138) != 5) return 1;
@@ -6100,7 +6355,11 @@ int main(int argc, char** argv) try {
         dropdown = -1;
         const int size = sizes[sizeChoice];
         const unsigned seed = 1 + std::random_device{}() % 999999;
-        generator = std::async(std::launch::async, generateWorld, size, countries, seed, difficulty);
+        generator = std::async(std::launch::async,[=] {
+            auto generated = generateWorld(size,countries,seed,difficulty);
+            generated.startBots(seed);
+            return generated;
+        });
     };
     if (generationSmoke) startGame();
     sf::Clock clock;
@@ -7134,6 +7393,9 @@ int main(int argc, char** argv) try {
         if (generator.valid() && generator.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             try {
                 world = generator.get();
+                world.news.startLog(directory/"logs"/"world-news.txt",
+                    std::span(world.countryNames).first(world.profiles.size()),
+                    std::span(world.rulers).first(world.profiles.size()));
                 if (music) music->newWorld();
                 (void)musicReview.restart();
                 tradePanel = diplomacyPanel = false;
@@ -8087,16 +8349,9 @@ int main(int argc, char** argv) try {
                 const auto hex_storage_lookupStart = DebugClock::now();
                 for (int cell : selectedTiles) {
                     const auto& selected = world.tiles[cell];
-                    if (selected.owner < 0 || selected.owner >= int(world.stockpiles.size())) continue;
                     const auto capacity = hoi5::tileStorageCapacity(selected);
                     for (const auto& [bucket,amount] : capacity) localCapacity[bucket] += amount;
-                    const auto& total = world.capacities[selected.owner];
-                    for (const auto& [key,amount] : world.stockpiles[selected.owner]) {
-                        const auto bucket = hoi5::storageBucket(key);
-                        const double whole = hoi5::value(total,bucket);
-                        const double part = hoi5::value(capacity,bucket);
-                        if (whole > 0 && part > 0 && amount > 0) localStock[key] += amount*part/whole;
-                    }
+                    for (const auto& [key,amount] : world.stockpileAtTile(cell)) localStock[key] += amount;
                 }
                 debug.record("hex_storage_lookup",hex_storage_lookupStart);
                 const auto hex_resources_lookupStart = DebugClock::now();

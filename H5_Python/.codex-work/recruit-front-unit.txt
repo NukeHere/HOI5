@@ -1,0 +1,12 @@
+test_air_operation_area_includes_hostile_side_of_front (test_ai_fronts.FrontTests.test_air_operation_area_includes_hostile_side_of_front) ... ok
+test_capture_is_held_in_peace_instead_of_return_to_capital (test_ai_fronts.FrontTests.test_capture_is_held_in_peace_instead_of_return_to_capital) ... ok
+test_group_already_in_battle_counts_when_continuing_attack (test_ai_fronts.FrontTests.test_group_already_in_battle_counts_when_continuing_attack) ... ok
+test_rear_army_covers_all_three_front_hexes (test_ai_fronts.FrontTests.test_rear_army_covers_all_three_front_hexes) ... ok
+test_reserve_identity_does_not_rotate_each_replan (test_ai_fronts.FrontTests.test_reserve_identity_does_not_rotate_each_replan) ... ok
+test_surplus_guards_leave_stack_to_cover_gaps (test_ai_fronts.FrontTests.test_surplus_guards_leave_stack_to_cover_gaps) ... ok
+test_units_on_isolated_component_get_reachable_posts (test_ai_fronts.FrontTests.test_units_on_isolated_component_get_reachable_posts) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 2.707s
+
+OK

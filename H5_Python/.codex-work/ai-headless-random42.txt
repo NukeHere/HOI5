@@ -1,0 +1,6 @@
+scenario=border-war seed=1 (border-war is an explicit test fixture)
+��������� ���� � �����: 1
+Created 4 states, start territory radius: 4
+seed=1 day=30/60 wars=1 battles=0
+seed=1 day=60/60 wars=1 battles=0
+{"seed": 1, "days": 60, "seconds": 3.017, "events": {"emergency_course": 2, "command": 615, "attack:accepted": 16, "move:accepted": 247, "review_stage": 284, "withdraw:accepted": 37, "trade:accepted": 192, "claim:accepted": 15, "build:accepted": 32, "politics:accepted": 6, "intelligence:accepted": 24, "air:accepted": 31, "air:rejected": 15}}

@@ -1,0 +1,38 @@
+test_bot_orders_replacements_through_paid_rules (test_division_recruitment.RecruitmentTests.test_bot_orders_replacements_through_paid_rules) ... ok
+test_cancellation_refunds_once_and_spent_training_is_not_free (test_division_recruitment.RecruitmentTests.test_cancellation_refunds_once_and_spent_training_is_not_free) ... ok
+test_composition_matches_presets_and_mixes_stats (test_division_recruitment.RecruitmentTests.test_composition_matches_presets_and_mixes_stats) ... FAIL
+test_designs_are_private_and_queued_design_is_frozen (test_division_recruitment.RecruitmentTests.test_designs_are_private_and_queued_design_is_frozen) ... ok
+test_human_adapter_rejects_foreign_controller (test_division_recruitment.RecruitmentTests.test_human_adapter_rejects_foreign_controller) ... ok
+test_invalid_compositions_are_rejected (test_division_recruitment.RecruitmentTests.test_invalid_compositions_are_rejected) ... ok
+test_missing_equipment_does_not_charge_anything (test_division_recruitment.RecruitmentTests.test_missing_equipment_does_not_charge_anything) ... ok
+test_no_safe_site_delays_deployment (test_division_recruitment.RecruitmentTests.test_no_safe_site_delays_deployment) ... ok
+test_paid_training_deploys_once_after_duration (test_division_recruitment.RecruitmentTests.test_paid_training_deploys_once_after_duration) ... ok
+
+======================================================================
+FAIL: test_composition_matches_presets_and_mixes_stats (test_division_recruitment.RecruitmentTests.test_composition_matches_presets_and_mixes_stats)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ich\projects\HOI5\tests\test_division_recruitment.py", line 31, in test_composition_matches_presets_and_mixes_stats
+    self.assertEqual(result["supply_capacity"], original["supply_capacity"])
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: {'wea[59 chars]000001, 'small_arms_ammo': 2736.0000000000005,[218 chars]13.0} != {'wea[59 chars]0000006, 'small_arms_ammo': 2736.0000000000005[219 chars]13.0}
+  {'anti_air_ammo': 133.28,
+   'artillery_ammo': 495.03999999999996,
+   'field_supplies': 513.0,
+-  'infantry_equipment': 484.5000000000001,
+?                                        ^
+
++  'infantry_equipment': 484.50000000000006,
+?                                        ^^
+
+   'refined_fuel': 1111.0000000000002,
+   'small_arms_ammo': 2736.0000000000005,
+   'spare_parts': 363.6000000000001,
+   'tank_ammo': 181.80000000000004,
+   'vehicles': 222.20000000000005,
+   'weapons': 541.5000000000001}
+
+----------------------------------------------------------------------
+Ran 9 tests in 2.588s
+
+FAILED (failures=1)

@@ -1,0 +1,45 @@
+��������� ���� � �����: 1
+Created 4 states, start territory radius: 4
+seed=1 day=30/365 wars=0 battles=0
+seed=1 day=60/365 wars=0 battles=0
+seed=1 day=90/365 wars=0 battles=0
+seed=1 day=120/365 wars=0 battles=0
+seed=1 day=150/365 wars=0 battles=0
+seed=1 day=180/365 wars=0 battles=0
+seed=1 day=210/365 wars=0 battles=0
+seed=1 day=240/365 wars=0 battles=0
+seed=1 day=270/365 wars=0 battles=0
+seed=1 day=300/365 wars=0 battles=0
+seed=1 day=330/365 wars=0 battles=0
+seed=1 day=360/365 wars=0 battles=0
+{"seed": 1, "days": 365, "seconds": 11.797, "events": {"review_stage": 1764, "command": 2388, "move:accepted": 698, "trade:accepted": 1136, "claim:accepted": 57, "build:accepted": 35, "politics:accepted": 44, "intelligence:accepted": 24, "air:accepted": 201, "specialize:accepted": 178, "course": 10, "air:rejected": 15}}
+��������� ���� � �����: 2
+Created 4 states, start territory radius: 4
+seed=2 day=30/365 wars=0 battles=0
+seed=2 day=60/365 wars=0 battles=0
+seed=2 day=90/365 wars=0 battles=0
+seed=2 day=120/365 wars=0 battles=0
+seed=2 day=150/365 wars=0 battles=0
+seed=2 day=180/365 wars=0 battles=0
+seed=2 day=210/365 wars=0 battles=0
+seed=2 day=240/365 wars=0 battles=0
+seed=2 day=270/365 wars=0 battles=0
+seed=2 day=300/365 wars=0 battles=0
+seed=2 day=330/365 wars=0 battles=0
+seed=2 day=360/365 wars=1 battles=0
+{"seed": 2, "days": 365, "seconds": 14.398, "events": {"review_stage": 1772, "command": 2679, "move:accepted": 886, "trade:accepted": 1190, "claim:accepted": 107, "build:accepted": 68, "politics:accepted": 53, "intelligence:accepted": 24, "air:accepted": 202, "specialize:accepted": 149, "course": 6, "emergency_course": 1}}
+��������� ���� � �����: 3
+Created 4 states, start territory radius: 4
+seed=3 day=30/365 wars=0 battles=0
+seed=3 day=60/365 wars=0 battles=0
+seed=3 day=90/365 wars=0 battles=0
+seed=3 day=120/365 wars=0 battles=0
+seed=3 day=150/365 wars=0 battles=0
+seed=3 day=180/365 wars=0 battles=0
+seed=3 day=210/365 wars=0 battles=0
+seed=3 day=240/365 wars=0 battles=0
+seed=3 day=270/365 wars=0 battles=0
+seed=3 day=300/365 wars=0 battles=0
+seed=3 day=330/365 wars=0 battles=0
+seed=3 day=360/365 wars=0 battles=0
+{"seed": 3, "days": 365, "seconds": 12.962, "events": {"review_stage": 1760, "command": 2247, "move:accepted": 505, "trade:accepted": 1181, "claim:accepted": 69, "build:accepted": 52, "politics:accepted": 48, "intelligence:accepted": 24, "air:accepted": 201, "specialize:accepted": 167, "course": 7}}

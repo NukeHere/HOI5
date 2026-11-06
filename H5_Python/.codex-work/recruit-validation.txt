@@ -1,0 +1,56 @@
+scenario=natural seed=1 (border-war is an explicit test fixture)
+Генерация мира с сидом: 1
+Created 8 states, start territory radius: 3
+seed=1 day=30/730 wars=0 battles=0
+seed=1 day=60/730 wars=0 battles=0
+seed=1 day=90/730 wars=0 battles=0
+seed=1 day=120/730 wars=2 battles=0
+seed=1 day=150/730 wars=2 battles=1
+seed=1 day=180/730 wars=3 battles=0
+seed=1 day=210/730 wars=4 battles=0
+seed=1 day=240/730 wars=4 battles=0
+seed=1 day=270/730 wars=4 battles=0
+seed=1 day=300/730 wars=4 battles=1
+seed=1 day=330/730 wars=4 battles=1
+seed=1 day=360/730 wars=4 battles=1
+seed=1 day=390/730 wars=4 battles=0
+seed=1 day=420/730 wars=4 battles=0
+seed=1 day=450/730 wars=4 battles=0
+seed=1 day=480/730 wars=4 battles=0
+seed=1 day=510/730 wars=4 battles=1
+seed=1 day=540/730 wars=4 battles=0
+seed=1 day=570/730 wars=4 battles=0
+seed=1 day=600/730 wars=4 battles=1
+seed=1 day=630/730 wars=2 battles=1
+seed=1 day=660/730 wars=2 battles=0
+seed=1 day=690/730 wars=2 battles=0
+seed=1 day=720/730 wars=1 battles=0
+{"seed": 1, "days": 730, "seconds": 86.726, "events": {"review_stage": 7058, "command": 13427, "move:accepted": 2914, "trade:accepted": 4658, "claim:accepted": 134, "build:accepted": 627, "politics:accepted": 80, "intelligence:accepted": 48, "air:accepted": 809, "specialize:accepted": 25, "course": 17, "emergency_course": 4, "attack:accepted": 913, "withdraw:accepted": 2918, "recruit:accepted": 55, "politics:rejected": 50, "move:rejected": 196}}
+scenario=natural seed=2 (border-war is an explicit test fixture)
+Генерация мира с сидом: 2
+Created 8 states, start territory radius: 3
+seed=2 day=30/730 wars=0 battles=0
+seed=2 day=60/730 wars=0 battles=0
+seed=2 day=90/730 wars=0 battles=0
+seed=2 day=120/730 wars=0 battles=0
+seed=2 day=150/730 wars=0 battles=0
+seed=2 day=180/730 wars=1 battles=0
+seed=2 day=210/730 wars=1 battles=0
+seed=2 day=240/730 wars=1 battles=0
+seed=2 day=270/730 wars=4 battles=0
+seed=2 day=300/730 wars=4 battles=0
+seed=2 day=330/730 wars=4 battles=0
+seed=2 day=360/730 wars=5 battles=0
+seed=2 day=390/730 wars=5 battles=0
+seed=2 day=420/730 wars=5 battles=0
+seed=2 day=450/730 wars=6 battles=0
+seed=2 day=480/730 wars=6 battles=1
+seed=2 day=510/730 wars=6 battles=0
+seed=2 day=540/730 wars=6 battles=0
+seed=2 day=570/730 wars=6 battles=0
+seed=2 day=600/730 wars=6 battles=0
+seed=2 day=630/730 wars=6 battles=0
+seed=2 day=660/730 wars=6 battles=0
+seed=2 day=690/730 wars=4 battles=0
+seed=2 day=720/730 wars=4 battles=0
+{"seed": 2, "days": 730, "seconds": 84.098, "events": {"review_stage": 7078, "command": 11302, "move:accepted": 2329, "trade:accepted": 4664, "claim:accepted": 197, "build:accepted": 630, "politics:accepted": 97, "intelligence:accepted": 48, "air:accepted": 813, "specialize:accepted": 5, "course": 13, "emergency_course": 1, "attack:accepted": 529, "withdraw:accepted": 1742, "recruit:accepted": 12, "trade:rejected": 236}}

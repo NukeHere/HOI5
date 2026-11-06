@@ -6,6 +6,12 @@
 namespace hoi5 {
 
 using Stockpile = std::map<std::string_view, double>;
+
+inline double value(const Stockpile& values, std::string_view name, double fallback = 0) {
+    const auto it = values.find(name);
+    return it == values.end() ? fallback : it->second;
+}
+
 inline Stockpile startingStockpile(unsigned seed, double scale) {
     struct Entry { std::string_view name; int minimum, maximum; double multiplier; };
     constexpr Entry entries[] = {

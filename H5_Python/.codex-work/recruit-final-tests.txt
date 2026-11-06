@@ -1,0 +1,147 @@
+test_clock_calls_world_in_six_hour_steps_at_max_speed (test_ai.AIModelTests.test_clock_calls_world_in_six_hour_steps_at_max_speed) ... ok
+test_fast_speed_spreads_work_across_render_updates (test_ai.AIModelTests.test_fast_speed_spreads_work_across_render_updates) ... ok
+test_flow_ledger_records_actual_transfers_and_bounds_history (test_ai.AIModelTests.test_flow_ledger_records_actual_transfers_and_bounds_history) ... ok
+test_names_unique_and_do_not_touch_global_random (test_ai.AIModelTests.test_names_unique_and_do_not_touch_global_random) ... ok
+test_obvious_choice_stays_obvious_but_close_choices_vary (test_ai.AIModelTests.test_obvious_choice_stays_obvious_but_close_choices_vary) ... ok
+test_repeated_intelligence_and_refresh_keep_correlated_error (test_ai.AIModelTests.test_repeated_intelligence_and_refresh_keep_correlated_error) ... ok
+test_untrusted_ai_command_cannot_mutate_world (test_ai.AIModelTests.test_untrusted_ai_command_cannot_mutate_world) ... ok
+test_weekly_review_runs_on_different_days (test_ai.AIModelTests.test_weekly_review_runs_on_different_days) ... ok
+test_persistent_complete_history_reset_only_for_new_game (test_ai.NewsLogTests.test_persistent_complete_history_reset_only_for_new_game) ... ok
+test_connected_cover_and_owner_fragments (test_ai.RegionTests.test_connected_cover_and_owner_fragments) ... ok
+test_air_task_configures_wings_even_when_sam_needs_moving (test_ai_integration.AIIntegrationTests.test_air_task_configures_wings_even_when_sam_needs_moving) ... ok
+test_batched_budget_forecast_matches_individual_forecasts (test_ai_integration.AIIntegrationTests.test_batched_budget_forecast_matches_individual_forecasts) ... ok
+test_build_duplicate_and_untrusted_command_are_rejected (test_ai_integration.AIIntegrationTests.test_build_duplicate_and_untrusted_command_are_rejected) ... ok
+test_division_designer_and_recruitment_panel_commands (test_ai_integration.AIIntegrationTests.test_division_designer_and_recruitment_panel_commands) ... ok
+test_human_country_can_be_target_zero (test_ai_integration.AIIntegrationTests.test_human_country_can_be_target_zero) ... ok
+test_real_war_preparation_and_combat_runtime (test_ai_integration.AIIntegrationTests.test_real_war_preparation_and_combat_runtime) ... ok
+test_staged_reviews_execute_real_actions_and_keep_human_state_unassigned (test_ai_integration.AIIntegrationTests.test_staged_reviews_execute_real_actions_and_keep_human_state_unassigned) ... ok
+test_tactical_escape_does_not_wait_for_weekly_review (test_ai_integration.AIIntegrationTests.test_tactical_escape_does_not_wait_for_weekly_review) ... ok
+test_card_open_edit_amount_confirm_and_escape (test_country_integration.CountryIntegrationTests.test_card_open_edit_amount_confirm_and_escape) ... ok
+test_country_card_renders_war_preparation_status (test_country_integration.CountryIntegrationTests.test_country_card_renders_war_preparation_status) ... ok
+test_country_details_and_context_actions (test_country_integration.CountryIntegrationTests.test_country_details_and_context_actions) ... ok
+test_country_dialog_bounds_scrolling_and_bounded_text_cache (test_country_integration.CountryIntegrationTests.test_country_dialog_bounds_scrolling_and_bounded_text_cache) ... ok
+test_country_dialog_preserves_tab_scroll_and_map (test_country_integration.CountryIntegrationTests.test_country_dialog_preserves_tab_scroll_and_map) ... ok
+test_country_idle_text_is_not_relaid_out_and_views_are_reused (test_country_integration.CountryIntegrationTests.test_country_idle_text_is_not_relaid_out_and_views_are_reused) ... ok
+test_country_navigation_does_not_rebuild_inactive_resource_map (test_country_integration.CountryIntegrationTests.test_country_navigation_does_not_rebuild_inactive_resource_map) ... ok
+test_country_panel_does_not_capture_map_mouse (test_country_integration.CountryIntegrationTests.test_country_panel_does_not_capture_map_mouse) ... ok
+test_country_render_bounds_and_reuses_text_pool (test_country_integration.CountryIntegrationTests.test_country_render_bounds_and_reuses_text_pool) ... ok
+test_daily_politics_reads_live_supply_and_prices (test_country_integration.CountryIntegrationTests.test_daily_politics_reads_live_supply_and_prices) ... ok
+test_descriptive_oil_crisis_does_not_change_market_or_budget (test_country_integration.CountryIntegrationTests.test_descriptive_oil_crisis_does_not_change_market_or_budget) ... ok
+test_division_geometry_reused_and_invalidated_by_selection (test_country_integration.CountryIntegrationTests.test_division_geometry_reused_and_invalidated_by_selection) ... ok
+test_export_slider_is_applied_only_on_confirmation (test_country_integration.CountryIntegrationTests.test_export_slider_is_applied_only_on_confirmation) ... ok
+test_foreign_and_mixed_selection_cannot_change_specialization (test_country_integration.CountryIntegrationTests.test_foreign_and_mixed_selection_cannot_change_specialization) ... ok
+test_hover_tooltips_draw_after_country_and_trade_panels (test_country_integration.CountryIntegrationTests.test_hover_tooltips_draw_after_country_and_trade_panels) ... ok
+test_instability_reduces_company_tax_forecast (test_country_integration.CountryIntegrationTests.test_instability_reduces_company_tax_forecast) ... ok
+test_military_transit_does_not_capture_and_revocation_blocks_new_routes (test_country_integration.CountryIntegrationTests.test_military_transit_does_not_capture_and_revocation_blocks_new_routes) ... ok
+test_peace_war_gate_ground_and_air (test_country_integration.CountryIntegrationTests.test_peace_war_gate_ground_and_air) ... ok
+test_politics_and_diplomacy_navigation_and_hex_owner (test_country_integration.CountryIntegrationTests.test_politics_and_diplomacy_navigation_and_hex_owner) ... ok
+test_population_forecast_matches_growth_without_mutating_tiles (test_country_integration.CountryIntegrationTests.test_population_forecast_matches_growth_without_mutating_tiles) ... ok
+test_program_clock_matches_calendar_at_fast_speed (test_country_integration.CountryIntegrationTests.test_program_clock_matches_calendar_at_fast_speed) ... ok
+test_program_duration_control_reaches_simulation (test_country_integration.CountryIntegrationTests.test_program_duration_control_reaches_simulation) ... ok
+test_real_logistics_damage_reaches_owner_news (test_country_integration.CountryIntegrationTests.test_real_logistics_damage_reaches_owner_news) ... ok
+test_real_market_and_forecast_respect_embargo (test_country_integration.CountryIntegrationTests.test_real_market_and_forecast_respect_embargo) ... ok
+test_resource_card_renders_production_and_consumption_after_click (test_country_integration.CountryIntegrationTests.test_resource_card_renders_production_and_consumption_after_click) ... ok
+test_tax_and_program_affect_existing_budget (test_country_integration.CountryIntegrationTests.test_tax_and_program_affect_existing_budget) ... ok
+test_trade_buttons_leave_scrollbar_gutter (test_country_integration.CountryIntegrationTests.test_trade_buttons_leave_scrollbar_gutter) ... ok
+test_trade_country_summary_and_all_detail_views_render (test_country_integration.CountryIntegrationTests.test_trade_country_summary_and_all_detail_views_render) ... ok
+test_trade_status_updates_on_closure_and_direct_trade_remains_available (test_country_integration.CountryIntegrationTests.test_trade_status_updates_on_closure_and_direct_trade_remains_available) ... ok
+test_world_news_ticker_archive_and_popup_do_not_block_map (test_country_integration.CountryIntegrationTests.test_world_news_ticker_archive_and_popup_do_not_block_map) ... ok
+test_economy_population_and_readiness_change_components (test_country_power.PowerTests.test_economy_population_and_readiness_change_components) ... ok
+test_empty_world_and_zero_countries (test_country_power.PowerTests.test_empty_world_and_zero_countries) ... ok
+test_equal_countries_share_rank (test_country_power.PowerTests.test_equal_countries_share_rank) ... ok
+test_bot_orders_replacements_through_paid_rules (test_division_recruitment.RecruitmentTests.test_bot_orders_replacements_through_paid_rules) ... ok
+test_cancellation_refunds_once_and_spent_training_is_not_free (test_division_recruitment.RecruitmentTests.test_cancellation_refunds_once_and_spent_training_is_not_free) ... ok
+test_composition_matches_presets_and_mixes_stats (test_division_recruitment.RecruitmentTests.test_composition_matches_presets_and_mixes_stats) ... ok
+test_designs_are_private_and_queued_design_is_frozen (test_division_recruitment.RecruitmentTests.test_designs_are_private_and_queued_design_is_frozen) ... ok
+test_human_adapter_rejects_foreign_controller (test_division_recruitment.RecruitmentTests.test_human_adapter_rejects_foreign_controller) ... ok
+test_invalid_compositions_are_rejected (test_division_recruitment.RecruitmentTests.test_invalid_compositions_are_rejected) ... ok
+test_missing_equipment_does_not_charge_anything (test_division_recruitment.RecruitmentTests.test_missing_equipment_does_not_charge_anything) ... ok
+test_no_safe_site_delays_deployment (test_division_recruitment.RecruitmentTests.test_no_safe_site_delays_deployment) ... ok
+test_paid_training_deploys_once_after_duration (test_division_recruitment.RecruitmentTests.test_paid_training_deploys_once_after_duration) ... ok
+test_actual_neighbor_with_legacy_distance_two_is_valid_retreat (test_headless.HeadlessTests.test_actual_neighbor_with_legacy_distance_two_is_valid_retreat) ... ok
+test_ai_seed_changes_personality_without_changing_initial_world (test_headless.HeadlessTests.test_ai_seed_changes_personality_without_changing_initial_world) ... ok
+test_attack_cancellation_evaluates_whole_committed_group (test_headless.HeadlessTests.test_attack_cancellation_evaluates_whole_committed_group) ... ok
+test_border_fixture_produces_actual_battles (test_headless.HeadlessTests.test_border_fixture_produces_actual_battles) ... ok
+test_capturing_air_defense_position_removes_enemy_asset (test_headless.HeadlessTests.test_capturing_air_defense_position_removes_enemy_asset) ... ok
+test_no_window_texture_sprite_or_text_and_all_countries_are_bots (test_headless.HeadlessTests.test_no_window_texture_sprite_or_text_and_all_countries_are_bots) ... ok
+test_own_preparation_does_not_frighten_bot_into_abandoning_it (test_headless.HeadlessTests.test_own_preparation_does_not_frighten_bot_into_abandoning_it) ... ok
+test_repeated_move_preserves_progress (test_headless.HeadlessTests.test_repeated_move_preserves_progress) ... ok
+test_reproducible_reports_and_decisions (test_headless.HeadlessTests.test_reproducible_reports_and_decisions) ... ok
+test_tactical_deployment_preserves_in_progress_route (test_headless.HeadlessTests.test_tactical_deployment_preserves_in_progress_route) ... ok
+test_world_audit_detects_corrupt_state (test_headless.HeadlessTests.test_world_audit_detects_corrupt_state) ... ok
+test_active_catalog_has_variety_without_future_crises (test_news.NewsTests.test_active_catalog_has_variety_without_future_crises) ... ok
+test_alert_reports_problem_once_and_reports_recovery (test_news.NewsTests.test_alert_reports_problem_once_and_reports_recovery) ... ok
+test_battle_loss_news_uses_actual_strength_loss_and_is_local (test_news.NewsTests.test_battle_loss_news_uses_actual_strength_loss_and_is_local) ... ok
+test_deterministic_random_news_and_cooldown (test_news.NewsTests.test_deterministic_random_news_and_cooldown) ... ok
+test_large_support_change_is_a_local_ticker_item (test_news.NewsTests.test_large_support_change_is_a_local_ticker_item) ... ok
+test_large_trade_headline_only_for_real_record (test_news.NewsTests.test_large_trade_headline_only_for_real_record) ... ok
+test_logistics_damage_news_needs_real_threshold_crossing (test_news.NewsTests.test_logistics_damage_news_needs_real_threshold_crossing) ... ok
+test_offer_receipt_and_rejection_are_visible_to_affected_country (test_news.NewsTests.test_offer_receipt_and_rejection_are_visible_to_affected_country) ... ok
+test_oil_context_changes_chance_but_not_game_state (test_news.NewsTests.test_oil_context_changes_chance_but_not_game_state) ... ok
+test_political_news_and_no_protest_event (test_news.NewsTests.test_political_news_and_no_protest_event) ... ok
+test_visibility_priority_and_bounded_archive (test_news.NewsTests.test_visibility_priority_and_bounded_archive) ... ok
+test_war_headline_reflects_alliance_without_creating_relations (test_news.NewsTests.test_war_headline_reflects_alliance_without_creating_relations) ... ok
+test_allied_buyer_has_priority (test_politics.MarketTests.test_allied_buyer_has_priority) ... ok
+test_embargo_cannot_be_bypassed_by_other_orders (test_politics.MarketTests.test_embargo_cannot_be_bypassed_by_other_orders) ... ok
+test_external_quota_is_shared_and_access_is_checked (test_politics.MarketTests.test_external_quota_is_shared_and_access_is_checked) ... ok
+test_finite_supply_and_conservation (test_politics.MarketTests.test_finite_supply_and_conservation) ... ok
+test_sales_cover_existing_deficit_before_financing_purchases (test_politics.MarketTests.test_sales_cover_existing_deficit_before_financing_purchases) ... ok
+test_storage_and_budget_limit_transfers (test_politics.MarketTests.test_storage_and_budget_limit_transfers) ... ok
+test_aid_amount_is_conserved_and_cannot_repeat (test_politics.PoliticsTests.test_aid_amount_is_conserved_and_cannot_repeat) ... ok
+test_bankrupt_country_can_propose_peace_and_cancel_program (test_politics.PoliticsTests.test_bankrupt_country_can_propose_peace_and_cancel_program) ... ok
+test_bot_can_accept_peace_after_war_weariness (test_politics.PoliticsTests.test_bot_can_accept_peace_after_war_weariness) ... ok
+test_cancelled_war_goal_ends_diplomatic_crisis (test_politics.PoliticsTests.test_cancelled_war_goal_ends_diplomatic_crisis) ... ok
+test_dates_follow_the_simulation_calendar (test_politics.PoliticsTests.test_dates_follow_the_simulation_calendar) ... ok
+test_diplomatic_access_and_truce (test_politics.PoliticsTests.test_diplomatic_access_and_truce) ... ok
+test_export_limits_validate_and_preserve_legacy_toggle (test_politics.PoliticsTests.test_export_limits_validate_and_preserve_legacy_toggle) ... ok
+test_faction_demands_affect_patience_and_ideology (test_politics.PoliticsTests.test_faction_demands_affect_patience_and_ideology) ... ok
+test_invalid_amounts_have_no_effect (test_politics.PoliticsTests.test_invalid_amounts_have_no_effect) ... ok
+test_loan_requires_acceptance_and_repayment_preserves_money (test_politics.PoliticsTests.test_loan_requires_acceptance_and_repayment_preserves_money) ... ok
+test_loan_revalidates_funds_and_keeps_arrears (test_politics.PoliticsTests.test_loan_revalidates_funds_and_keeps_arrears) ... ok
+test_nonaggression_pact_cancels_pending_war_goal (test_politics.PoliticsTests.test_nonaggression_pact_cancels_pending_war_goal) ... ok
+test_pact_and_transit_are_directional (test_politics.PoliticsTests.test_pact_and_transit_are_directional) ... ok
+test_political_capital_is_previewed_and_checked_for_domestic_decisions (test_politics.PoliticsTests.test_political_capital_is_previewed_and_checked_for_domestic_decisions) ... ok
+test_program_batch_and_hourly_advance_match (test_politics.PoliticsTests.test_program_batch_and_hourly_advance_match) ... ok
+test_program_duration_costs_and_partial_hour_start (test_politics.PoliticsTests.test_program_duration_costs_and_partial_hour_start) ... ok
+test_program_expires_and_stops_cost (test_politics.PoliticsTests.test_program_expires_and_stops_cost) ... ok
+test_program_not_deleted_when_funds_run_out (test_politics.PoliticsTests.test_program_not_deleted_when_funds_run_out) ... ok
+test_program_term_validation_and_weekly_renewal (test_politics.PoliticsTests.test_program_term_validation_and_weekly_renewal) ... ok
+test_rules_drive_preview_execution_and_frozen_loan_terms (test_politics.PoliticsTests.test_rules_drive_preview_execution_and_frozen_loan_terms) ... ok
+test_shortage_and_prices_lower_support_gradually_and_recover (test_politics.PoliticsTests.test_shortage_and_prices_lower_support_gradually_and_recover) ... ok
+test_social_and_faction_programs_affect_support_and_expire (test_politics.PoliticsTests.test_social_and_faction_programs_affect_support_and_expire) ... ok
+test_support_changes_slowly_and_scales_with_conditions (test_politics.PoliticsTests.test_support_changes_slowly_and_scales_with_conditions) ... ok
+test_tax_direction_shares_cooldown_and_support_is_delayed (test_politics.PoliticsTests.test_tax_direction_shares_cooldown_and_support_is_delayed) ... ok
+test_war_goal_expires_and_radicals_can_block_declaration (test_politics.PoliticsTests.test_war_goal_expires_and_radicals_can_block_declaration) ... ok
+test_war_requires_preparation_and_political_readiness (test_politics.PoliticsTests.test_war_requires_preparation_and_political_readiness) ... ok
+
+----------------------------------------------------------------------
+Ran 115 tests in 29.165s
+
+OK
+��������� ���� � �����: 748992
+������� 1024 ������
+Created 4 states, start territory radius: 4
+��������� ���� � �����: 748992
+������� 1024 ������
+Created 4 states, start territory radius: 4
+��������� ���� � �����: 748992
+������� 1024 ������
+Created 4 states, start territory radius: 4
+��������� ���� � �����: 748992
+������� 1024 ������
+Created 4 states, start territory radius: 4
+��������� ���� � �����: 748992
+������� 1024 ������
+Created 4 states, start territory radius: 4
+��������� ���� � �����: 748992
+������� 1024 ������
+Created 4 states, start territory radius: 4
+��������� ���� � �����: 748992
+������� 1024 ������
+Created 4 states, start territory radius: 4
+��������� ���� � �����: 748992
+������� 1024 ������
+Created 4 states, start territory radius: 4
+��������� ���� � �����: 685499
+������� 1024 ������
+Created 2 states, start territory radius: 4

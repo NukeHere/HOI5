@@ -1,0 +1,10 @@
+scenario=border-war seed=3 (border-war is an explicit test fixture)
+Генерация мира с сидом: 3
+Created 4 states, start territory radius: 4
+seed=3 day=30/180 wars=1 battles=0
+seed=3 day=60/180 wars=1 battles=0
+seed=3 day=90/180 wars=1 battles=0
+seed=3 day=120/180 wars=2 battles=0
+seed=3 day=150/180 wars=2 battles=0
+seed=3 day=180/180 wars=2 battles=0
+{"seed": 3, "days": 180, "seconds": 11.171, "events": {"emergency_course": 2, "command": 1688, "attack:accepted": 159, "move:accepted": 333, "withdraw:accepted": 379, "review_stage": 868, "trade:accepted": 557, "claim:accepted": 22, "build:accepted": 98, "politics:accepted": 10, "intelligence:accepted": 24, "air:accepted": 99, "recruit:accepted": 7, "course": 2}}

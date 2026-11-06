@@ -1,0 +1,21 @@
+scenario=border-war seed=1 (border-war is an explicit test fixture)
+��������� ���� � �����: 1
+Created 4 states, start territory radius: 4
+seed=1 day=30/90 wars=1 battles=0
+seed=1 day=60/90 wars=1 battles=0
+seed=1 day=90/90 wars=1 battles=0
+{"seed": 1, "days": 90, "seconds": 4.879, "events": {"emergency_course": 2, "command": 1135, "attack:accepted": 22, "move:accepted": 601, "withdraw:accepted": 73, "review_stage": 429, "trade:accepted": 288, "claim:accepted": 22, "build:accepted": 48, "politics:accepted": 6, "intelligence:accepted": 24, "air:accepted": 48, "air:rejected": 3}}
+scenario=border-war seed=2 (border-war is an explicit test fixture)
+��������� ���� � �����: 2
+Created 4 states, start territory radius: 4
+seed=2 day=30/90 wars=1 battles=0
+seed=2 day=60/90 wars=1 battles=0
+seed=2 day=90/90 wars=1 battles=0
+{"seed": 2, "days": 90, "seconds": 3.423, "events": {"emergency_course": 2, "command": 1315, "attack:accepted": 15, "move:accepted": 796, "review_stage": 428, "withdraw:accepted": 67, "trade:accepted": 288, "build:accepted": 47, "claim:accepted": 23, "intelligence:accepted": 24, "politics:accepted": 7, "air:accepted": 48}}
+scenario=border-war seed=3 (border-war is an explicit test fixture)
+��������� ���� � �����: 3
+Created 4 states, start territory radius: 4
+seed=3 day=30/90 wars=1 battles=0
+seed=3 day=60/90 wars=1 battles=0
+seed=3 day=90/90 wars=1 battles=0
+{"seed": 3, "days": 90, "seconds": 3.641, "events": {"emergency_course": 2, "command": 1017, "attack:accepted": 22, "move:accepted": 450, "withdraw:accepted": 131, "review_stage": 429, "trade:accepted": 272, "claim:accepted": 16, "build:accepted": 48, "politics:accepted": 6, "intelligence:accepted": 24, "air:accepted": 48, "course": 1}}

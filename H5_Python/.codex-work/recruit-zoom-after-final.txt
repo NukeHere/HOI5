@@ -1,0 +1,4 @@
+Генерация мира с сидом: 424099
+Создано 2500 тайлов
+Created 6 states, start territory radius: 4
+[{"zoom": 0.45, "overview": false, "wings": 12, "visible_tiles": 792, "mean_ms": {"air": 20.863, "visible": 5.852, "draw": 29.137}, "p95_ms": {"air": 24.01, "visible": 6.903, "draw": 33.364}}, {"zoom": 0.25, "overview": false, "wings": 12, "visible_tiles": 1900, "mean_ms": {"air": 0.399, "visible": 13.259, "draw": 11.259}, "p95_ms": {"air": 1.585, "visible": 13.584, "draw": 13.096}}, {"zoom": 0.20000000000000037, "overview": true, "wings": 12, "visible_tiles": 0, "mean_ms": {"air": 0.254, "visible": 0.73, "draw": 9.499}, "p95_ms": {"air": 1.526, "visible": 1.211, "draw": 13.107}}, {"zoom": 0.15, "overview": true, "wings": 12, "visible_tiles": 0, "mean_ms": {"air": 0.268, "visible": 0.732, "draw": 9.538}, "p95_ms": {"air": 1.456, "visible": 1.133, "draw": 12.17}}]

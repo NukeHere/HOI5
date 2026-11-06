@@ -1,0 +1,18 @@
+��������� ���� � �����: 1
+Created 4 states, start territory radius: 4
+seed=1 day=30/90 wars=1 battles=0
+seed=1 day=60/90 wars=1 battles=0
+seed=1 day=90/90 wars=1 battles=0
+{"seed": 1, "days": 90, "seconds": 3.515, "events": {"emergency_course": 2, "command": 802, "attack:accepted": 13, "move:accepted": 277, "withdraw:accepted": 67, "review_stage": 431, "trade:accepted": 288, "claim:accepted": 19, "build:accepted": 35, "politics:accepted": 7, "intelligence:accepted": 24, "air:accepted": 48, "specialize:accepted": 24}}
+��������� ���� � �����: 2
+Created 4 states, start territory radius: 4
+seed=2 day=30/90 wars=1 battles=0
+seed=2 day=60/90 wars=1 battles=0
+seed=2 day=90/90 wars=1 battles=0
+{"seed": 2, "days": 90, "seconds": 3.529, "events": {"emergency_course": 2, "command": 846, "attack:accepted": 9, "review_stage": 430, "withdraw:accepted": 81, "move:accepted": 313, "trade:accepted": 286, "build:accepted": 27, "claim:accepted": 20, "intelligence:accepted": 24, "politics:accepted": 7, "air:accepted": 48, "specialize:accepted": 31}}
+��������� ���� � �����: 3
+Created 4 states, start territory radius: 4
+seed=3 day=30/90 wars=1 battles=0
+seed=3 day=60/90 wars=1 battles=0
+seed=3 day=90/90 wars=1 battles=0
+{"seed": 3, "days": 90, "seconds": 4.564, "events": {"emergency_course": 2, "command": 838, "attack:accepted": 11, "withdraw:accepted": 125, "move:accepted": 270, "review_stage": 425, "trade:accepted": 275, "build:accepted": 44, "claim:accepted": 18, "intelligence:accepted": 24, "politics:accepted": 10, "air:accepted": 48, "specialize:accepted": 13, "course": 1}}

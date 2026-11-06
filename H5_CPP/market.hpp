@@ -5,11 +5,6 @@
 
 namespace hoi5 {
 
-inline double value(const Stockpile& values, std::string_view name, double fallback = 0) {
-    const auto it = values.find(name);
-    return it == values.end() ? fallback : it->second;
-}
-
 struct Market {
     static constexpr double weeklyFraction = 7./30.;
     static constexpr double buyMarkup = 1.08, sellMarkdown = .92;

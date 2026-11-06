@@ -4,6 +4,8 @@
 
 namespace hoi5 {
 
+inline constexpr std::array<std::string_view,4> storageBuckets{"raw","semi_finished","finished","fuel"};
+
 inline std::string_view storageBucket(std::string_view resource) {
     constexpr std::array fuel{"coal","oil","natural_gas","peat","uranium","refined_fuel"};
     constexpr std::array semi{"steel","chemicals","food","fertilizer","copper_wire"};
@@ -19,7 +21,6 @@ inline std::string_view storageBucket(std::string_view resource) {
 
 template<class Tile>
 Stockpile tileStorageCapacity(const Tile& tile) {
-    constexpr std::array<std::string_view,4> buckets{"raw","semi_finished","finished","fuel"};
     constexpr int rates[][buildingCount] = {
         {520000,180000,1050000,240000,280000},
         {470000,140000,820000,210000,240000},
@@ -27,11 +28,35 @@ Stockpile tileStorageCapacity(const Tile& tile) {
         {180000,35000,0,120000,220000,3200000,850000,420000}
     };
     Stockpile result;
-    for (std::size_t bucket = 0; bucket < buckets.size(); ++bucket) {
+    for (std::size_t bucket = 0; bucket < storageBuckets.size(); ++bucket) {
         double capacity = 0;
         for (int b = 0; b < buildingCount; ++b)
             capacity += tile.buildings[b].area * tile.buildings[b].health * rates[bucket][b];
-        result[buckets[bucket]] = capacity;
+        result[storageBuckets[bucket]] = capacity;
+    }
+    return result;
+}
+
+inline void enforceStorageCapacity(Stockpile& stocks,const Stockpile& capacity) {
+    Stockpile used;
+    for (const auto& [resource,amount] : stocks) used[storageBucket(resource)] += std::max(0.,amount);
+    Stockpile retention;
+    for (auto bucket : storageBuckets) {
+        const double total = value(used,bucket);
+        retention[bucket] = total > 0. ? std::clamp(value(capacity,bucket)/total,0.,1.) : 1.;
+    }
+    for (auto& [resource,amount] : stocks)
+        if (amount > 0.) amount *= retention.at(storageBucket(resource));
+}
+
+inline Stockpile distributeTileStockpile(const Stockpile& stocks,const Stockpile& nationalCapacity,
+                                         const Stockpile& tileCapacity) {
+    Stockpile result;
+    for (const auto& [resource,amount] : stocks) {
+        if (amount <= 0.) continue;
+        const auto bucket = storageBucket(resource);
+        const double total = value(nationalCapacity,bucket), local = value(tileCapacity,bucket);
+        if (total > 0. && local > 0.) result[resource] = amount*(local/total);
     }
     return result;
 }

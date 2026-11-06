@@ -1,0 +1,84 @@
+scenario=natural seed=1 (border-war is an explicit test fixture)
+Генерация мира с сидом: 1
+Created 6 states, start territory radius: 4
+seed=1 day=30/730 wars=0 battles=0
+seed=1 day=60/730 wars=0 battles=0
+seed=1 day=90/730 wars=0 battles=0
+seed=1 day=120/730 wars=0 battles=0
+seed=1 day=150/730 wars=0 battles=0
+seed=1 day=180/730 wars=0 battles=0
+seed=1 day=210/730 wars=0 battles=0
+seed=1 day=240/730 wars=1 battles=0
+seed=1 day=270/730 wars=2 battles=0
+seed=1 day=300/730 wars=3 battles=0
+seed=1 day=330/730 wars=3 battles=0
+seed=1 day=360/730 wars=3 battles=0
+seed=1 day=390/730 wars=3 battles=0
+seed=1 day=420/730 wars=4 battles=0
+seed=1 day=450/730 wars=4 battles=0
+seed=1 day=480/730 wars=4 battles=0
+seed=1 day=510/730 wars=4 battles=0
+seed=1 day=540/730 wars=4 battles=0
+seed=1 day=570/730 wars=4 battles=0
+seed=1 day=600/730 wars=4 battles=0
+seed=1 day=630/730 wars=4 battles=0
+seed=1 day=660/730 wars=4 battles=0
+seed=1 day=690/730 wars=4 battles=0
+seed=1 day=720/730 wars=4 battles=0
+{"seed": 1, "days": 730, "seconds": 113.708, "events": {"command": 11528, "move:accepted": 2068, "review_stage": 5322, "trade:accepted": 3535, "claim:accepted": 205, "build:accepted": 563, "politics:accepted": 84, "intelligence:accepted": 36, "air:accepted": 3263, "specialize:accepted": 18, "air:rejected": 15, "course": 6, "emergency_course": 2, "attack:accepted": 158, "withdraw:accepted": 1581, "recruit:accepted": 2}}
+scenario=natural seed=2 (border-war is an explicit test fixture)
+Генерация мира с сидом: 2
+Created 6 states, start territory radius: 4
+seed=2 day=30/730 wars=0 battles=0
+seed=2 day=60/730 wars=0 battles=0
+seed=2 day=90/730 wars=0 battles=0
+seed=2 day=120/730 wars=0 battles=0
+seed=2 day=150/730 wars=0 battles=0
+seed=2 day=180/730 wars=0 battles=0
+seed=2 day=210/730 wars=2 battles=0
+seed=2 day=240/730 wars=2 battles=0
+seed=2 day=270/730 wars=3 battles=0
+seed=2 day=300/730 wars=3 battles=0
+seed=2 day=330/730 wars=3 battles=0
+seed=2 day=360/730 wars=3 battles=0
+seed=2 day=390/730 wars=3 battles=0
+seed=2 day=420/730 wars=3 battles=0
+seed=2 day=450/730 wars=3 battles=0
+seed=2 day=480/730 wars=3 battles=0
+seed=2 day=510/730 wars=3 battles=0
+seed=2 day=540/730 wars=3 battles=0
+seed=2 day=570/730 wars=3 battles=0
+seed=2 day=600/730 wars=3 battles=2
+seed=2 day=630/730 wars=3 battles=0
+seed=2 day=660/730 wars=3 battles=0
+seed=2 day=690/730 wars=3 battles=1
+seed=2 day=720/730 wars=0 battles=0
+{"seed": 2, "days": 730, "seconds": 112.699, "events": {"command": 10975, "move:accepted": 1686, "review_stage": 5325, "trade:accepted": 3614, "claim:accepted": 180, "build:accepted": 490, "politics:accepted": 80, "intelligence:accepted": 36, "air:accepted": 2975, "air:rejected": 15, "course": 11, "emergency_course": 2, "withdraw:accepted": 1609, "attack:accepted": 286, "recruit:accepted": 4}}
+scenario=natural seed=424099 (border-war is an explicit test fixture)
+Генерация мира с сидом: 424099
+Created 6 states, start territory radius: 4
+seed=424099 day=30/730 wars=0 battles=0
+seed=424099 day=60/730 wars=0 battles=0
+seed=424099 day=90/730 wars=0 battles=0
+seed=424099 day=120/730 wars=1 battles=0
+seed=424099 day=150/730 wars=1 battles=0
+seed=424099 day=180/730 wars=1 battles=0
+seed=424099 day=210/730 wars=1 battles=0
+seed=424099 day=240/730 wars=1 battles=0
+seed=424099 day=270/730 wars=2 battles=0
+seed=424099 day=300/730 wars=2 battles=0
+seed=424099 day=330/730 wars=3 battles=0
+seed=424099 day=360/730 wars=3 battles=0
+seed=424099 day=390/730 wars=3 battles=0
+seed=424099 day=420/730 wars=3 battles=0
+seed=424099 day=450/730 wars=3 battles=0
+seed=424099 day=480/730 wars=3 battles=0
+seed=424099 day=510/730 wars=3 battles=0
+seed=424099 day=540/730 wars=3 battles=0
+seed=424099 day=570/730 wars=3 battles=0
+seed=424099 day=600/730 wars=3 battles=0
+seed=424099 day=630/730 wars=2 battles=0
+seed=424099 day=660/730 wars=2 battles=0
+seed=424099 day=690/730 wars=3 battles=0
+seed=424099 day=720/730 wars=3 battles=0
+{"seed": 424099, "days": 730, "seconds": 139.283, "events": {"command": 11267, "move:accepted": 1687, "review_stage": 5336, "trade:accepted": 3545, "claim:accepted": 213, "build:accepted": 588, "politics:accepted": 66, "intelligence:accepted": 36, "air:accepted": 3007, "course": 10, "withdraw:accepted": 1802, "attack:accepted": 304, "emergency_course": 1, "recruit:accepted": 4, "politics:rejected": 15}}

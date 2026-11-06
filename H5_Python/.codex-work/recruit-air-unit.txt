@@ -1,0 +1,14 @@
+test_aircraft_can_approach_when_base_is_outside_weapon_range (test_ai_air_support.AirSupportTests.test_aircraft_can_approach_when_base_is_outside_weapon_range) ... ok
+test_bot_plan_enables_strikes_and_includes_economic_targets (test_ai_air_support.AirSupportTests.test_bot_plan_enables_strikes_and_includes_economic_targets) ... ok
+test_cas_can_target_concentration_without_ground_battle (test_ai_air_support.AirSupportTests.test_cas_can_target_concentration_without_ground_battle) ... ok
+test_cas_hit_causes_real_organization_or_strength_loss (test_ai_air_support.AirSupportTests.test_cas_hit_causes_real_organization_or_strength_loss) ... ok
+test_hostile_aa_does_not_remove_target_from_plan (test_ai_air_support.AirSupportTests.test_hostile_aa_does_not_remove_target_from_plan) ... ok
+test_out_of_aircraft_range_is_not_selected (test_ai_air_support.AirSupportTests.test_out_of_aircraft_range_is_not_selected) ... ok
+test_own_ground_battle_has_priority_over_small_remote_group (test_ai_air_support.AirSupportTests.test_own_ground_battle_has_priority_over_small_remote_group) ... ok
+test_real_cas_and_strike_both_launch_from_same_wing (test_ai_air_support.AirSupportTests.test_real_cas_and_strike_both_launch_from_same_wing) ... ok
+test_strategic_hit_reduces_real_building_health (test_ai_air_support.AirSupportTests.test_strategic_hit_reduces_real_building_health) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 3.554s
+
+OK

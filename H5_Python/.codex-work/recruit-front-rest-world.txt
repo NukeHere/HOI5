@@ -1,0 +1,16 @@
+scenario=natural seed=424099 (border-war is an explicit test fixture)
+Генерация мира с сидом: 424099
+Created 6 states, start territory radius: 4
+seed=424099 day=30/365 wars=0 battles=0
+seed=424099 day=60/365 wars=0 battles=0
+seed=424099 day=90/365 wars=0 battles=0
+seed=424099 day=120/365 wars=0 battles=0
+seed=424099 day=150/365 wars=0 battles=0
+seed=424099 day=180/365 wars=0 battles=0
+seed=424099 day=210/365 wars=1 battles=0
+seed=424099 day=240/365 wars=1 battles=0
+seed=424099 day=270/365 wars=1 battles=0
+seed=424099 day=300/365 wars=1 battles=0
+seed=424099 day=330/365 wars=1 battles=0
+seed=424099 day=360/365 wars=1 battles=0
+{"seed": 424099, "days": 365, "seconds": 36.643, "events": {"command": 3901, "move:accepted": 798, "review_stage": 2665, "trade:accepted": 1776, "claim:accepted": 179, "build:accepted": 296, "politics:accepted": 62, "intelligence:accepted": 36, "air:accepted": 656, "course": 2, "emergency_course": 1, "withdraw:accepted": 98}}

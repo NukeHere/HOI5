@@ -1,0 +1,21 @@
+scenario=border-war seed=1 (border-war is an explicit test fixture)
+Генерация мира с сидом: 1
+Created 4 states, start territory radius: 4
+seed=1 day=30/90 wars=1 battles=0
+seed=1 day=60/90 wars=1 battles=0
+seed=1 day=90/90 wars=1 battles=0
+{"seed": 1, "days": 90, "seconds": 7.565, "events": {"emergency_course": 2, "command": 723, "move:accepted": 99, "attack:accepted": 6, "air:accepted": 220, "withdraw:accepted": 9, "review_stage": 426, "trade:accepted": 288, "claim:accepted": 23, "build:accepted": 48, "politics:accepted": 6, "intelligence:accepted": 24}}
+scenario=border-war seed=2 (border-war is an explicit test fixture)
+Генерация мира с сидом: 2
+Created 4 states, start territory radius: 4
+seed=2 day=30/90 wars=1 battles=0
+seed=2 day=60/90 wars=1 battles=0
+seed=2 day=90/90 wars=1 battles=0
+{"seed": 2, "days": 90, "seconds": 7.879, "events": {"emergency_course": 2, "command": 1141, "move:accepted": 284, "attack:accepted": 99, "air:accepted": 226, "review_stage": 433, "withdraw:accepted": 135, "trade:accepted": 294, "build:accepted": 46, "claim:accepted": 22, "intelligence:accepted": 24, "politics:accepted": 8, "recruit:accepted": 3}}
+scenario=border-war seed=3 (border-war is an explicit test fixture)
+Генерация мира с сидом: 3
+Created 4 states, start territory radius: 4
+seed=3 day=30/90 wars=1 battles=0
+seed=3 day=60/90 wars=1 battles=0
+seed=3 day=90/90 wars=1 battles=0
+{"seed": 3, "days": 90, "seconds": 5.611, "events": {"emergency_course": 2, "command": 1015, "move:accepted": 253, "attack:accepted": 98, "air:accepted": 212, "withdraw:accepted": 48, "review_stage": 428, "trade:accepted": 269, "claim:accepted": 20, "build:accepted": 47, "recruit:accepted": 2, "politics:accepted": 9, "intelligence:accepted": 24, "air:rejected": 15, "trade:rejected": 18}}

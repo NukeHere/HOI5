@@ -1,0 +1,32 @@
+scenario=natural seed=424099 (border-war is an explicit test fixture)
+Генерация мира с сидом: 424099
+Created 6 states, start territory radius: 4
+seed=424099 day=30/365 wars=0 battles=0
+seed=424099 day=60/365 wars=0 battles=0
+seed=424099 day=90/365 wars=0 battles=0
+seed=424099 day=120/365 wars=0 battles=0
+seed=424099 day=150/365 wars=0 battles=0
+seed=424099 day=180/365 wars=0 battles=0
+seed=424099 day=210/365 wars=1 battles=1
+seed=424099 day=240/365 wars=1 battles=0
+seed=424099 day=270/365 wars=1 battles=0
+seed=424099 day=300/365 wars=1 battles=0
+seed=424099 day=330/365 wars=1 battles=0
+seed=424099 day=360/365 wars=1 battles=0
+{"seed": 424099, "days": 365, "seconds": 81.336, "events": {"command": 6290, "move:accepted": 700, "supply_plan": 342, "supply:accepted": 307, "review_stage": 2670, "trade:accepted": 2609, "claim:accepted": 142, "build:accepted": 43, "politics:accepted": 60, "intelligence:accepted": 36, "air_plan": 1056, "air:accepted": 528, "build:rejected": 3, "specialize:accepted": 109, "supply:rejected": 1398, "course": 3, "withdraw:accepted": 131, "air_sortie": 2054, "attack:accepted": 114, "specialize:rejected": 105, "recruit:accepted": 5}}
+scenario=natural seed=2 (border-war is an explicit test fixture)
+Генерация мира с сидом: 2
+Created 6 states, start territory radius: 4
+seed=2 day=30/365 wars=0 battles=0
+seed=2 day=60/365 wars=0 battles=0
+seed=2 day=90/365 wars=0 battles=0
+seed=2 day=120/365 wars=0 battles=0
+seed=2 day=150/365 wars=0 battles=0
+seed=2 day=180/365 wars=0 battles=0
+seed=2 day=210/365 wars=0 battles=0
+seed=2 day=240/365 wars=1 battles=1
+seed=2 day=270/365 wars=1 battles=0
+seed=2 day=300/365 wars=1 battles=0
+seed=2 day=330/365 wars=1 battles=0
+seed=2 day=360/365 wars=1 battles=0
+{"seed": 2, "days": 365, "seconds": 52.298, "events": {"command": 6530, "move:accepted": 753, "supply_plan": 300, "supply:accepted": 241, "review_stage": 2652, "trade:accepted": 2553, "claim:accepted": 190, "build:accepted": 40, "politics:accepted": 76, "intelligence:accepted": 36, "air_plan": 870, "air:accepted": 435, "air:rejected": 15, "supply:rejected": 1560, "specialize:accepted": 137, "build:rejected": 11, "course": 3, "emergency_course": 1, "withdraw:accepted": 180, "attack:accepted": 93, "air_sortie": 1088, "specialize:rejected": 206, "recruit:accepted": 4}}
