@@ -107,8 +107,9 @@ public:
             bottom = 70;
         }
         tickerRect = {{left,size.y-std::max(bottom,minimumBottom)-38},{std::max(120.f,width),38}};
-        const float aw = std::min(400.f,size.x-24), ah = std::clamp(size.y-215,260.f,440.f);
-        const float pw = std::min(350.f,size.x-24), ph = std::clamp(size.y-260,155.f,220.f);
+        const float available = std::max(180.f,size.x-rightInset-24);
+        const float aw = std::min(400.f,available), ah = std::clamp(size.y-215,260.f,440.f);
+        const float pw = std::min(350.f,available), ph = std::clamp(size.y-260,155.f,220.f);
         archiveRect = {{std::max(10.f,size.x-aw-14-rightInset),size.y-ah-125},{aw,ah}};
         popupRect = {{std::max(10.f,size.x-pw-14-rightInset),size.y-ph-104},{pw,ph}};
         if (popup && !find(popup)) popup = 0;

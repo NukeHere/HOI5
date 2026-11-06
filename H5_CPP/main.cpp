@@ -483,12 +483,14 @@ struct World {
         return tiles[tile].owner == unit.owner && !airDefenseWater(tile);
     }
 
-    std::string orderAirDefenseMove(hoi5::AirDefense& unit,int target) const {
+    std::string orderAirDefenseMove(hoi5::AirDefense& unit,int target,bool* accepted = nullptr) const {
+        if (accepted) *accepted = false;
         if (target < 0 || target >= int(tiles.size())) return "Нет цели перемещения";
         if (tiles[target].owner != unit.owner) return "ПВО можно двигать только по своей территории";
         if (airDefenseWater(target)) return "ПВО нельзя поставить на воду";
         if (unit.tile == target) {
             unit.route.clear();
+            if (accepted) *accepted = true;
             return "ПВО уже здесь";
         }
         auto route = landRoute(unit.tile,target,[&](int next) {
@@ -498,6 +500,7 @@ struct World {
         unit.route = std::move(route);
         unit.progress = unit.visualProgress = 0.;
         unit.readinessLimit = std::min(unit.readinessLimit,.55);
+        if (accepted) *accepted = true;
         return "ПВО выдвигается в "+std::to_string(target%size)+":"+std::to_string(target/size);
     }
 
@@ -3447,24 +3450,10 @@ sf::Vector2f unitPosition(const World& world, const Division& unit) {
         * static_cast<float>(unit.visualProgress);
 }
 
-void drawDivisionRoute(sf::RenderTarget& target,const World& world,const Division& division) {
-    std::vector<int> cells;
-    if (division.battle >= 0 && division.attackRoute) {
-        cells.push_back(division.battle);
-        cells.insert(cells.end(),division.postBattleRoute.begin(),division.postBattleRoute.end());
-    } else cells.assign(division.route.begin(),division.route.end());
+void drawUnitRoute(sf::RenderTarget& target,const World& world,const auto& cells,sf::Vector2f origin,
+                   double progress,const auto& colors,sf::Vector2f offset = {}) {
     if (cells.empty()) return;
-
-    constexpr sf::Color routeColors[][2]{
-        {{120,94,28,210},{238,196,74,235}},
-        {{132,42,42,210},{238,92,82,235}},
-        {{36,76,132,210},{92,164,244,235}}
-    };
-    const auto mode = [&](int tile) {
-        if (division.retreating) return 2;
-        return world.tiles[tile].owner >= 0 && world.tiles[tile].owner != division.owner ? 1 : 0;
-    };
-    const auto point = [&](int tile) { return center(tile%world.size,tile/world.size); };
+    const auto point = [&](int tile) { return center(tile%world.size,tile/world.size)+offset; };
     sf::VertexArray strokes(sf::PrimitiveType::Triangles);
     const auto line = [&](sf::Vector2f from,sf::Vector2f to,sf::Color color,float width) {
         const auto delta = to-from;
@@ -3475,27 +3464,45 @@ void drawDivisionRoute(sf::RenderTarget& target,const World& world,const Divisio
             strokes.append({vertex,color});
     };
 
-    const auto origin = unitPosition(world,division);
     auto previous = origin;
     sf::Vector2f arrowOrigin = origin;
     for (int tile : cells) {
         const auto next = point(tile);
-        line(previous,next,routeColors[mode(tile)][0],5);
+        line(previous,next,colors(tile)[0],5);
         arrowOrigin = previous;
         previous = next;
     }
     const auto first = point(cells.front());
-    const auto fraction = float(std::clamp(division.progress,0.,1.));
-    line(origin,origin+(first-origin)*fraction,routeColors[mode(cells.front())][1],6);
+    const auto fraction = float(std::clamp(progress,0.,1.));
+    line(origin,origin+(first-origin)*fraction,colors(cells.front())[1],6);
     const auto heading = previous-arrowOrigin;
     if (heading.lengthSquared() > 0) {
         for (float offset : {2.55f,-2.55f}) {
             const float angle = std::atan2(heading.y,heading.x)+offset;
             line(previous,previous+sf::Vector2f{std::cos(angle),std::sin(angle)}*16.f,
-                routeColors[mode(cells.back())][1],5);
+                colors(cells.back())[1],5);
         }
     }
     target.draw(strokes);
+}
+
+void drawDivisionRoute(sf::RenderTarget& target,const World& world,const Division& division) {
+    std::vector<int> cells;
+    if (division.battle >= 0 && division.attackRoute) {
+        cells.push_back(division.battle);
+        cells.insert(cells.end(),division.postBattleRoute.begin(),division.postBattleRoute.end());
+    } else cells.assign(division.route.begin(),division.route.end());
+    constexpr std::array<std::array<sf::Color,2>,3> routeColors{{
+        {{{120,94,28,210},{238,196,74,235}}},
+        {{{132,42,42,210},{238,92,82,235}}},
+        {{{36,76,132,210},{92,164,244,235}}}
+    }};
+    const auto colors = [&](int tile) {
+        if (division.retreating) return routeColors[2];
+        const int owner = world.tiles[tile].owner;
+        return routeColors[owner >= 0 && owner != division.owner ? 1 : 0];
+    };
+    drawUnitRoute(target,world,cells,unitPosition(world,division),division.progress,colors);
 }
 
 struct DivisionCounter {
@@ -3561,30 +3568,38 @@ std::vector<DivisionCounter> divisionCounters(const World& world,const sf::Rende
     const float iconSize = 30.f/std::clamp(std::pow(zoom,.25f),.35f,1.f);
     const sf::Vector2f size = overview ? sf::Vector2f{54,34} :
         sf::Vector2f{std::max(50.f,iconSize*1.62f),std::max(32.f,iconSize*1.02f)}*zoom;
-    constexpr std::array slots{sf::Vector2f{34,22},sf::Vector2f{34,-16},sf::Vector2f{34,60},
-        sf::Vector2f{-24,22},sf::Vector2f{-24,-16},sf::Vector2f{-24,60},
-        sf::Vector2f{92,22},sf::Vector2f{92,-16},sf::Vector2f{92,60}};
     std::vector<DivisionCounter> counters;
-    std::map<std::pair<int,int>,int> tileSlots;
+    struct TileStack { int count{}, next{}; };
+    std::map<std::pair<int,int>,TileStack> tileStacks;
+    if (!overview) for (const auto& group : groups) {
+        const auto& unit = world.divisions[group.members.front()];
+        ++tileStacks[{unit.r,unit.q}].count;
+    }
     for (auto& group : groups) {
         const auto& unit = world.divisions[group.members.front()];
-        const int slot = tileSlots[{unit.r,unit.q}]++;
         auto position = unitPosition(world,unit);
+        auto counterSize = size;
         if (overview) {
             position = {};
             for (int index : group.members) position += unitPosition(world,world.divisions[index]);
             position /= float(group.members.size());
             position += {34,22};
         }
-        if (!overview) {
-            if (slot < int(slots.size())) position += slots[slot];
-            else {
-                const float angle = (slot-slots.size())*.95f;
-                position += sf::Vector2f{34+74*std::cos(angle),22-52*std::sin(angle)};
-            }
+        else {
+            auto& stack = tileStacks.at({unit.r,unit.q});
+            const int columns = int(std::ceil(std::sqrt(stack.count)));
+            const int rows = (stack.count+columns-1)/columns;
+            const int slot = stack.next++;
+            const int row = slot/columns;
+            const int rowCount = std::min(columns,stack.count-row*columns);
+            const auto pitch = size/zoom+sf::Vector2f{5,5};
+            const float scale = std::min({1.f,144.f/(columns*pitch.x),90.f/(rows*pitch.y)});
+            position += sf::Vector2f{(slot%columns-(rowCount-1)*.5f)*pitch.x,
+                (row-(rows-1)*.5f)*pitch.y}*scale;
+            counterSize *= scale;
         }
         auto pixel = sf::Vector2f(window.mapCoordsToPixel(position,camera));
-        counters.push_back({group.members.front(),int(group.members.size()),{pixel-size*.5f,size},
+        counters.push_back({group.members.front(),int(group.members.size()),{pixel-counterSize*.5f,counterSize},
             float(std::clamp(group.organization/group.maxOrganization,0.,1.)),
             float(std::clamp(group.strength/group.maxStrength,0.,1.)),group.selected,std::move(group.members)});
     }
@@ -3740,10 +3755,19 @@ void drawDefenseRanges(sf::RenderTarget& target,const hoi5::AirDefense& unit,sf:
             friendly ? sf::Color(122,196,248,112) : sf::Color(238,150,238,112),3);
 }
 
+constexpr sf::Vector2f defenseIconOffset{-17,12};
+
+sf::Vector2f defenseIconPosition(const World& world,const hoi5::AirDefense& unit) {
+    const auto position = center(unit.tile%world.size,unit.tile/world.size);
+    if (unit.route.empty()) return position+defenseIconOffset;
+    const int next = unit.route.front();
+    return position+(center(next%world.size,next/world.size)-position)*
+        float(std::clamp(unit.visualProgress,0.,1.))+defenseIconOffset;
+}
+
 void drawDefenseIcon(sf::RenderTarget& target,const hoi5::AirDefense& unit,sf::Vector2f position) {
     constexpr sf::Color colors[]{{180,224,128},{124,200,220},{236,204,112},{238,150,112},{178,164,238}};
     const auto color = colors[unit.type];
-    position += {-17,12};
     sf::CircleShape background(8,24);
     background.setOrigin({8,8});
     background.setPosition(position);
@@ -5657,6 +5681,7 @@ int main(int argc, char** argv) try {
     sf::FloatRect hexResourcesToggle;
     std::vector<std::pair<sf::FloatRect,int>> defenseMoveButtons;
     int movingDefense = -1;
+    std::set<int> selectedDefense;
     std::set<int> selectedDivisions;
     std::optional<sf::Vector2i> divisionDragStart;
     bool divisionDragActive = false, pendingHexShift = false;
@@ -6031,6 +6056,38 @@ int main(int argc, char** argv) try {
     const auto hexCloseRect = [](sf::FloatRect panel) {
         return sf::FloatRect(panel.position+sf::Vector2f(panel.size.x-36,12),{24,24});
     };
+    const auto defensePixel = [&](const hoi5::AirDefense& unit) {
+        return sf::Vector2f(window.mapCoordsToPixel(defenseIconPosition(world,unit),camera));
+    };
+    const auto canSelectDefense = [](const hoi5::AirDefense& unit) {
+        return unit.owner == 0 && unit.id >= 0 && unit.health > 0;
+    };
+    const auto selectDefense = [&](sf::FloatRect area,bool shift) {
+        if (!shift) selectedDefense.clear();
+        for (const auto& unit : world.air.defense) {
+            if (canSelectDefense(unit) && area.contains(defensePixel(unit)) &&
+                (!shift || !selectedDefense.erase(unit.id))) selectedDefense.insert(unit.id);
+        }
+        if (!selectedDefense.empty()) {
+            selectedDivisions.clear();
+            selected = -1;
+            selectedTiles.clear();
+        }
+    };
+    const auto orderSelectedDefense = [&](int tile) {
+        int accepted = 0, total = 0;
+        std::string firstError;
+        for (auto& unit : world.air.defense) {
+            if (!canSelectDefense(unit) || !selectedDefense.contains(unit.id)) continue;
+            ++total;
+            bool success;
+            auto message = world.orderAirDefenseMove(unit,tile,&success);
+            accepted += success;
+            if (!success && firstError.empty()) firstError = std::move(message);
+        }
+        aviationMessage = "ПВО: приказ принят "+std::to_string(accepted)+"/"+std::to_string(total);
+        if (!firstError.empty()) aviationMessage += " · "+firstError;
+    };
     const auto clampCameraPosition = [&](sf::Vector2f position) {
         position.x = std::clamp(position.x,center(0,0).x-spacing/2,
             center(world.size-1,world.size > 1 ? 1 : 0).x+spacing/2);
@@ -6139,7 +6196,11 @@ int main(int argc, char** argv) try {
                         if (resolutionOpen) resolutionOpen = false;
                         else { menuPage = MenuPage::main; activeSlider = -1; }
                     } else if (playing && selectedBattle >= 0) selectedBattle = -1;
-                    else if (playing) pauseMenu = !pauseMenu;
+                    else if (playing && !pauseMenu && (movingDefense >= 0 || !selectedDefense.empty())) {
+                        movingDefense = -1;
+                        selectedDefense.clear();
+                        aviationMessage.clear();
+                    } else if (playing) pauseMenu = !pauseMenu;
                     else if (dropdown >= 0) dropdown = -1;
                     else if (!generator.valid()) { setup = false; menuPage = MenuPage::main; }
                 }
@@ -6281,7 +6342,8 @@ int main(int argc, char** argv) try {
                     return sf::FloatRect({float(screen.x)-62,float(screen.y)-62},{44,44}).contains(pointer) ||
                         (mapFilterCount() > 0 && resourceGroupRect(screen).contains(pointer));
                 };
-                if (playing && !pauseMenu && !overFilter() &&
+                const bool overHex = !selectedTiles.empty() && hexPanelRect().contains(sf::Vector2f(button->position));
+                if (playing && !pauseMenu && !overFilter() && !overHex &&
                     newsPanel.click(sf::Vector2f(button->position),button->button == sf::Mouse::Button::Left)) continue;
                 if (((!playing && !generator.valid() && !setup) ||
                     (playing && pauseMenu && menuPage == MenuPage::settings)) && button->button == sf::Mouse::Button::Left) {
@@ -6409,7 +6471,13 @@ int main(int argc, char** argv) try {
                             for (int i = 0; i <= int(mapLayerLabels.size()); ++i) {
                                 if (!mapLayerOption(size,i,mapLayerProgress).contains(pointer)) continue;
                                 handled = true;
-                                if (i == int(mapLayerLabels.size())) airDefenseOverlay = !airDefenseOverlay;
+                                if (i == int(mapLayerLabels.size())) {
+                                    airDefenseOverlay = !airDefenseOverlay;
+                                    mapLayerMenu = false;
+                                    selectedDefense.clear();
+                                    movingDefense = -1;
+                                    aviationMessage.clear();
+                                }
                                 else if (i == int(MapLayer::weather)) {
                                     showWeatherMessage = true;
                                     (void)weatherMessage.restart();
@@ -6755,6 +6823,7 @@ int main(int argc, char** argv) try {
                             return item.first.contains(pointer);
                         }); move != defenseMoveButtons.end()) {
                             movingDefense = movingDefense == move->second ? -1 : move->second;
+                            selectedDefense.clear();
                             wingAreaMode = wingRebaseMode = false;
                         }
                         else if (hexResourcesToggle.contains(sf::Vector2f(button->position)))
@@ -6788,11 +6857,12 @@ int main(int argc, char** argv) try {
                         hexResourcesToggle = {};
                         if (movingDefense >= 0) {
                             const auto unit = std::ranges::find(world.air.defense,movingDefense,&hoi5::AirDefense::id);
-                            if (unit == world.air.defense.end() || unit->owner != 0) movingDefense = -1;
+                            if (unit == world.air.defense.end() || !canSelectDefense(*unit)) movingDefense = -1;
                             else if (tile >= 0) {
-                                aviationMessage = world.orderAirDefenseMove(*unit,tile);
-                                if (world.airDefenseCanEnter(*unit,tile) &&
-                                    (unit->tile == tile || (!unit->route.empty() && unit->route.back() == tile))) {
+                                bool accepted;
+                                aviationMessage = world.orderAirDefenseMove(*unit,tile,&accepted);
+                                if (accepted) {
+                                    selectedDefense = {unit->id};
                                     movingDefense = -1;
                                     selectedTiles = {tile};
                                 }
@@ -6817,6 +6887,14 @@ int main(int argc, char** argv) try {
                             if (changed) selectedTiles = {tile};
                             continue;
                         }
+                        if (airDefenseOverlay) {
+                            divisionDragStart = button->position;
+                            divisionDragActive = false;
+                            pendingHexTile = tile;
+                            pendingHexShift = shift;
+                            continue;
+                        }
+                        selectedDefense.clear();
                         const auto counters = divisionCounters(world,window,camera,zoom);
                         const auto hit = std::find_if(counters.rbegin(),counters.rend(),[&](const auto& counter) {
                             return world.divisions[counter.first].owner == 0 && counter.bounds.contains(pointer);
@@ -6851,6 +6929,7 @@ int main(int argc, char** argv) try {
                 }
                 if (playing && !pauseMenu &&
                     (button->button == sf::Mouse::Button::Middle || button->button == sf::Mouse::Button::Right)) {
+                    if (button->button == sf::Mouse::Button::Right && (overHex || overFilter())) continue;
                     if (button->button == sf::Mouse::Button::Right && world.battles.contains(selectedBattle) &&
                         battlePanel().contains(sf::Vector2f(button->position))) continue;
                     dragging = true;
@@ -6885,7 +6964,28 @@ int main(int argc, char** argv) try {
                 using Key = sf::Keyboard::Key;
                 const bool shift = sf::Keyboard::isKeyPressed(Key::LShift) || sf::Keyboard::isKeyPressed(Key::RShift);
                 if (playing && !pauseMenu) {
-                    if (divisionDragActive) {
+                    if (airDefenseOverlay) {
+                        if (divisionDragActive) {
+                            selectDefense(divisionDragRect(*divisionDragStart,release->position),shift);
+                        } else {
+                            const auto point = sf::Vector2f(release->position);
+                            const float reach = std::max(10.f,13.f*zoom);
+                            const sf::Vector2f half{reach,reach};
+                            const sf::FloatRect hit(point-half,half*2.f);
+                            const bool hitBattery = std::ranges::any_of(world.air.defense,[&](const auto& unit) {
+                                return canSelectDefense(unit) && hit.contains(defensePixel(unit));
+                            });
+                            if (hitBattery) selectDefense(hit,pendingHexShift);
+                            else {
+                                if (!pendingHexShift) {
+                                    selectedDefense.clear();
+                                    selectedTiles.clear();
+                                }
+                                if (pendingHexTile >= 0 && std::erase(selectedTiles,pendingHexTile) == 0)
+                                    selectedTiles.push_back(pendingHexTile);
+                            }
+                        }
+                    } else if (divisionDragActive) {
                         if (!shift) selectedDivisions.clear();
                         const auto rect = divisionDragRect(*divisionDragStart,release->position);
                         for (const auto& counter : divisionCounters(world,window,camera,zoom)) {
@@ -6926,7 +7026,8 @@ int main(int argc, char** argv) try {
                     continue;
                 }
                 if (dragging && release->button == sf::Mouse::Button::Right &&
-                    (selected >= 0 || (aircraftPanel && (selectedWing >= 0 || selectedTiles.size() == 1)) ||
+                    (selected >= 0 || (airDefenseOverlay && !selectedDefense.empty()) ||
+                    (aircraftPanel && (selectedWing >= 0 || selectedTiles.size() == 1)) ||
                     (constructionPanel && constructionPlacement))
                     && release->position == dragStart && release->position.y >= 82) {
                     const auto cards = wingCards();
@@ -6966,6 +7067,8 @@ int main(int argc, char** argv) try {
                             hexScroll = 0;
                             hexResourcesExpanded = false;
                         }
+                    } else if (airDefenseOverlay && !selectedDefense.empty()) {
+                        orderSelectedDefense(nearest);
                     } else if (selected >= 0) {
                         using Key = sf::Keyboard::Key;
                         const bool append = sf::Keyboard::isKeyPressed(Key::LShift) || sf::Keyboard::isKeyPressed(Key::RShift);
@@ -6993,7 +7096,8 @@ int main(int argc, char** argv) try {
                     }
                     continue;
                 }
-                if (!pauseMenu && newsPanel.scroll(sf::Vector2f(wheel->position),wheel->delta)) continue;
+                if (!pauseMenu && (selectedTiles.empty() || !hexPanelRect().contains(sf::Vector2f(wheel->position))) &&
+                    newsPanel.scroll(sf::Vector2f(wheel->position),wheel->delta)) continue;
                 if (diplomacyPanel && countryBounds().contains(wheel->position)) {
                     countryScroll = std::clamp(countryScroll-int(wheel->delta),0,countryScrollMax);
                     countryHits.clear();
@@ -7001,6 +7105,7 @@ int main(int argc, char** argv) try {
                 }
                 if (!selectedTiles.empty() && hexPanelRect().contains(sf::Vector2f(wheel->position))) {
                     hexScroll = std::max(0.f,hexScroll-30*wheel->delta);
+                    defenseMoveButtons.clear();
                     continue;
                 }
                 if (economicPanel == 2 && wheel->position.x >= 0 && wheel->position.x < 528
@@ -7050,6 +7155,7 @@ int main(int argc, char** argv) try {
                 constructionMessage.clear();
                 aviationMessage.clear();
                 movingDefense = -1;
+                selectedDefense.clear();
                 defenseMoveButtons.clear();
                 selectedWing = -1;
                 editingWing = -1;
@@ -7457,6 +7563,17 @@ int main(int argc, char** argv) try {
                     if (world.divisions[index].combat.strength > 0) drawDivisionRoute(window,world,world.divisions[index]);
             }
             if (zoom > .35f) drawWingAreaOverlay(window,world,map,selectedWings,wingAreaMode);
+            std::erase_if(selectedDefense,[&](int id) {
+                const auto unit = std::ranges::find(world.air.defense,id,&hoi5::AirDefense::id);
+                return unit == world.air.defense.end() || !canSelectDefense(*unit);
+            });
+            if (!selectedDefense.empty()) {
+                constexpr std::array<sf::Color,2> routeColors{{{48,130,152,225},{133,230,245,250}}};
+                for (const auto& unit : world.air.defense)
+                    if (selectedDefense.contains(unit.id))
+                        drawUnitRoute(window,world,unit.route,defenseIconPosition(world,unit),unit.progress,
+                            [&](int) { return routeColors; },defenseIconOffset);
+            }
             const auto airViewHalf = camera.getSize()*.5f+sf::Vector2f{spacing,spacing};
             const sf::FloatRect airVisible(camera.getCenter()-airViewHalf,airViewHalf*2.f);
             const bool showAllDefenseRanges = airDefenseOverlay || !selectedWings.empty() || selectedWing >= 0;
@@ -7466,25 +7583,18 @@ int main(int argc, char** argv) try {
                 if (showAllDefenseRanges ? unit.health > 0 && unit.readiness() > 0 : selectedHex)
                     drawDefenseRanges(window,unit,position);
             }
-            if (zoom <= .35f) {
+            if (!airDefenseOverlay) {
                 for (const auto& unit : world.air.defense) {
-                    const auto point = center(unit.tile%world.size,unit.tile/world.size);
+                    const auto point = defenseIconPosition(world,unit);
                     if (!airVisible.contains(point)) continue;
-                    auto color = world.tiles[unit.tile].border;
-                    color.a = 200;
-                    const float side = 3/zoom;
-                    box(window,point-sf::Vector2f{side*.5f,side*.5f},{side,side},color);
-                }
-            } else {
-                for (const auto& unit : world.air.defense) {
-                    auto position = center(unit.tile%world.size,unit.tile/world.size);
-                    if (!airVisible.contains(position)) continue;
-                    if (!unit.route.empty()) {
-                        const int next = unit.route.front();
-                        position += (center(next%world.size,next/world.size)-position)*
-                            float(std::clamp(unit.visualProgress,0.,1.));
+                    if (zoom <= .35f) {
+                        auto color = world.tiles[unit.tile].border;
+                        color.a = 200;
+                        const float side = 3/zoom;
+                        box(window,point-sf::Vector2f{side*.5f,side*.5f},{side,side},color);
+                    } else {
+                        drawDefenseIcon(window,unit,point);
                     }
-                    drawDefenseIcon(window,unit,position);
                 }
             }
             if (!selectedTiles.empty()) {
@@ -7545,6 +7655,26 @@ int main(int argc, char** argv) try {
                         unsigned(std::max(8.f,13*sy)),sf::Color::White,.5f);
             }
             debug.record("ui_division_groups",countersStart);
+            if (airDefenseOverlay) {
+                window.setView(camera);
+                for (const auto& unit : world.air.defense) {
+                    const auto point = defenseIconPosition(world,unit);
+                    if (!airVisible.contains(point)) continue;
+                    if (zoom > .35f) drawDefenseIcon(window,unit,point);
+                    else {
+                        const float half = (canSelectDefense(unit) ? 4.f : 2.f)/zoom;
+                        const sf::Vector2f extent{half,half};
+                        box(window,point-extent,extent*2.f,
+                            canSelectDefense(unit) ? sf::Color(131,220,246) : world.tiles[unit.tile].border);
+                    }
+                    if (selectedDefense.contains(unit.id) || (unit.id >= 0 && unit.id == movingDefense))
+                        drawDefenseRing(window,point,std::max(15.f,7.f/zoom),sf::Color::Yellow,2.f/zoom);
+                }
+                window.setView(gui);
+                const auto hint = selectedDefense.empty() ? "ПВО · выделение рамкой или щелчком"
+                    : "ПВО: "+std::to_string(selectedDefense.size())+" · ПКМ — переместить";
+                battleLabel(window,font,hint,{size.x*.5f,99},13,{232,238,245},.5f);
+            }
             const auto aviationStart = DebugClock::now();
             for (const auto& salvo : world.salvos) {
                 const auto point = sf::Vector2f(window.mapCoordsToPixel(
@@ -8083,7 +8213,7 @@ int main(int argc, char** argv) try {
                     const auto& type = hoi5::defenseClasses[unit.type];
                     if (multiple) ++defenseCounts[type.key];
                     else {
-                        if (unit.owner == 0) defenseRows.emplace(aviation.size(),unit.id);
+                        if (canSelectDefense(unit)) defenseRows.emplace(aviation.size(),unit.id);
                         aviation.push_back(airName(type.key)+" | БК "+std::to_string(unit.ammo)
                             +"/"+std::to_string(std::max(unit.ammoCapacity,type.ammo)));
                         if (!unit.resupplyStatus.empty()) aviation.push_back(unit.resupplyStatus);
@@ -8175,13 +8305,11 @@ int main(int argc, char** argv) try {
                         panelLine(aviation[row],rowY,11);
                         const auto button = defenseRows.find(row);
                         if (button != defenseRows.end() && rowY-hexScroll >= 52 && rowY-hexScroll+15 <= bottom) {
-                            const sf::FloatRect rect({228,rowY-hexScroll},{82,15});
+                            const sf::FloatRect rect(panel.position+sf::Vector2f{panel.size.x-102,rowY-hexScroll},{82,15});
                             box(window,rect.position,rect.size,movingDefense == button->second ?
                                 sf::Color(58,82,108) : sf::Color(32,42,54),{92,112,136});
                             battleLabel(window,font,"Переместить",rect.position+sf::Vector2f{41,7.5f},9,sf::Color::White,.5f);
-                            auto screenRect = rect;
-                            screenRect.position += hexPanelRect().position;
-                            defenseMoveButtons.emplace_back(screenRect,button->second);
+                            defenseMoveButtons.emplace_back(rect,button->second);
                         }
                         rowY += 16;
                     }
@@ -9752,8 +9880,9 @@ int main(int argc, char** argv) try {
                 const auto wingBounds = wingListBounds(int(wingCards().size()));
                 const float filtersInset = (mapLayerMenu || mapLayerProgress > .01f || resourceGroupMenu ||
                     resourceGroupProgress > .01f) ? 258.f : 0.f;
+                const float hexInset = selectedTiles.empty() ? 0.f : size.x-hexPanelRect().position.x;
                 newsPanel.update(world.news,dt,size,newsLeft,stackNews ?
-                    (size.y-wingBounds.position.y)*airDockScale+8.f : 0.f,filtersInset);
+                    (size.y-wingBounds.position.y)*airDockScale+8.f : 0.f,std::max(filtersInset,hexInset));
                 newsPanel.draw(window,font);
             }
             if (pauseMenu) {
