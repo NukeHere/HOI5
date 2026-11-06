@@ -7671,9 +7671,6 @@ int main(int argc, char** argv) try {
                         drawDefenseRing(window,point,std::max(15.f,7.f/zoom),sf::Color::Yellow,2.f/zoom);
                 }
                 window.setView(gui);
-                const auto hint = selectedDefense.empty() ? "ПВО · выделение рамкой или щелчком"
-                    : "ПВО: "+std::to_string(selectedDefense.size())+" · ПКМ — переместить";
-                battleLabel(window,font,hint,{size.x*.5f,99},13,{232,238,245},.5f);
             }
             const auto aviationStart = DebugClock::now();
             for (const auto& salvo : world.salvos) {
