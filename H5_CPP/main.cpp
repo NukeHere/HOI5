@@ -284,9 +284,10 @@ struct World {
     };
     static constexpr int armyCapacity = 20;
     std::vector<Army> armies;
-    struct BotSupplyState { int owner; double nextDaily; int target = -1; };
-    std::vector<BotSupplyState> supplyBots;
-    int botHours{};
+    std::vector<hoi5::BotSupplyState> supplyBots;
+    hoi5::BotRegionMap botGeography;
+    int botHours{}, botMarketTick{};
+    std::set<int> botBalanceRefresh;
     std::vector<int> frontOwnershipChanges;
     int size{};
     int capitalQ{}, capitalR{};
@@ -457,18 +458,22 @@ struct World {
         return route;
     }
 
-    bool orderMove(Division& unit, int destination,bool append = false) const {
-        if (unit.battle >= 0 || unit.retreating || unit.combat.strength <= 0 || unit.organization < unit.maxOrganization * .30) return false;
-        if (destination < 0 || destination >= static_cast<int>(tiles.size())) return false;
-        const bool extend = append && !unit.route.empty();
-        const int origin = extend ? unit.route.back() : unit.r*size+unit.q;
+    std::deque<int> divisionRoute(const Division& unit,int origin,int destination) const {
         const bool capture = tiles[destination].owner < 0 || diplomacy.hostile(unit.owner,tiles[destination].owner);
-        auto route = landRoute(origin,destination,[&](int next) {
+        return landRoute(origin,destination,[&](int next) {
             const int owner = tiles[next].owner;
             const bool allowed = owner < 0 ? capture : diplomacy.canTransit(unit.owner,owner)
                 || canWithdraw(unit,owner,destination) || (capture && diplomacy.hostile(unit.owner,owner));
             return !tiles[next].water && allowed;
         });
+    }
+
+    bool orderMove(Division& unit, int destination,bool append = false) const {
+        if (unit.battle >= 0 || unit.retreating || unit.combat.strength <= 0 || unit.organization < unit.maxOrganization * .30) return false;
+        if (destination < 0 || destination >= static_cast<int>(tiles.size())) return false;
+        const bool extend = append && !unit.route.empty();
+        const int origin = extend ? unit.route.back() : unit.r*size+unit.q;
+        auto route = divisionRoute(unit,origin,destination);
         if (destination != origin && route.empty()) return false;
         if (extend && route.empty()) return false;
         if (extend) unit.route.insert(unit.route.end(),route.begin(),route.end());
@@ -625,6 +630,7 @@ struct World {
             [&](int a,int b) { return diplomacy.tradePriority(a,b); },
             [&](int country) { return diplomacy.countries[country].externalAccess; },
             [&](int country) { return diplomacy.countries[country].exportLimit; });
+        ++botMarketTick;
         std::vector<std::array<hoi5::Stockpile,2>> quantities(profiles.size());
         for (const auto& fill : market.last.fills) {
             if (fill.buyer) quantities[*fill.buyer][1][fill.resource] += fill.amount;
@@ -2060,6 +2066,8 @@ struct World {
         if (previous == country) return;
         air.transferTile(index,previous,country);
         tile.owner = country;
+        for (auto& bot : supplyBots)
+            if (bot.owner == previous || bot.owner == country) bot.urgent = true;
         frontOwnershipChanges.push_back(index);
         propagateWaterOwnership(index);
         const auto location = "("+std::to_string(index%size)+", "+std::to_string(index/size)+")";
@@ -3220,47 +3228,284 @@ struct World {
     }
 
     void startBots(unsigned seed) {
+        if (profiles.size() > 1)
+            botGeography.build(size,[&](int tile) { return airDefenseWater(tile); },
+                [&](int tile,auto visit) { forFrontNeighbor(tile,visit); });
         for (int owner = 1; owner < int(profiles.size()); ++owner) {
             hoi5::PythonRandom rng(seed^(owner*1000003u));
-            (void)rng.uniform(); // The first Python draw schedules the tactical review.
+            const double nextMicro = 6.*rng.uniform();
             supplyBots.push_back({owner,6.+18.*rng.uniform()});
+            auto& bot = supplyBots.back();
+            bot.nextMicro = nextMicro;
+            bot.nextWeekly = 12.+60.*rng.uniform();
+            bot.nextMonthly = 24.+144.*rng.uniform();
+            bot.aggression = rng.uniform();
+            std::vector<std::pair<double,int>> candidates;
+            for (int other = 0; other < int(capitals.size()); ++other) {
+                if (other == owner || capitals[other] < 0) continue;
+                const double score = 1./(1+hoi5::supplyHexDistance(capitals[owner],capitals[other],size));
+                candidates.emplace_back(score,other);
+            }
+            if (const auto* target = hoi5::botChooseClose(rng,candidates,.35)) bot.expansionTarget = *target;
+            bot.rng = std::move(rng);
+            auto& targets = bot.defenseTargets;
+            for (const auto& unit : air.defense) {
+                if (unit.owner != owner) continue;
+                const auto entry = std::ranges::find(targets,unit.type,&std::pair<int,int>::first);
+                if (entry == targets.end()) targets.emplace_back(unit.type,1);
+                else ++entry->second;
+            }
         }
     }
 
-    std::optional<hoi5::BotSupplyChoice> planBotSupply(const BotSupplyState& bot,int spec) const {
+    bool botAtWar(int owner) const {
+        for (int other = 0; other < int(profiles.size()); ++other)
+            if (diplomacy.hostile(owner,other)) return true;
+        return false;
+    }
+
+    static hoi5::BotMilitary botMilitaryVector(const Division& unit) {
+        return hoi5::botDivisionVector(unit.combat,unit.manpower,unit.design->combat.strength,
+            unit.organization,unit.maxOrganization,unit.lastSupplyRatio,unit.speed);
+    }
+
+    void sampleBotMilitary(hoi5::BotSupplyState& bot,int country) const {
+        hoi5::BotMilitary total{};
+        int count = 0, aircraft = 0;
+        double airDefense = 0.;
+        for (const auto& unit : divisions) {
+            if (unit.owner != country || unit.combat.strength <= 0.) continue;
+            ++count;
+            const auto values = botMilitaryVector(unit);
+            for (std::size_t metric = 0; metric < values.size(); ++metric) total[metric] += values[metric];
+        }
+        for (const auto& wing : air.wings)
+            if (wing.owner == country) aircraft += wing.readyCount();
+        for (const auto& unit : air.defense)
+            if (unit.owner == country)
+                airDefense += unit.readiness()*unit.health*(1+hoi5::defenseClasses[unit.type].fireRange);
+        double amplitude = 0., bias = 0.;
+        if (country != bot.owner) {
+            const auto [entry,inserted] = bot.militaryBias.try_emplace(country);
+            if (inserted) entry->second = -1.+2.*bot.rng.uniform();
+            bias = entry->second;
+            amplitude = .45*(1-std::clamp(bot.intelligence,0.,.95));
+        }
+        const auto estimate = [&](double value) {
+            const double observed = value*(1+bias*amplitude);
+            return hoi5::BotEstimate{observed,observed/(1+amplitude),observed/(1-amplitude),botHours};
+        };
+        auto& report = bot.militaryReports[country];
+        for (std::size_t metric = 0; metric < total.size(); ++metric) report.divisions[metric] = estimate(total[metric]);
+        report.divisionCount = estimate(count);
+        report.aircraft = estimate(aircraft);
+        report.airDefense = estimate(airDefense);
+    }
+
+    hoi5::BotCourseOptions botCourseCandidates(const hoi5::BotSupplyState& bot) const {
+        using Course = hoi5::BotCourse;
+        const int owner = bot.owner;
+        for (int other = 0; other < int(profiles.size()); ++other)
+            if (diplomacy.hostile(owner,other)) return {{100.,{Course::defense,other}}};
+        if (profiles[owner].budget < 0. || diplomacy.countries[owner].support < .4)
+            return {{100.,{Course::recovery,-1}}};
+        const auto power = [&](int country,double fallback) {
+            const auto report = bot.militaryReports.find(country);
+            return report == bot.militaryReports.end() ? fallback : report->second.divisions[hoi5::attack].value;
+        };
+        const double ownPower = power(owner,0.);
+        hoi5::BotCourseOptions options{{50.,{Course::development,-1}}};
+        std::set<int> neighbors;
+        for (int tile = 0; tile < int(tiles.size()); ++tile) {
+            if (tiles[tile].owner != owner) continue;
+            for (const int neighbor : botGeography.adjacent(tile)) {
+                const int other = tiles[neighbor].owner;
+                if (other >= 0 && other != owner && !airDefenseWater(neighbor)) neighbors.insert(other);
+            }
+        }
+        const auto set = [&](Course course,double score,int target,bool bestOnly = false) {
+            const auto option = std::ranges::find_if(options,[&](const auto& row) { return row.second.first == course; });
+            if (option == options.end()) options.emplace_back(score,hoi5::BotCourseChoice{course,target});
+            else if (!bestOnly || score > option->first) *option = {score,{course,target}};
+        };
+        for (const int target : neighbors) {
+            const auto& relation = diplomacy.relation(owner,target);
+            const double enemyPower = power(target,ownPower);
+            if (diplomacy.goals.contains({owner,target}) && bot.course == hoi5::BotCourseChoice{Course::warPreparation,target}
+                && ownPower >= enemyPower*.75) {
+                set(Course::warPreparation,75.,target);
+                continue;
+            }
+            if (enemyPower > ownPower*1.1 || relation.crisis >= 25.)
+                set(Course::deterrence,60.+relation.crisis*.2,target);
+            else if (ownPower > enemyPower*(1.15-.25*bot.aggression) &&
+                !relation.treaties.contains(hoi5::ForeignAction::alliance) &&
+                !relation.treaties.contains(hoi5::ForeignAction::nonaggression)) {
+                const double score = 48.+bot.aggression*16.+std::min(10.,(ownPower/std::max(1.,enemyPower)-1.15)*8.);
+                set(Course::warPreparation,score,target,true);
+            }
+        }
+        return options;
+    }
+
+    void selectBotCourse(hoi5::BotSupplyState& bot,hoi5::BotCourseOptions options) const {
+        using Course = hoi5::BotCourse;
+        auto fresh = botCourseCandidates(bot);
+        if (fresh.front().second.first == Course::defense || fresh.front().second.first == Course::recovery)
+            options = std::move(fresh);
+        for (auto& [score,choice] : options) {
+            const auto course = choice.first;
+            score += bot.courseBias[std::size_t(course)];
+            if (course == bot.course.first) score += 10.;
+            else if (botHours-bot.courseSince < 1440 && course != Course::defense && course != Course::recovery)
+                score -= 20.;
+        }
+        if (const auto* choice = hoi5::botChooseClose(bot.rng,options); choice && *choice != bot.course) {
+            bot.course = *choice;
+            bot.courseSince = botHours;
+        }
+    }
+
+    void updateBotReviews(hoi5::BotSupplyState& bot) const {
+        const auto start = [&](bool monthly,double& next,double interval,double jitter) {
+            if (botHours < next || std::ranges::any_of(bot.reviews,[&](const auto& review) {
+                return review.monthly == monthly;
+            })) return;
+            bot.reviews.push_back({monthly,double(botHours)});
+            next = botHours+interval-jitter+2*jitter*bot.rng.uniform();
+        };
+        start(false,bot.nextWeekly,168.,12.);
+        start(true,bot.nextMonthly,720.,48.);
+        for (auto& review : bot.reviews) {
+            if (botHours < review.nextHour) continue;
+            const bool military = review.stage == (review.monthly ? 1 : 2);
+            const bool batched = military || (!review.monthly && review.stage == 1);
+            if (batched) {
+                const int countries = int(profiles.size());
+                const int end = std::min(countries,review.countryCursor+std::max(1,(countries+3)/4));
+                if (military)
+                    for (int country = review.countryCursor; country < end; ++country) sampleBotMilitary(bot,country);
+                review.countryCursor = end;
+                if (end < countries) {
+                    review.nextHour = botHours+6;
+                    continue;
+                }
+                review.countryCursor = 0;
+            }
+            if (review.stage == (review.monthly ? 3 : 0)) {
+                bot.regions = botGeography.profiles(tiles,bot.owner,capitals[bot.owner],
+                    [&](int tile) { return airDefenseWater(tile); });
+                updateBotRegionalMilitary(bot);
+            } else if (review.monthly && review.stage == 4) {
+                for (const auto course : {hoi5::BotCourse::development,hoi5::BotCourse::deterrence,hoi5::BotCourse::warPreparation})
+                    bot.courseBias[std::size_t(course)] = -3.+6.*bot.rng.uniform();
+                review.options = botCourseCandidates(bot);
+            } else if (review.monthly && review.stage == 5) selectBotCourse(bot,review.options);
+            ++review.stage;
+            review.nextHour = botHours+(batched ? 6. : 21.+6.*bot.rng.uniform());
+        }
+        std::erase_if(bot.reviews,[](const auto& review) { return review.stage >= 7; });
+    }
+
+    void updateBotRegionalMilitary(hoi5::BotSupplyState& bot) const {
+        std::vector<int> regionForTile(tiles.size(),-1);
+        for (int index = 0; index < int(bot.regions.size()); ++index) {
+            auto& region = bot.regions[index];
+            region.military = {};
+            region.threat = region.desiredDefense = 0.;
+            for (const int tile : region.tiles) regionForTile[tile] = index;
+        }
+        const bool atWar = botAtWar(bot.owner);
+        std::vector<std::vector<int>> enemiesByTile(atWar ? tiles.size() : 0);
+        for (int index = 0; index < int(divisions.size()); ++index) {
+            const auto& unit = divisions[index];
+            if (unit.combat.strength <= 0) continue;
+            const int tile = unit.r*size+unit.q;
+            if (unit.owner == bot.owner) {
+                const int region = regionForTile[tile];
+                if (region < 0) continue;
+                const auto values = botMilitaryVector(unit);
+                for (std::size_t metric = 0; metric < values.size(); ++metric)
+                    bot.regions[region].military[metric] += values[metric];
+            } else if (atWar && diplomacy.hostile(bot.owner,unit.owner)) {
+                enemiesByTile[tile].push_back(index);
+            }
+        }
+        if (!atWar) return;
+        for (auto& region : bot.regions) {
+            std::set<int> enemies;
+            const auto collect = [&](int tile) {
+                for (const int index : enemiesByTile[tile])
+                    if (enemies.insert(index).second) region.threat += botMilitaryVector(divisions[index])[hoi5::attack];
+            };
+            for (const int border : region.borders) {
+                collect(border);
+                for (const int neighbor : botGeography.adjacent(border)) collect(neighbor);
+            }
+            if (!enemies.empty()) region.desiredDefense = std::max(12.,region.threat*1.15);
+        }
+    }
+
+    int botPreparationTarget(int owner) const {
+        if (botAtWar(owner)) return -1;
+        const auto goal = diplomacy.goals.lower_bound({owner,0});
+        const auto bot = std::ranges::find(supplyBots,owner,&hoi5::BotSupplyState::owner);
+        const int preferred = bot == supplyBots.end() ? -1 : bot->course.second;
+        int target = -1;
+        if (diplomacy.goals.contains({owner,preferred})) target = preferred;
+        else if (goal != diplomacy.goals.end() && goal->first.first == owner) target = goal->first.second;
+        else if (bot != supplyBots.end() && bot->course.first == hoi5::BotCourse::warPreparation) target = preferred;
+        if (target < 0) return -1;
+        return std::ranges::any_of(tiles,[&](const auto& tile) { return tile.owner == target; }) ? target : -1;
+    }
+
+    std::map<int,int> botForwardDefenseSites(int owner) const {
+        const int target = botPreparationTarget(owner);
+        if (target < 0 || !std::ranges::any_of(supplyBots,[&](const auto& bot) { return bot.owner == owner; })) return {};
+        std::set<int> front;
+        for (int index = 0; index < int(tiles.size()); ++index) {
+            if (tiles[index].owner != owner || airDefenseWater(index)) continue;
+            if (std::ranges::any_of(botGeography.adjacent(index),[&](int neighbor) {
+                return tiles[neighbor].owner == target && !airDefenseWater(neighbor);
+            })) front.insert(index);
+        }
+        std::map<int,int> rear;
+        for (const int tile : front) for (const int neighbor : botGeography.adjacent(tile)) {
+            if (tiles[neighbor].owner == owner && !front.contains(neighbor))
+                rear.emplace(neighbor,-hoi5::supplyHexDistance(neighbor,capitals[target],size));
+        }
+        return rear;
+    }
+
+    std::optional<hoi5::BotSupplyChoice> planBotSupply(const hoi5::BotSupplyState& bot,int spec) const {
         std::vector<int> occupied(tiles.size());
-        std::vector<int> critical;
         for (const auto& unit : divisions) {
             if (unit.owner != bot.owner || unit.combat.strength <= 0) continue;
             const int index = unit.r*size+unit.q;
             if (tiles[index].owner != bot.owner) continue;
             ++occupied[index];
-            if (tiles[index].supply < .30) critical.push_back(index);
         }
-        std::set<int> queued, sites;
+        for (const auto& [unit,tile] : bot.hexAssignments) ++occupied[tile];
+        std::set<int> queued;
         for (const auto& project : construction.queues[bot.owner]) {
             if (project.spec != spec) continue;
             queued.insert(project.tile);
-            if (project.repair) continue;
-            sites.insert(project.tile);
-            if (!project.paused && std::ranges::any_of(critical,[&](int tile) {
-                return hoi5::supplyHexDistance(project.tile,tile,size) <= 3;
-            })) return std::nullopt;
         }
-        if (sites.size() >= 2 || (!sites.empty() && critical.empty())) return std::nullopt;
         std::vector<hoi5::BotSupplyPoint> points;
         std::vector<hoi5::BotSupplyCandidate> candidates;
+        const int preparationTarget = botPreparationTarget(bot.owner);
         for (int index = 0; index < int(tiles.size()); ++index) {
             const auto& tile = tiles[index];
-            if (tile.owner != bot.owner || tile.water) continue;
-            bool border = false, hostileBorder = false;
-            forFrontNeighbor(index,[&](int neighbor) {
+            if (tile.owner != bot.owner || airDefenseWater(index)) continue;
+            bool border = false, hostileBorder = false, mobilizationFront = false;
+            for (const int neighbor : botGeography.adjacent(index)) {
                 const auto& other = tiles[neighbor];
-                if (other.water || other.owner < 0 || other.owner == bot.owner) return;
+                if (other.owner < 0 || other.owner == bot.owner) continue;
                 border = true;
-                hostileBorder |= diplomacy.hostile(bot.owner,other.owner);
-            });
-            const int weight = occupied[index]+(border ? 3 : 0);
+                hostileBorder |= !airDefenseWater(neighbor) && diplomacy.hostile(bot.owner,other.owner);
+                mobilizationFront |= other.owner == preparationTarget;
+            }
+            const int weight = occupied[index]+(border ? 3 : 0)+(mobilizationFront ? 6 : 0);
             if (weight && tile.supply < .55)
                 points.push_back({index,double(weight),1./std::max(1.,tile.movementCost),tile.supply});
             const double coverage = tile.buildings[hoi5::supplyDepot].area;
@@ -3277,29 +3522,840 @@ struct World {
         return hoi5::bestBotSupplySite(size,points,candidates);
     }
 
+    bool addBotTask(hoi5::BotSupplyState& bot,hoi5::BotTask task) {
+        const auto duplicate = [&](const hoi5::BotTask& existing) {
+            return existing.active() && existing.kind == task.kind && existing.tile == task.tile &&
+                existing.resource == task.resource && existing.amount == task.amount &&
+                existing.defenseType == task.defenseType;
+        };
+        if (std::ranges::count_if(bot.tasks,&hoi5::BotTask::active) >= 12 ||
+            std::ranges::any_of(bot.tasks,duplicate)) return false;
+        bot.tasks.push_back(task);
+        for (auto it = bot.tasks.begin(); bot.tasks.size() > 60 && it != bot.tasks.end();) {
+            if (it->active()) ++it;
+            else it = bot.tasks.erase(it);
+        }
+        return true;
+    }
+
+    static constexpr std::array<std::string_view,4> botDepotResources{
+        "construction_goods","steel","machinery","refined_fuel"
+    };
+
+    void scheduleBotSupply(hoi5::BotSupplyState& bot,int spec) {
+        using Task = hoi5::BotTask;
+        std::set<int> sites;
+        std::vector<int> critical;
+        for (const auto& unit : divisions) {
+            if (unit.owner != bot.owner || unit.combat.strength <= 0) continue;
+            const int index = unit.r*size+unit.q;
+            if (tiles[index].owner == bot.owner && tiles[index].supply < .3)
+                critical.push_back(index);
+        }
+        bool protectedProject = false;
+        for (const auto& project : construction.queues[bot.owner]) {
+            if (project.spec != spec) continue;
+            for (const auto key : botDepotResources) {
+                const double missing = hoi5::value(project.resources,key)-hoi5::value(project.resourcesSpent,key)-
+                    hoi5::value(stockpiles[bot.owner],key);
+                if (missing > 0 && !std::ranges::any_of(bot.tasks,[&](const Task& task) {
+                    return task.kind == Task::Kind::buy && task.resource == key &&
+                        (task.pending() || task.status == hoi5::BotTaskStatus::waitingMarket);
+                })) addBotTask(bot,{Task::Kind::buy,botHours,-1,key,missing});
+            }
+            if (project.repair) continue;
+            sites.insert(project.tile);
+            protectedProject |= !project.paused && std::ranges::any_of(critical,[&](int tile) {
+                return hoi5::supplyHexDistance(project.tile,tile,size) <= 3;
+            });
+        }
+        if (sites.size() >= 2 || protectedProject || (!sites.empty() && critical.empty())) return;
+        const auto choice = planBotSupply(bot,spec);
+        bot.target = choice ? choice->tile : -1;
+        if (!choice || std::ranges::any_of(bot.tasks,[](const Task& task) {
+            return task.kind == Task::Kind::supply && task.pending();
+        })) return;
+        if (std::ranges::count_if(bot.tasks,&Task::active) >= 12) {
+            const auto replace = std::ranges::find_if(bot.tasks,[](const Task& task) {
+                return task.pending() && task.kind != Task::Kind::supply;
+            });
+            if (replace != bot.tasks.end()) replace->status = hoi5::BotTaskStatus::cancelled;
+        }
+        if (addBotTask(bot,{Task::Kind::supply,botHours,choice->tile}))
+            bot.tasks.splice(bot.tasks.begin(),bot.tasks,std::prev(bot.tasks.end()));
+    }
+
+    bool applyBotSupply(hoi5::BotSupplyState& bot,hoi5::BotTask& task,int spec) {
+        auto& queue = construction.queues[bot.owner];
+        if (tiles[task.tile].owner != bot.owner || std::ranges::any_of(queue,[&](const auto& project) {
+            return project.tile == task.tile && project.spec == spec;
+        })) return false;
+        if (!construction.enqueue(tiles,size,bot.owner,task.tile,spec,profiles[bot.owner].buildEfficiency).empty())
+            return false;
+        const auto& project = queue.back();
+        if (project.money > std::max(0.,profiles[bot.owner].budget-5000000.)) {
+            queue.pop_back();
+            return false;
+        }
+        task.targetCoverage = project.repair ? tiles[task.tile].buildings[hoi5::supplyDepot].area : project.target;
+        for (const auto key : botDepotResources) {
+            const double missing = hoi5::value(project.resources,key)-hoi5::value(stockpiles[bot.owner],key);
+            if (missing > 0) addBotTask(bot,{hoi5::BotTask::Kind::buy,botHours,-1,key,missing});
+        }
+        std::rotate(queue.begin(),std::prev(queue.end()),queue.end());
+        return true;
+    }
+
+    double botAvailableMoney(const hoi5::BotSupplyState& bot) const {
+        const int owner = bot.owner;
+        const double balance = taxedTreasury(owner).balance()+bot.tradeBalance;
+        double money = std::max(0.,profiles[owner].budget-std::max(5000000.,std::abs(balance)));
+        for (const auto& project : construction.queues[owner])
+            if (!project.paid) money -= project.money;
+        return std::max(0.,money);
+    }
+
+    bool applyBotPurchase(hoi5::BotSupplyState& bot,const hoi5::BotTask& task) {
+        const int owner = bot.owner;
+        const double money = botAvailableMoney(bot);
+        double committed = 0.;
+        for (const auto& order : market.contracts)
+            if (order.country == owner && order.buy && order.resource != task.resource)
+                committed += order.amount*market.unitPrice(order.resource,true);
+        const double amount = std::min({std::max(0.,task.amount),
+            std::max(0.,money*.15-committed)/std::max(1.,market.unitPrice(task.resource,true)),
+            hoi5::freeStorage(capacities[owner],stockpiles[owner],task.resource)});
+        const double delta = amount-market.contractAmount(owner,task.resource,true);
+        if (std::abs(delta) < std::max(1.,amount*.1)) return true;
+        const double limit = hoi5::Market::monthlyCapacity(tiles,profiles)[owner];
+        if (!market.changeContract(owner,task.resource,true,delta,limit)) return false;
+        botBalanceRefresh.insert(owner);
+        return true;
+    }
+
+    void scheduleBotDefense(hoi5::BotSupplyState& bot,int fortSpec) {
+        using Task = hoi5::BotTask;
+        const int owner = bot.owner;
+        const bool atWar = botAtWar(owner);
+        std::vector<int> positions(tiles.size());
+        int divisionCount = 0;
+        for (const auto& unit : divisions) {
+            if (unit.owner != owner || unit.combat.strength <= 0) continue;
+            ++divisionCount;
+            const int tile = unit.r*size+unit.q;
+            if (tiles[tile].owner == owner) ++positions[tile];
+        }
+        if (!air.defenseReplacements.contains(owner)) {
+            auto targets = bot.defenseTargets;
+            if (atWar || botPreparationTarget(owner) >= 0) {
+                const int manpads = std::ranges::find(hoi5::defenseClasses,"manpads_team",
+                    &hoi5::DefenseClass::key)-std::begin(hoi5::defenseClasses);
+                const int extra = std::max(1,divisionCount/6);
+                const auto entry = std::ranges::find(targets,manpads,&std::pair<int,int>::first);
+                if (entry == targets.end()) targets.emplace_back(manpads,extra);
+                else entry->second += extra;
+            }
+            std::array<int,std::size(hoi5::defenseClasses)> counts{};
+            for (const auto& unit : air.defense)
+                if (unit.owner == owner && unit.health > 0) ++counts[unit.type];
+            int replacement = -1;
+            double cost = 0.;
+            std::vector<std::pair<std::string_view,double>> shortages;
+            for (const auto [type,target] : targets) {
+                if (counts[type] >= target) continue;
+                const auto quote = hoi5::AirLayer::defenseQuote(type);
+                std::vector<std::pair<std::string_view,double>> lacks;
+                for (const auto& [key,amount] : quote.resources) {
+                    const double missing = amount-hoi5::value(stockpiles[owner],key);
+                    if (missing > 0) lacks.emplace_back(key,missing);
+                }
+                if (replacement >= 0 && lacks.size() >= shortages.size()) continue;
+                replacement = type;
+                cost = quote.money;
+                shortages = std::move(lacks);
+            }
+            for (const auto& [key,amount] : shortages)
+                addBotTask(bot,{Task::Kind::buy,botHours,-1,key,amount});
+            if (replacement >= 0 && shortages.empty() && profiles[owner].budget >= cost+5000000.) {
+                if (std::ranges::count_if(bot.tasks,&Task::active) >= 12) {
+                    const auto expendable = std::ranges::find_if(bot.tasks,[](const Task& task) {
+                        return task.pending() && task.kind == Task::Kind::fortify;
+                    });
+                    if (expendable != bot.tasks.end()) expendable->status = hoi5::BotTaskStatus::cancelled;
+                }
+                Task task{Task::Kind::rebuildDefense,botHours};
+                task.defenseType = replacement;
+                addBotTask(bot,task);
+            }
+        }
+        if (!atWar || std::ranges::any_of(construction.queues[owner],[&](const auto& project) {
+            return project.spec == fortSpec;
+        }) || std::ranges::any_of(bot.tasks,[](const Task& task) {
+            return task.kind == Task::Kind::fortify && task.active();
+        })) return;
+        int best = -1;
+        double bestScore = 0.;
+        for (int index = 0; index < int(tiles.size()); ++index) {
+            const auto& tile = tiles[index];
+            if (positions[index] == 0 || tile.supply < .25 || airDefenseWater(index) ||
+                tile.buildings[hoi5::fortification].area >= .25) continue;
+            const bool hostileBorder = std::ranges::any_of(botGeography.adjacent(index),[&](int neighbor) {
+                return tiles[neighbor].owner >= 0 && diplomacy.hostile(owner,tiles[neighbor].owner);
+            });
+            const double score = positions[index]+tile.supply;
+            if (hostileBorder && score > bestScore) {
+                best = index;
+                bestScore = score;
+            }
+        }
+        if (best >= 0) addBotTask(bot,{Task::Kind::fortify,botHours,best});
+    }
+
+    bool applyBotFortification(const hoi5::BotSupplyState& bot,hoi5::BotTask& task,int spec) {
+        auto& queue = construction.queues[bot.owner];
+        if (std::ranges::any_of(queue,[&](const auto& project) {
+            return project.tile == task.tile && project.spec == spec;
+        })) return false;
+        const double money = botAvailableMoney(bot);
+        auto resources = stockpiles[bot.owner];
+        for (const auto& project : queue)
+            for (const auto& [key,amount] : project.resources)
+                resources[key] -= std::max(0.,amount-hoi5::value(project.resourcesSpent,key));
+        if (!construction.enqueue(tiles,size,bot.owner,task.tile,spec,profiles[bot.owner].buildEfficiency).empty())
+            return false;
+        const auto& project = queue.back();
+        if (project.money > money || std::ranges::any_of(project.resources,[&](const auto& required) {
+            return hoi5::value(resources,required.first) < required.second;
+        })) {
+            queue.pop_back();
+            return false;
+        }
+        task.targetCoverage = project.target;
+        return true;
+    }
+
+    std::set<int> assignBotFront(hoi5::BotSupplyState& bot,bool atWar,const std::set<int>& excluded = {}) const {
+        struct Post {
+            double priority{}, threat{};
+            bool active{}, mobilization{};
+            std::set<int> opponents;
+        };
+        const int owner = bot.owner;
+        const auto key = [&](int tile) { return std::pair{tile%size,tile/size}; };
+        const auto distance = [&](int a,int b) { return hoi5::supplyHexDistance(a,b,size); };
+        const auto position = [&](int unit) { return divisions[unit].r*size+divisions[unit].q; };
+        const auto ownLand = [&](int tile) { return tiles[tile].owner == owner && !airDefenseWater(tile); };
+        std::vector<int> land, component(tiles.size(),-1);
+        std::vector<int> components;
+        for (int q = 0; q < size; ++q) for (int r = 0; r < size; ++r) {
+            const int seed = r*size+q;
+            if (!ownLand(seed)) continue;
+            land.push_back(seed);
+            if (component[seed] >= 0) continue;
+            components.push_back(seed);
+            component[seed] = seed;
+            std::deque<int> queue{seed};
+            while (!queue.empty()) {
+                const int tile = queue.front();
+                queue.pop_front();
+                for (const int next : botGeography.adjacent(tile)) {
+                    if (component[next] >= 0 || !ownLand(next)) continue;
+                    component[next] = seed;
+                    queue.push_back(next);
+                }
+            }
+        }
+        const auto previous = std::move(bot.hexAssignments);
+        bot.hexAssignments.clear();
+        bot.frontQuotas.clear();
+        std::set<int> priorPosts, incoming;
+        for (const auto& [unit,tile] : previous) priorPosts.insert(tile);
+        for (const auto& [pair,day] : diplomacy.goals)
+            if (pair.second == owner) incoming.insert(pair.first);
+        std::vector<std::vector<int>> unitsByTile(tiles.size());
+        for (int i = 0; i < int(divisions.size()); ++i)
+            if (divisions[i].combat.strength > 0) unitsByTile[position(i)].push_back(i);
+        const int preparation = atWar ? -1 : botPreparationTarget(owner);
+        const int focus = bot.expansionTarget;
+        const bool focusExists = focus >= 0 && std::ranges::any_of(tiles,[&](const auto& tile) {
+            return tile.owner == focus;
+        });
+        std::map<int,Post> front;
+        for (const int tile : land) {
+            Post post;
+            bool adjacent = false, warning = false, foreign = false;
+            for (const int next : botGeography.adjacent(tile)) {
+                const int other = tiles[next].owner;
+                if (other == owner || airDefenseWater(next)) continue;
+                adjacent = true;
+                if (other < 0) continue;
+                foreign = true;
+                post.mobilization |= other == preparation;
+                const bool hostile = diplomacy.hostile(owner,other);
+                post.active |= hostile;
+                warning |= incoming.contains(other);
+                if (hostile || incoming.contains(other)) post.opponents.insert(other);
+            }
+            if (!adjacent || (atWar && !post.active && !warning)) continue;
+            bool occupied = false;
+            const auto collect = [&](int nearby) {
+                for (const int index : unitsByTile[nearby]) {
+                    const int other = divisions[index].owner;
+                    if (other != owner && (incoming.contains(other) || (atWar && diplomacy.hostile(owner,other))))
+                        post.threat += botMilitaryVector(divisions[index])[hoi5::attack];
+                }
+            };
+            for (const int index : unitsByTile[tile]) occupied |= divisions[index].owner == owner;
+            collect(tile);
+            for (const int next : botGeography.adjacent(tile)) collect(next);
+            post.priority = 2+tiles[tile].supply+(occupied ? 2 : 0)+priorPosts.contains(tile);
+            if (atWar) post.priority += post.threat/20.;
+            else {
+                post.priority += foreign ? 2 : 0;
+                if (preparation >= 0) post.priority += (post.mobilization ? 20 : 0)+4*tiles[tile].supply;
+                if (focusExists) post.priority += 3./(1+distance(tile,capitals[focus]));
+            }
+            front.emplace(tile,std::move(post));
+        }
+        std::set<int> pinned;
+        if (front.empty()) return pinned;
+        if (!atWar) bot.offensiveFocus = -1;
+        else if (!front.contains(bot.offensiveFocus)) {
+            bot.offensiveFocus = -1;
+            const auto rank = [&](int tile) { return std::pair{tiles[tile].supply,front.at(tile).priority}; };
+            for (const int tile : land)
+                if (front.contains(tile) && front.at(tile).active &&
+                    (bot.offensiveFocus < 0 || rank(tile) > rank(bot.offensiveFocus))) bot.offensiveFocus = tile;
+        }
+        for (const int group : components) {
+            std::vector<int> units, localFront;
+            for (int i = 0; i < int(divisions.size()); ++i) {
+                const auto& unit = divisions[i];
+                if (unit.owner == owner && unit.combat.strength > 0 && unit.battle < 0 &&
+                    !unit.retreating && !excluded.contains(i) && component[position(i)] == group) units.push_back(i);
+            }
+            for (const int tile : land)
+                if (component[tile] == group && front.contains(tile)) localFront.push_back(tile);
+            if (std::ranges::any_of(localFront,[&](int tile) { return front.at(tile).mobilization; }))
+                std::erase_if(localFront,[&](int tile) { return !front.at(tile).mobilization; });
+            if (units.empty() || localFront.empty()) continue;
+            const int capital = capitals[owner];
+            if (capital >= 0 && component[capital] == group && !front.contains(capital) &&
+                units.size() >= localFront.size()+3) {
+                int reserve = -1;
+                for (const int index : units) {
+                    const auto& unit = divisions[index];
+                    if (unit.attackRoute || (!unit.route.empty() && unit.route.back() != capital)) continue;
+                    if (index == bot.reserve) { reserve = index; break; }
+                    if (reserve < 0 || distance(position(index),capital) < distance(position(reserve),capital)) reserve = index;
+                }
+                if (reserve >= 0) {
+                    bot.reserve = reserve;
+                    bot.hexAssignments[reserve] = capital;
+                    if (!divisions[reserve].route.empty()) pinned.insert(reserve);
+                    std::erase(units,reserve);
+                }
+            }
+            const auto rank = [&](int tile) { return std::pair{-front.at(tile).priority,key(tile)}; };
+            std::ranges::sort(localFront,{},rank);
+            auto watchPosts = localFront;
+            std::ranges::stable_sort(watchPosts,{},[&](int tile) { return !front.at(tile).active; });
+            std::vector<int> selected, pressured;
+            std::set<int> covered;
+            for (const int tile : watchPosts) {
+                const auto& opponents = front.at(tile).opponents;
+                if (std::ranges::any_of(opponents,[&](int other) { return !covered.contains(other); })) {
+                    selected.push_back(tile);
+                    covered.insert(opponents.begin(),opponents.end());
+                }
+                if (selected.size() == units.size()) break;
+            }
+            for (const int tile : localFront) if (front.at(tile).threat > 0.) pressured.push_back(tile);
+            for (const int tile : pressured.empty() ? localFront : pressured) {
+                if (selected.size() == units.size()) break;
+                if (std::ranges::find(selected,tile) == selected.end()) selected.push_back(tile);
+            }
+            std::map<int,int> quota, counts;
+            for (const int tile : selected) quota[tile] = 1;
+            const int concentrating = pressured.empty() ? int(selected.size()) :
+                std::ranges::count_if(selected,[&](int tile) { return front.at(tile).threat > 0.; });
+            const int cap = concentrating <= 1 ? int(units.size()) : std::max(2,int((units.size()+1)/2));
+            for (std::size_t i = selected.size(); i < units.size(); ++i) {
+                int best = -1;
+                double bestScore = 0.;
+                for (const int tile : selected) {
+                    const auto& post = front.at(tile);
+                    if (quota[tile] >= cap || (!pressured.empty() && post.threat <= 0.)) continue;
+                    const double score = (post.priority+(atWar && tile == bot.offensiveFocus ? 4 : 0))/(1+quota[tile]);
+                    if (best < 0 || score > bestScore) { best = tile; bestScore = score; }
+                }
+                if (best < 0) break;
+                ++quota[best];
+            }
+            bot.frontQuotas.insert(quota.begin(),quota.end());
+            std::erase_if(units,[&](int index) {
+                const auto& unit = divisions[index];
+                if (unit.route.empty()) return false;
+                const int target = unit.route.back();
+                if (!unit.attackRoute && std::ranges::find(localFront,target) == localFront.end()) return false;
+                bot.hexAssignments[index] = target;
+                if (quota.contains(target)) ++counts[target];
+                pinned.insert(index);
+                return true;
+            });
+            std::erase_if(units,[&](int index) {
+                const int tile = position(index);
+                if (!quota.contains(tile) || counts[tile] >= quota[tile]) return false;
+                bot.hexAssignments[index] = tile;
+                ++counts[tile];
+                return true;
+            });
+            std::vector<int> slots;
+            for (const int tile : selected) if (counts[tile] == 0) slots.push_back(tile);
+            for (const int tile : selected)
+                for (int n = std::max(1,counts[tile]); n < quota[tile]; ++n) slots.push_back(tile);
+            for (const int tile : slots) {
+                const auto score = [&](int index) {
+                    const auto old = previous.find(index);
+                    return distance(position(index),tile)-(old != previous.end() && old->second == tile ? 2 : 0);
+                };
+                auto best = units.end();
+                for (auto it = units.begin(); it != units.end(); ++it) {
+                    const int source = position(*it);
+                    const bool onFront = std::ranges::find(localFront,source) != localFront.end();
+                    if (onFront && counts[tile] != 0 && !(counts[source] > 0 && source != tile &&
+                        front.at(tile).threat > 1.5*front.at(source).threat+10)) continue;
+                    if (best == units.end() || score(*it) < score(*best)) best = it;
+                }
+                if (best == units.end()) continue;
+                bot.hexAssignments[*best] = tile;
+                ++counts[tile];
+                units.erase(best);
+            }
+        }
+        return pinned;
+    }
+
+    struct BotMovement { int unit, tile; bool withdraw = false, attack = false; };
+
+    bool applyBotMovement(const BotMovement& order) {
+        auto& unit = divisions[order.unit];
+        const int origin = unit.r*size+unit.q;
+        const int targetOwner = tiles[order.tile].owner;
+        const bool validTarget = order.attack ? targetOwner < 0 || diplomacy.hostile(unit.owner,targetOwner)
+                                              : targetOwner == unit.owner;
+        if (unit.retreating || unit.combat.strength <= 0. || !validTarget ||
+            (unit.battle >= 0 && !order.withdraw)) return false;
+        if (order.withdraw && (airDefenseWater(order.tile) || defended(order.tile,unit.owner) ||
+            std::ranges::find(botGeography.adjacent(origin),order.tile) == botGeography.adjacent(origin).end()))
+            return false;
+        if (!order.withdraw && !unit.route.empty() && unit.route.back() == order.tile) return true;
+        if (order.withdraw) detachDivisionFromBattle(order.unit);
+        auto route = divisionRoute(unit,origin,order.tile);
+        if (origin != order.tile && route.empty()) return false;
+        if (order.attack && route.size() > 1) route.resize(1);
+        unit.route = std::move(route);
+        unit.attackRoute = order.attack && !unit.route.empty() && tiles[unit.route.front()].owner != unit.owner &&
+            (tiles[unit.route.front()].owner < 0 || diplomacy.hostile(unit.owner,tiles[unit.route.front()].owner));
+        unit.progress = unit.visualProgress = 0.;
+        if (order.withdraw) {
+            unit.retreating = true;
+            unit.organization *= .8;
+        }
+        return true;
+    }
+
+    std::set<int> planBotRecovery(hoi5::BotSupplyState& bot,bool atWar,std::vector<BotMovement>& orders) const {
+        const int owner = bot.owner;
+        const auto position = [&](int index) { return divisions[index].r*size+divisions[index].q; };
+        std::vector<int> friendly;
+        std::vector<std::vector<int>> enemies(tiles.size());
+        std::vector<double> localDefense(tiles.size());
+        for (int index = 0; index < int(divisions.size()); ++index) {
+            const auto& unit = divisions[index];
+            if (unit.combat.strength <= 0.) continue;
+            const int tile = position(index);
+            if (unit.owner == owner) {
+                friendly.push_back(index);
+                localDefense[tile] += botMilitaryVector(unit)[hoi5::defense];
+            } else if (diplomacy.hostile(owner,unit.owner)) enemies[tile].push_back(index);
+        }
+        const auto nearby = [&](int tile,auto visit) {
+            for (const int index : enemies[tile]) visit(index);
+            for (const int neighbor : botGeography.adjacent(tile))
+                for (const int index : enemies[neighbor]) visit(index);
+        };
+        const auto enemyCount = [&](int tile) {
+            int count = 0;
+            nearby(tile,[&](int) { ++count; });
+            return count;
+        };
+        std::set<int> used;
+        if (atWar) for (const int index : friendly) {
+            const auto& unit = divisions[index];
+            if (unit.retreating) continue;
+            const int origin = position(index);
+            double threat = 0.;
+            int enemyUnits = 0, hostileSides = 0;
+            nearby(origin,[&](int enemy) { ++enemyUnits; threat += botMilitaryVector(divisions[enemy])[hoi5::attack]; });
+            std::vector<int> exits;
+            for (const int tile : botGeography.adjacent(origin)) {
+                const int other = tiles[tile].owner;
+                if (other == owner && !airDefenseWater(tile) && enemies[tile].empty()) exits.push_back(tile);
+                if (other >= 0 && diplomacy.hostile(owner,other)) ++hostileSides;
+            }
+            const bool weak = unit.organization < unit.maxOrganization*.25 || unit.lastSupplyRatio < .12;
+            const bool trapped = exits.size() <= 1 && hostileSides >= 3;
+            const bool overwhelming = threat > localDefense[origin]*1.8;
+            const double pressureLimit = (weak ? botMilitaryVector(unit)[hoi5::defense] : localDefense[origin])*.8;
+            if (enemyUnits > 0 && (weak || trapped || overwhelming) && !exits.empty() &&
+                threat > pressureLimit && (unit.battle < 0 || trapped || (weak && overwhelming))) {
+                const auto rank = [&](int tile) { return std::pair{enemyCount(tile),-tiles[tile].supply}; };
+                const int target = *std::ranges::min_element(exits,{},rank);
+                orders.push_back({index,target,true});
+                used.insert(index);
+            } else if (!unit.route.empty() && unit.attackRoute && unit.battle < 0) {
+                const int target = unit.route.back();
+                double defense = 0., committedAttack = 0.;
+                for (const int enemy : enemies[target]) defense += botMilitaryVector(divisions[enemy])[hoi5::defense];
+                for (const int ally : friendly) {
+                    const auto& other = divisions[ally];
+                    const auto battle = battles.find(other.battle);
+                    const bool engaged = battle != battles.end() && other.battle == target &&
+                        std::ranges::find(battle->second.attackers,ally) != battle->second.attackers.end();
+                    if (engaged || (other.attackRoute && !other.route.empty() && other.route.back() == target))
+                        committedAttack += botMilitaryVector(other)[hoi5::attack];
+                }
+                if (weak || defense > committedAttack*1.2) {
+                    orders.push_back({index,origin});
+                    used.insert(index);
+                }
+            }
+        }
+        std::erase_if(bot.resting,[&](int index) { return divisions[index].combat.strength <= 0.; });
+        for (const int index : friendly) {
+            const auto& unit = divisions[index];
+            const double organization = unit.organization/std::max(1.,unit.maxOrganization);
+            if (organization < .4 || unit.lastSupplyRatio < .12) bot.resting.insert(index);
+            else if (organization >= .8 && unit.lastSupplyRatio >= .25) bot.resting.erase(index);
+            if (!bot.resting.contains(index) || !used.insert(index).second) continue;
+            if (unit.battle >= 0 || unit.retreating) continue;
+            const int origin = position(index);
+            if (tiles[origin].owner == owner && unit.route.empty() && supplyRatio(unit) >= .25 &&
+                enemyCount(origin) == 0) continue;
+            const auto safe = [&](int tile) {
+                return tiles[tile].owner == owner && tiles[tile].supply >= .35 && enemyCount(tile) == 0;
+            };
+            if (!unit.route.empty() && safe(unit.route.back())) continue;
+            const auto distance = [&](int tile) { return hoi5::supplyHexDistance(origin,tile,size); };
+            std::vector<int> sites;
+            for (int q = 0; q < size; ++q) for (int r = 0; r < size; ++r) {
+                const int tile = r*size+q;
+                if (distance(tile) <= 3 && !airDefenseWater(tile) && safe(tile)) sites.push_back(tile);
+            }
+            std::ranges::stable_sort(sites,{},[&](int tile) { return distance(tile)-tiles[tile].supply; });
+            if (sites.empty() && unit.route.empty() && organization >= .65 && unit.lastSupplyRatio < .12)
+                used.erase(index);
+            for (std::size_t i = 0; i < std::min<std::size_t>(5,sites.size()); ++i) {
+                const int tile = sites[i];
+                if (tile == origin && unit.route.empty()) break;
+                if (tile == origin || !divisionRoute(unit,origin,tile).empty()) {
+                    orders.push_back({index,tile});
+                    break;
+                }
+            }
+        }
+        return used;
+    }
+
+    const std::map<int,int>& botOffensiveDistances(hoi5::BotSupplyState& bot,int enemy,
+                                                   const std::vector<int>& targets) const {
+        static const std::map<int,int> empty;
+        if (targets.empty()) return empty;
+        const auto cached = bot.warObjectives.find(enemy);
+        if (cached != bot.warObjectives.end() && botHours < cached->second.hour+168 &&
+            tiles[cached->second.anchor].owner == enemy &&
+            std::ranges::any_of(targets,[&](int tile) { return cached->second.distances.contains(tile); }))
+            return cached->second.distances;
+        const auto key = [&](int tile) { return std::pair{tile%size,tile/size}; };
+        const auto distance = [&](int a,int b) { return hoi5::supplyHexDistance(a,b,size); };
+        const auto flood = [&](const std::vector<int>& seeds) {
+            std::vector<int> distances(tiles.size(),-1);
+            std::deque<int> queue(seeds.begin(),seeds.end());
+            for (const int seed : seeds) distances[seed] = 0;
+            while (!queue.empty()) {
+                const int tile = queue.front();
+                queue.pop_front();
+                for (const int next : botGeography.adjacent(tile)) {
+                    if (distances[next] >= 0 || tiles[next].owner != enemy || !botGeography.hasRegion(next)) continue;
+                    distances[next] = distances[tile]+1;
+                    queue.push_back(next);
+                }
+            }
+            return distances;
+        };
+        const auto reachable = flood(targets);
+        const int capital = capitals[enemy];
+        const auto profiles = botGeography.profiles(tiles,enemy,capital,[&](int tile) { return airDefenseWater(tile); });
+        int anchor = -1;
+        std::tuple<double,int,std::pair<int,int>> best{};
+        for (const auto& region : profiles) {
+            if (reachable[region.tiles.front()] < 0) continue;
+            const auto rank = [&](int tile) {
+                const auto& buildings = tiles[tile].buildings;
+                return std::pair{tile == capital,buildings[hoi5::industry].area+
+                    buildings[hoi5::supplyDepot].area+buildings[hoi5::city].area};
+            };
+            const int candidate = *std::ranges::max_element(region.tiles,{},rank);
+            int nearest = std::numeric_limits<int>::max();
+            for (const int target : targets) nearest = std::min(nearest,distance(candidate,target));
+            const auto score = std::tuple{region.importance/(1+nearest),region.base,key(region.anchor)};
+            if (anchor < 0 || score > best) { anchor = candidate; best = score; }
+        }
+        if (anchor < 0) return empty;
+        const auto distances = flood({anchor});
+        auto starts = targets;
+        std::erase_if(starts,[&](int tile) { return distances[tile] < 0; });
+        std::ranges::sort(starts,{},[&](int tile) { return std::pair{distances[tile],key(tile)}; });
+        std::vector<int> approaches;
+        hoi5::BotSupplyState::WarObjective objective{botHours,anchor,{}};
+        for (const int start : starts) {
+            if (std::ranges::any_of(approaches,[&](int other) { return distance(start,other) < 3; })) continue;
+            approaches.push_back(start);
+            int tile = start;
+            while (true) {
+                objective.distances[tile] = distances[tile];
+                if (distances[tile] == 0) break;
+                int next = -1;
+                for (const int neighbor : botGeography.adjacent(tile))
+                    if (distances[neighbor] == distances[tile]-1 && (next < 0 || key(neighbor) < key(next))) next = neighbor;
+                tile = next;
+            }
+            if (approaches.size() == 3) break;
+        }
+        return bot.warObjectives.insert_or_assign(enemy,std::move(objective)).first->second.distances;
+    }
+
+    void planBotAttacks(hoi5::BotSupplyState& bot,const std::set<int>& used,std::vector<BotMovement>& orders) const {
+        const int owner = bot.owner;
+        const auto position = [&](int index) { return divisions[index].r*size+divisions[index].q; };
+        const auto stationary = [&](int index) {
+            const auto& unit = divisions[index];
+            return !used.contains(index) && unit.battle < 0 && unit.route.empty() && !unit.retreating;
+        };
+        std::vector<int> ready;
+        std::vector<int> sourceCounts(tiles.size());
+        std::vector<std::vector<int>> unitsByTile(tiles.size());
+        std::vector<hoi5::BotMilitary> military(divisions.size());
+        int divisionCount = 0;
+        for (int index = 0; index < int(divisions.size()); ++index) {
+            const auto& unit = divisions[index];
+            if (unit.combat.strength <= 0.) continue;
+            unitsByTile[position(index)].push_back(index);
+            military[index] = botMilitaryVector(unit);
+            if (unit.owner != owner) continue;
+            ++divisionCount;
+            if (!stationary(index)) continue;
+            ++sourceCounts[position(index)];
+            if (unit.organization >= unit.maxOrganization*.65 && unit.lastSupplyRatio >= .12) ready.push_back(index);
+        }
+        const int limit = divisionCount-2;
+        if (limit <= 0) return;
+        const auto enemyLand = [&](int tile) {
+            return tiles[tile].owner >= 0 && diplomacy.hostile(owner,tiles[tile].owner) && !airDefenseWater(tile);
+        };
+        const auto enemyUnits = [&](int tile) {
+            return std::ranges::any_of(unitsByTile[tile],[&](int index) {
+                return diplomacy.hostile(owner,divisions[index].owner);
+            });
+        };
+        std::set<std::pair<int,int>> coordinates;
+        for (const int index : ready) for (const int tile : botGeography.adjacent(position(index)))
+            if (enemyLand(tile)) coordinates.emplace(tile%size,tile/size);
+        std::map<int,std::vector<int>> byEnemy;
+        for (const auto [q,r] : coordinates) byEnemy[tiles[r*size+q].owner].push_back(r*size+q);
+        std::map<int,const std::map<int,int>*> corridors;
+        for (const auto& [enemy,targets] : byEnemy) corridors[enemy] = &botOffensiveDistances(bot,enemy,targets);
+        std::vector<std::pair<double,std::vector<BotMovement>>> choices;
+        for (const auto [q,r] : coordinates) {
+            const int target = r*size+q;
+            std::set<int> friendly;
+            int hostile = 0;
+            for (const int tile : botGeography.adjacent(target)) {
+                if (tiles[tile].owner == owner && !airDefenseWater(tile)) friendly.insert(tile);
+                if (enemyLand(tile)) ++hostile;
+            }
+            if (hostile >= 2 && friendly.size() < 2) continue;
+            double defense = 0.;
+            for (const int unit : unitsByTile[target])
+                if (diplomacy.hostile(owner,divisions[unit].owner)) defense += military[unit][hoi5::defense];
+            std::vector<int> pool;
+            std::map<int,int> ranksBySource;
+            for (const int index : ready)
+                if (friendly.contains(position(index)) && (defense <= 0. || divisions[index].lastSupplyRatio >= .25))
+                    pool.push_back(index);
+            std::ranges::stable_sort(pool,{},[&](int unit) { return -military[unit][hoi5::attack]; });
+            std::map<int,int> ranks;
+            for (const int index : pool) ranks[index] = ranksBySource[position(index)]++;
+            std::ranges::stable_sort(pool,{},[&](int index) { return std::pair{ranks[index],-military[index][hoi5::attack]}; });
+            const double widthLimit = (80.+40.*std::max(0,int(ranksBySource.size())-1))*1.5;
+            double width = 0., attack = 0.;
+            auto counts = sourceCounts;
+            std::set<int> protectedUnits, selected;
+            std::vector<BotMovement> package;
+            for (const int index : pool) {
+                const int source = position(index);
+                const double unitWidth = divisions[index].combat.width;
+                if (protectedUnits.contains(index) || (defense > 0. && !package.empty() && width+unitWidth > widthLimit))
+                    continue;
+                if (counts[source] <= 1) {
+                    const auto& neighbors = botGeography.adjacent(source);
+                    if (std::ranges::any_of(neighbors,[&](int tile) {
+                        return diplomacy.goals.contains({tiles[tile].owner,owner});
+                    })) continue;
+                    std::vector<int> support;
+                    bool exposed = false;
+                    for (const int tile : neighbors) {
+                        exposed |= tile != target && enemyUnits(tile);
+                        for (const int ally : unitsByTile[tile])
+                            if (divisions[ally].owner == owner && stationary(ally) && !selected.contains(ally))
+                                support.push_back(ally);
+                    }
+                    if (source == capitals[owner] || (hostile > 0 && friendly.size() < 2) ||
+                        (defense == 0. && exposed) || (defense > 0. && support.size() < 2)) continue;
+                    if (!support.empty()) protectedUnits.insert(support.front());
+                }
+                package.push_back({index,target,false,true});
+                selected.insert(index);
+                width += unitWidth;
+                attack += military[index][hoi5::attack];
+                --counts[source];
+                if (int(package.size()) >= limit || (defense == 0. && package.size() >= std::max<std::size_t>(1,friendly.size())))
+                    break;
+            }
+            const double threshold = 1.05-.15*bot.aggression;
+            if (package.empty() || attack <= std::max(8.,defense*threshold)) continue;
+            double value = attack/std::max(8.,defense)+.1*tiles[target].buildings[hoi5::industry].area;
+            const auto& corridor = *corridors.at(tiles[target].owner);
+            if (const auto entry = corridor.find(target); entry != corridor.end()) value += .6/(1+entry->second);
+            choices.emplace_back(value,std::move(package));
+        }
+        if (const auto* package = hoi5::botChooseClose(bot.rng,choices))
+            orders.insert(orders.end(),package->begin(),package->end());
+    }
+
+    void planBotFrontMoves(hoi5::BotSupplyState& bot,std::vector<BotMovement>& orders) const {
+        const bool atWar = botAtWar(bot.owner);
+        if (!atWar && botHours < bot.nextPeaceDeployment) return;
+        if (!atWar) bot.nextPeaceDeployment = botHours+48;
+        if (atWar && bot.course.first != hoi5::BotCourse::defense) {
+            for (int other = 0; other < int(profiles.size()); ++other) {
+                if (!diplomacy.hostile(bot.owner,other)) continue;
+                bot.course = {hoi5::BotCourse::defense,other};
+                bot.courseSince = botHours;
+                break;
+            }
+        }
+        auto used = planBotRecovery(bot,atWar,orders);
+        const auto pinned = assignBotFront(bot,atWar,used);
+        for (const auto& [index,tile] : bot.hexAssignments) {
+            const auto& unit = divisions[index];
+            if (pinned.contains(index) || tile == unit.r*size+unit.q ||
+                unit.organization < unit.maxOrganization*.65 ||
+                (bot.resting.contains(index) && tiles[tile].supply < .25)) continue;
+            const auto last = bot.lastOrders.find(index);
+            if (last != bot.lastOrders.end() && botHours-last->second < 24) continue;
+            orders.push_back({index,tile});
+            bot.lastOrders[index] = botHours;
+            used.insert(index);
+        }
+        if (atWar) planBotAttacks(bot,used,orders);
+    }
+
     void updateBots(int hours,hoi5::DebugProfiler* debug) {
         if (supplyBots.empty()) return;
         hoi5::DebugMeasure total(debug,"ai_total");
         botHours += hours;
         const int spec = std::ranges::find(hoi5::constructionSpecs,hoi5::supplyDepot,
             &hoi5::ConstructionSpec::building)-std::begin(hoi5::constructionSpecs);
-        std::vector<std::pair<int,int>> orders;
-        {
-            hoi5::DebugMeasure daily(debug,"ai_daily");
-            for (auto& bot : supplyBots) {
-                if (botHours < bot.nextDaily) continue;
+        const int fortSpec = std::ranges::find(hoi5::constructionSpecs,hoi5::fortification,
+            &hoi5::ConstructionSpec::building)-std::begin(hoi5::constructionSpecs);
+        using Task = hoi5::BotTask;
+        using Status = hoi5::BotTaskStatus;
+        std::vector<std::pair<hoi5::BotSupplyState*,Task*>> orders;
+        std::vector<BotMovement> movements;
+        for (auto& bot : supplyBots) {
+            if (std::ranges::none_of(tiles,[&](const auto& tile) { return tile.owner == bot.owner; })) continue;
+            updateBotReviews(bot);
+            if (botHours >= bot.nextDaily || bot.urgent) {
+                hoi5::DebugMeasure daily(debug,"ai_daily");
+                bot.regions = botGeography.profiles(tiles,bot.owner,capitals[bot.owner],
+                    [&](int tile) { return airDefenseWater(tile); });
+                updateBotRegionalMilitary(bot);
+                sampleBotMilitary(bot,bot.owner);
+                scheduleBotSupply(bot,spec);
+                scheduleBotDefense(bot,fortSpec);
                 bot.nextDaily = botHours+24;
-                const auto choice = planBotSupply(bot,spec);
-                bot.target = choice ? choice->tile : -1;
-                if (choice) orders.emplace_back(bot.owner,choice->tile);
+            }
+            if (botHours >= bot.nextMicro || bot.urgent) {
+                hoi5::DebugMeasure micro(debug,"ai_micro");
+                planBotFrontMoves(bot,movements);
+                bot.nextMicro = botHours+6;
+                bot.urgent = false;
+            }
+            hoi5::DebugMeasure tasks(debug,"ai_tasks");
+            for (auto& task : bot.tasks) {
+                if (task.status == Status::executing &&
+                    (task.kind == Task::Kind::supply || task.kind == Task::Kind::fortify)) {
+                    const auto& tile = tiles[task.tile];
+                    const int projectSpec = task.kind == Task::Kind::supply ? spec : fortSpec;
+                    const auto& building = tile.buildings[hoi5::constructionSpecs[projectSpec].building];
+                    if (tile.owner != bot.owner) task.status = Status::cancelled;
+                    else if (building.health > .9 && building.area >= task.targetCoverage) task.status = Status::succeeded;
+                    else if (std::ranges::none_of(construction.queues[bot.owner],[&](const auto& project) {
+                        return project.tile == task.tile && project.spec == projectSpec;
+                    })) task.status = Status::failed;
+                } else if (task.status == Status::waitingMarket) {
+                    if (botMarketTick > task.marketTick)
+                        task.status = std::ranges::any_of(market.last.fills,[&](const auto& fill) {
+                            return fill.buyer == bot.owner && fill.resource == task.resource && fill.amount > 0;
+                        }) ? Status::succeeded : Status::failed;
+                } else if (task.pending() && botHours >= task.retryHour) {
+                    if (botHours-task.createdHour > 336) task.status = Status::cancelled;
+                    else {
+                        orders.emplace_back(&bot,&task);
+                        task.retryHour = botHours+24;
+                    }
+                }
             }
         }
-        hoi5::DebugMeasure tasks(debug,"ai_tasks");
-        for (const auto& [owner,tile] : orders) {
-            auto& queue = construction.queues[owner];
-            if (!construction.enqueue(tiles,size,owner,tile,spec,profiles[owner].buildEfficiency).empty()) continue;
-            if (queue.back().money > std::max(0.,profiles[owner].budget-5000000.)) queue.pop_back();
-            else std::rotate(queue.begin(),std::prev(queue.end()),queue.end());
+        for (const auto& movement : movements) applyBotMovement(movement);
+        for (const auto& [bot,task] : orders) {
+            if (task->kind == Task::Kind::supply)
+                task->status = applyBotSupply(*bot,*task,spec) ? Status::executing : Status::blocked;
+            else if (task->kind == Task::Kind::fortify)
+                task->status = applyBotFortification(*bot,*task,fortSpec) ? Status::executing : Status::blocked;
+            else if (task->kind == Task::Kind::rebuildDefense) {
+                const int owner = bot->owner;
+                if (air.defenseReplacements.contains(owner)) task->status = Status::blocked;
+                else {
+                    air.enqueueDefense(owner,task->defenseType,profiles[owner].budget,stockpiles[owner]);
+                    task->status = air.defenseReplacements.contains(owner) ? Status::succeeded : Status::blocked;
+                }
+            } else {
+                task->status = applyBotPurchase(*bot,*task) ? Status::waitingMarket : Status::blocked;
+                if (task->status == Status::waitingMarket) task->marketTick = botMarketTick;
+            }
+        }
+        if (!botBalanceRefresh.empty()) {
+            const int owner = *botBalanceRefresh.begin();
+            botBalanceRefresh.erase(botBalanceRefresh.begin());
+            auto& bot = *std::ranges::find(supplyBots,owner,&hoi5::BotSupplyState::owner);
+            bot.tradeBalance = 0.;
+            for (const auto& fill : forecastMarketPlan(botMarketTick).fills) {
+                if (fill.seller == owner) bot.tradeBalance += fill.amount*fill.price;
+                if (fill.buyer == owner) bot.tradeBalance -= fill.amount*fill.price;
+            }
         }
     }
 
@@ -3395,6 +4451,7 @@ struct World {
         if (debug) debug->record("server_field_helipads",helipadStart);
         const auto defenseStart = Clock::now();
         air.advanceDefenseReplacements(tiles,capitals,hours,[&](int tile) { return battles.contains(tile); },
+            [&](int owner) { return botForwardDefenseSites(owner); },
             [&](int tile,int type) {
                 diplomacy.record("ПВО восстановлено: "+std::string(hoi5::defenseClasses[type].key)+" ("+
                     std::to_string(tile%size)+", "+std::to_string(tile/size)+")",tiles[tile].owner);
@@ -4772,11 +5829,12 @@ int main(int argc, char** argv) try {
             replacements.enqueueDefense(0,2,budget,materiel) != "ПВО уже производится") return 1;
         const std::vector capitals{0};
         const auto completed = [](int,int) {};
-        replacements.advanceDefenseReplacements(deployment,capitals,47,[](int) { return false; },completed);
+        const auto homeDeployment = [](int) { return std::map<int,int>{}; };
+        replacements.advanceDefenseReplacements(deployment,capitals,47,[](int) { return false; },homeDeployment,completed);
         if (!replacements.defense.empty()) return 1;
-        replacements.advanceDefenseReplacements(deployment,capitals,1,[](int) { return true; },completed);
+        replacements.advanceDefenseReplacements(deployment,capitals,1,[](int) { return true; },homeDeployment,completed);
         if (!replacements.defense.empty() || replacements.defenseReplacements.empty()) return 1;
-        replacements.advanceDefenseReplacements(deployment,capitals,1,[](int) { return false; },completed);
+        replacements.advanceDefenseReplacements(deployment,capitals,1,[](int) { return false; },homeDeployment,completed);
         if (replacements.defense.size() != 1 || !replacements.defenseReplacements.empty() ||
             replacements.defense[0].tile != 0 || replacements.defense[0].ammo != 18) return 1;
         World moving;
@@ -4931,6 +5989,230 @@ int main(int argc, char** argv) try {
         return test.resolveAirImpact(ordered,infrastructureChanged) && infrastructureChanged &&
             division.combat.strength < strength && city.health < health ? 0 : 1;
     }
+    if (mode == "--check-bot-course") {
+        using Course = hoi5::BotCourse;
+        World test;
+        test.size = 2;
+        test.tiles.resize(4);
+        test.tiles[0].owner = 1;
+        test.capitals = {1,0};
+        test.profiles.resize(2,{1.,1000000.,20000000.});
+        test.diplomacy.countries.resize(2);
+        for (const int owner : {1,1,1,0}) {
+            auto& unit = test.divisions.emplace_back();
+            unit.owner = owner;
+            unit.q = owner == 1 ? 0 : 1;
+            unit.organization = unit.maxOrganization = 100.;
+        }
+        test.startBots(7);
+        auto& bot = test.supplyBots.front();
+        bot.rng.seed(7);
+        bot.aggression = .25;
+        test.sampleBotMilitary(bot,1);
+        test.sampleBotMilitary(bot,0);
+        const auto own = bot.militaryReports.at(1).divisions[hoi5::attack];
+        const auto enemy = bot.militaryReports.at(0).divisions[hoi5::attack];
+        const double expected = 22.*(1.+(2.*.32383276483316237-1.)*.3375);
+        if (own.value != 66. || own.low != own.high || std::abs(enemy.value-expected) > 1e-12 ||
+            std::abs(enemy.low-expected/1.3375) > 1e-12 ||
+            std::abs(enemy.high-expected/.6625) > 1e-12) return 1;
+        test.botHours = 24;
+        test.sampleBotMilitary(bot,0);
+        if (bot.militaryReports.at(0).divisions[hoi5::attack].value != enemy.value ||
+            bot.militaryReports.at(0).divisions[hoi5::attack].observedHour != 24) return 1;
+        const auto proposal = test.botCourseCandidates(bot);
+        if (proposal != hoi5::BotCourseOptions{{50.,{Course::development,-1}},{62.,{Course::warPreparation,0}}}) return 1;
+        test.selectBotCourse(bot,proposal);
+        if (bot.course.first != Course::development || test.botPreparationTarget(1) != -1) return 1;
+        test.botHours = 1440;
+        bot.courseBias[std::size_t(Course::development)] = -3.;
+        bot.courseBias[std::size_t(Course::warPreparation)] = 3.;
+        test.selectBotCourse(bot,proposal);
+        if (bot.course != hoi5::BotCourseChoice{Course::warPreparation,0} || test.botPreparationTarget(1) != 0)
+            return 1;
+        test.profiles[1].budget = -1.;
+        test.selectBotCourse(bot,proposal);
+        if (bot.course.first != Course::recovery) return 1;
+        test.diplomacy.relation(0,1).war = true;
+        test.selectBotCourse(bot,proposal);
+        if (bot.course != hoi5::BotCourseChoice{Course::defense,0} || test.botPreparationTarget(1) != -1) return 1;
+
+        bot.nextWeekly = bot.nextMonthly = 2000.;
+        bot.militaryReports.clear();
+        bot.reviews = {{true,1450.,1,0,{}}};
+        test.botHours = 1450;
+        test.updateBotReviews(bot);
+        if (bot.reviews.front().stage != 1 || bot.reviews.front().nextHour != 1456. ||
+            bot.militaryReports.size() != 1 || !bot.militaryReports.contains(0)) return 1;
+        test.botHours = 1456;
+        test.updateBotReviews(bot);
+        return bot.reviews.front().stage == 2 && bot.reviews.front().nextHour == 1462. &&
+            bot.militaryReports.size() == 2 && bot.militaryReports.contains(1) ? 0 : 1;
+    }
+    if (mode == "--check-bot-front-posts") {
+        World test;
+        test.size = 5;
+        test.tiles.resize(25);
+        for (auto& tile : test.tiles) tile.water = true;
+        for (const int tile : {0,1,2,3,4,24}) {
+            test.tiles[tile].water = false;
+            test.tiles[tile].owner = tile == 3 || tile == 4 ? 0 : 1;
+            test.tiles[tile].supply = .7;
+        }
+        test.capitals = {4,0};
+        test.profiles.resize(2);
+        test.diplomacy.countries.resize(2);
+        test.diplomacy.relation(0,1).war = true;
+        for (const int tile : {0,2,1,1,24}) {
+            auto& unit = test.divisions.emplace_back();
+            unit.owner = 1;
+            unit.q = tile%5;
+            unit.r = tile/5;
+            unit.organization = unit.maxOrganization = 100.;
+        }
+        test.divisions[2].route = {2};
+        test.startBots(7);
+        auto& bot = test.supplyBots.front();
+        const auto pinned = test.assignBotFront(bot,true);
+        if (pinned != std::set<int>{2} || bot.reserve != 0 ||
+            bot.frontQuotas != std::map<int,int>{{2,3}} ||
+            bot.hexAssignments != std::map<int,int>{{0,0},{1,2},{2,2},{3,2}}) return 1;
+        test.updateBots(6,nullptr);
+        if (test.divisions[3].route != std::deque<int>{2} ||
+            bot.lastOrders != std::map<int,int>{{3,6}} || !test.divisions[4].route.empty()) return 1;
+
+        World recovery;
+        recovery.size = 8;
+        recovery.tiles.resize(64);
+        for (auto& tile : recovery.tiles) tile.owner = -1;
+        for (const int tile : {0,1,32,33,48}) recovery.tiles[tile].owner = 1;
+        for (const int tile : {2,51}) recovery.tiles[tile].owner = 0;
+        recovery.tiles[0].supply = recovery.tiles[33].supply = .6;
+        recovery.profiles.resize(2);
+        recovery.capitals = {2,0};
+        recovery.diplomacy.countries.resize(2);
+        recovery.diplomacy.relation(0,1).war = true;
+        for (const int tile : {1,32,48,2}) {
+            auto& unit = recovery.divisions.emplace_back();
+            unit.owner = recovery.tiles[tile].owner;
+            unit.q = tile%8;
+            unit.r = tile/8;
+            unit.maxOrganization = 100.;
+            unit.organization = unit.owner == 1 ? 20. : 100.;
+        }
+        recovery.divisions[2].route = {49,50,51};
+        recovery.divisions[2].attackRoute = true;
+        recovery.startBots(7);
+        std::vector<World::BotMovement> orders;
+        const auto used = recovery.planBotRecovery(recovery.supplyBots.front(),true,orders);
+        if (used != std::set<int>{0,1,2} || orders.size() != 3 ||
+            orders[0].unit != 0 || orders[0].tile != 0 || !orders[0].withdraw ||
+            orders[1].unit != 2 || orders[1].tile != 48 || orders[1].withdraw ||
+            orders[2].unit != 1 || orders[2].tile != 33 || orders[2].withdraw) return 1;
+        for (const auto& order : orders)
+            if (!recovery.applyBotMovement(order)) return 1;
+        if (!(recovery.divisions[0].retreating && recovery.divisions[0].organization == 16. &&
+            recovery.divisions[0].route == std::deque<int>{0} &&
+            recovery.divisions[1].route == std::deque<int>{33} &&
+            recovery.divisions[2].route.empty() && !recovery.divisions[2].attackRoute)) return 1;
+
+        World offensive;
+        offensive.size = 5;
+        offensive.tiles.resize(25);
+        for (auto& tile : offensive.tiles) tile.water = true;
+        for (int tile : {1,6,2,3,4}) {
+            offensive.tiles[tile].water = false;
+            offensive.tiles[tile].owner = tile == 1 || tile == 6 ? 1 : 0;
+        }
+        offensive.capitals = {4,1};
+        offensive.profiles.resize(2);
+        offensive.diplomacy.countries.resize(2);
+        offensive.diplomacy.relation(0,1).war = true;
+        for (const int tile : {1,1,6,6,2}) {
+            auto& unit = offensive.divisions.emplace_back();
+            unit.owner = offensive.tiles[tile].owner;
+            unit.q = tile%5;
+            unit.r = tile/5;
+            unit.organization = unit.maxOrganization = 100.;
+            unit.combat.width = 80.;
+        }
+        offensive.startBots(7);
+        auto& attacker = offensive.supplyBots.front();
+        orders.clear();
+        offensive.planBotAttacks(attacker,{},orders);
+        if (attacker.warObjectives.at(0).anchor != 4 ||
+            attacker.warObjectives.at(0).distances != std::map<int,int>{{2,2},{3,1},{4,0}} ||
+            orders.size() != 2 || orders[0].unit != 0 || orders[1].unit != 2) return 1;
+        for (const auto& order : orders)
+            if (!order.attack || order.tile != 2 || !offensive.applyBotMovement(order)) return 1;
+        return offensive.divisions[0].route == std::deque<int>{2} && offensive.divisions[0].attackRoute &&
+            offensive.divisions[2].route == std::deque<int>{2} && offensive.divisions[2].attackRoute &&
+            offensive.divisions[1].route.empty() && offensive.divisions[3].route.empty() ? 0 : 1;
+    }
+    if (mode == "--check-bot-regions") {
+        World test;
+        test.size = 8;
+        test.tiles.resize(64);
+        test.tiles.back().water = true;
+        auto water = [&](int tile) { return test.airDefenseWater(tile); };
+        test.botGeography.build(test.size,water,[&](int tile,auto visit) { test.forFrontNeighbor(tile,visit); });
+        auto regions = test.botGeography.profiles(test.tiles,0,0,water);
+        if (regions.size() != 2 || regions[0].base != 0 || regions[1].base != 1 ||
+            regions[0].tiles.size() != 48 || regions[1].tiles.size() != 15) return 1;
+        constexpr std::array first{0,8,1,17,16,9,2,25,24,18,10,3};
+        constexpr std::array second{60,53,61,45,54};
+        if (!std::equal(first.begin(),first.end(),regions[0].tiles.begin()) ||
+            !std::equal(second.begin(),second.end(),regions[1].tiles.begin())) return 1;
+
+        for (int index : {0,1,2}) {
+            auto& tile = test.tiles[index];
+            tile.owner = 1;
+            tile.population = 100000;
+            tile.supply = .6;
+        }
+        test.tiles[0].buildings[hoi5::industry] = {.5,.5};
+        test.tiles[0].industries = {"metallurgy"};
+        regions = test.botGeography.profiles(test.tiles,1,0,water);
+        if (regions.size() != 1) return 1;
+        const auto& profile = regions.front();
+        if (profile.tiles != std::vector<int>{0,1,2} || profile.borders != profile.tiles ||
+            profile.population != 300000 || std::abs(profile.supply-.6) > 1e-12 ||
+            profile.buildings[hoi5::industry] != .25 || profile.importance != 34.25 ||
+            hoi5::value(profile.output,"steel") != 1300.) return 1;
+
+        test.profiles.resize(2);
+        test.diplomacy.countries.resize(2);
+        test.divisions.resize(2);
+        auto& friendly = test.divisions[0];
+        friendly.owner = 1;
+        friendly.combat.strength = 50.;
+        friendly.organization = 50.;
+        friendly.maxOrganization = 100.;
+        friendly.lastSupplyRatio = .5;
+        friendly.speed = 1.35;
+        auto& enemy = test.divisions[1];
+        enemy.q = enemy.r = 1;
+        enemy.organization = enemy.maxOrganization = 100.;
+        hoi5::BotSupplyState bot{1,0.};
+        bot.regions = regions;
+        test.updateBotRegionalMilitary(bot);
+        const auto& military = bot.regions.front();
+        if (military.military != hoi5::BotMilitary{10000.,4.640625,5.484375,1.6875,1.,.84375,.675,.2109375} ||
+            military.threat != 0. || military.desiredDefense != 0.) return 1;
+        test.diplomacy.relation(0,1).war = true;
+        test.updateBotRegionalMilitary(bot);
+        if (military.threat != 22. || std::abs(military.desiredDefense-25.3) > 1e-12) return 1;
+        enemy.organization = 0.;
+        test.updateBotRegionalMilitary(bot);
+        if (military.threat != 5.5 || military.desiredDefense != 12.) return 1;
+
+        test.tiles[1].owner = 0;
+        regions = test.botGeography.profiles(test.tiles,1,0,water);
+        return regions.size() == 2 && regions[0].base == 0 && regions[1].base == 0 &&
+            regions[0].owner == 1 && regions[1].owner == 1 &&
+            regions[0].anchor == 0 && regions[1].anchor == 2 &&
+            regions[0].tiles == std::vector<int>{0} && regions[1].tiles == std::vector<int>{2} ? 0 : 1;
+    }
     if (mode == "--check-supply-parity") {
         constexpr std::array points{hoi5::BotSupplyPoint{2,3.,.5,.1},hoi5::BotSupplyPoint{6,2.,1.,.2}};
         constexpr std::array candidates{hoi5::BotSupplyCandidate{1,.8,1.},hoi5::BotSupplyCandidate{6,.7,.85}};
@@ -4941,6 +6223,11 @@ int main(int argc, char** argv) try {
             bot.size = 3;
             bot.tiles.resize(9);
             bot.profiles.resize(2,{1.,1000000.,20000000.});
+            bot.stockpiles.resize(2);
+            bot.capacities.resize(2);
+            for (const auto key : World::botDepotResources)
+                bot.capacities[1][hoi5::storageBucket(key)] = 100000.;
+            bot.treasury.resize(2);
             bot.diplomacy.countries.resize(2);
             bot.construction.queues.resize(2);
             bot.capitals = {0,1};
@@ -4948,11 +6235,69 @@ int main(int argc, char** argv) try {
             auto& division = bot.divisions.emplace_back();
             division.q = division.owner = 1;
             bot.startBots(7);
+            bot.profiles[1].budget = 5000000.;
             bot.updateBots(24,nullptr);
+            auto& tasks = bot.supplyBots.front().tasks;
+            if (!bot.construction.queues[1].empty() || tasks.size() != 1 ||
+                tasks.front().status != hoi5::BotTaskStatus::blocked || tasks.front().retryHour != 48) return 1;
+            bot.profiles[1].budget = 20000000.;
+            bot.updateBots(23,nullptr);
+            if (!bot.construction.queues[1].empty()) return 1;
+            bot.updateBots(1,nullptr);
             if (!bot.construction.queues[0].empty() || bot.construction.queues[1].size() != 1 ||
-                bot.construction.queues[1].front().tile != 1) return 1;
+                bot.construction.queues[1].front().tile != 1 ||
+                tasks.front().status != hoi5::BotTaskStatus::executing || tasks.size() < 2) return 1;
+            bot.updateBots(1,nullptr);
+            if (tasks.size() != 5 || bot.market.contractAmount(1,"construction_goods",true) != 325. ||
+                bot.construction.queues[1].size() != 1 ||
+                std::next(tasks.begin())->status != hoi5::BotTaskStatus::waitingMarket) return 1;
+            ++bot.botMarketTick;
+            bot.market.last.fills = {{1,std::nullopt,"construction_goods",10.,1.}};
+            bot.updateBots(1,nullptr);
+            if (std::next(tasks.begin())->status != hoi5::BotTaskStatus::succeeded ||
+                std::next(tasks.begin(),2)->status != hoi5::BotTaskStatus::failed) return 1;
+        }
+        {
+            World bot;
+            bot.size = 4;
+            bot.tiles.resize(16);
+            for (auto& tile : bot.tiles) tile.owner = -1;
+            for (int index : {0,1,2}) {
+                bot.tiles[index].owner = 1;
+                bot.tiles[index].supply = .65;
+            }
+            bot.tiles[3].owner = 0;
+            bot.capitals = {3,0};
+            bot.profiles.resize(2,{1.,1000000.,20000000.});
+            bot.diplomacy.countries.resize(2);
+            bot.stockpiles.resize(2);
+            bot.capacities.resize(2);
+            bot.treasury.resize(2);
+            bot.construction.queues.resize(2);
+            for (const auto& [key,price] : hoi5::TRADE_BASE_PRICES) {
+                bot.stockpiles[1][key] = 10000.;
+                bot.capacities[1][hoi5::storageBucket(key)] = 1000000.;
+            }
+            bot.air.defense.push_back({1,0,1,16});
+            auto& division = bot.divisions.emplace_back();
+            division.owner = 1;
+            division.q = 2;
+            bot.startBots(7);
+            bot.air.defense.clear();
+            bot.diplomacy.goals[{1,0}] = 30;
+            bot.updateBots(24,nullptr);
+            const auto project = bot.air.defenseReplacements.find(1);
+            if (project == bot.air.defenseReplacements.end() || project->second.type != 1 ||
+                bot.profiles[1].budget != 18800000. || bot.stockpiles[1]["old_light_aa_artillery"] != 9998. ||
+                !bot.construction.queues[1].empty()) return 1;
+            bot.air.advanceDefenseReplacements(bot.tiles,bot.capitals,48,[](int) { return false; },
+                [&](int owner) { return bot.botForwardDefenseSites(owner); },[](int,int) {});
+            if (bot.air.defense.size() != 1 || bot.air.defense.front().tile != 1) return 1;
+            bot.diplomacy.relation(1,0).war = true;
             bot.updateBots(24,nullptr);
             if (bot.construction.queues[1].size() != 1) return 1;
+            const auto& fort = bot.construction.queues[1].front();
+            if (fort.tile != 2 || hoi5::constructionSpecs[fort.spec].building != hoi5::fortification) return 1;
         }
         std::vector<Tile> tiles(4);
         tiles[0].owner = 1;

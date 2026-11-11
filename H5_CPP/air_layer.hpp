@@ -117,30 +117,43 @@ struct AirLayer {
     struct DefenseReplacement { int type,remaining; };
     std::map<int,DefenseReplacement> defenseReplacements;
 
+    struct DefenseQuote {
+        double money;
+        std::vector<std::pair<std::string_view,double>> resources;
+    };
+
+    static DefenseQuote defenseQuote(int type) {
+        constexpr std::array prices{500000.,1200000.,2500000.,5000000.,1000000.};
+        DefenseQuote quote{prices[type],{{"steel",80},{"construction_goods",200},{"electronics",40},
+            {"machinery",15},{"vehicles",2}}};
+        const auto& unit = defenseClasses[type];
+        const bool shortRange = unit.key == "short_range_aa";
+        if (unit.ammo > 0) quote.resources.emplace_back(shortRange ? "light_aa_ammo" : "anti_air_ammo",unit.ammo);
+        if (shortRange) quote.resources.emplace_back("old_light_aa_artillery",2);
+        return quote;
+    }
+
     template<class Stockpile>
     std::string_view enqueueDefense(int owner,int type,double& budget,Stockpile& stock) {
         if (defenseReplacements.contains(owner)) return "ПВО уже производится";
-        constexpr std::array prices{500000.,1200000.,2500000.,5000000.,1000000.};
-        if (type < 0 || type >= int(prices.size()) || budget < prices[type])
+        if (type < 0 || type >= int(std::size(defenseClasses)))
             return "Недостаточно средств или неизвестный тип ПВО";
-        Stockpile materials{{"steel",80},{"construction_goods",200},{"electronics",40},{"machinery",15},{"vehicles",2}};
-        const auto& unit = defenseClasses[type];
-        if (unit.ammo > 0) materials[unit.key == "short_range_aa" ? "light_aa_ammo" : "anti_air_ammo"] = unit.ammo;
-        if (unit.key == "short_range_aa") materials["old_light_aa_artillery"] = 2;
-        for (const auto& [key,amount] : materials) {
+        const auto quote = defenseQuote(type);
+        if (budget < quote.money) return "Недостаточно средств или неизвестный тип ПВО";
+        for (const auto& [key,amount] : quote.resources) {
             const auto available = stock.find(key);
             if (available == stock.end() || available->second < amount)
                 return "Не хватает материалов и оснащения для ПВО";
         }
         defenseReplacements.emplace(owner,DefenseReplacement{type,48});
-        budget -= prices[type];
-        for (const auto& [key,amount] : materials) stock.at(key) -= amount;
+        budget -= quote.money;
+        for (const auto& [key,amount] : quote.resources) stock.at(key) -= amount;
         return "Оплачено производство ПВО: 48 часов";
     }
 
-    template<class Tile,class InBattle,class Completed>
+    template<class Tile,class InBattle,class ForwardSites,class Completed>
     void advanceDefenseReplacements(const std::vector<Tile>& tiles,const std::vector<int>& capitals,int hours,
-                                    InBattle inBattle,Completed completed) {
+                                    InBattle inBattle,ForwardSites forwardSites,Completed completed) {
         for (auto it = defenseReplacements.begin(); it != defenseReplacements.end();) {
             const int owner = it->first;
             auto& project = it->second;
@@ -150,11 +163,16 @@ struct AirLayer {
                 continue;
             }
             int site = -1;
-            double best = 0;
+            const auto rear = forwardSites(owner);
+            std::tuple<bool,double,int> best{};
             for (int i = 0; i < int(tiles.size()); ++i) {
                 const auto& tile = tiles[i];
-                if (tile.owner != owner || tile.water || tile.supply < .25 || inBattle(i)) continue;
-                const double score = tile.supply+(owner < int(capitals.size()) && capitals[owner] == i);
+                if (tile.owner != owner || tile.water || tile.natural.water > .55 || tile.supply < .25 || inBattle(i)) continue;
+                const auto preferred = rear.find(i);
+                const bool forward = preferred != rear.end();
+                const double supply = tile.supply+(!forward && owner < int(capitals.size()) && capitals[owner] == i);
+                const int proximity = forward ? preferred->second : 0;
+                const auto score = std::tuple{forward,supply,proximity};
                 if (score > best) {
                     best = score;
                     site = i;
