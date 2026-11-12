@@ -67,6 +67,7 @@ struct BotSupplyState {
     int expansionTarget = -1, offensiveFocus = -1, reserve = -1;
     bool urgent = false;
     std::map<int,int> hexAssignments, frontQuotas, lastOrders;
+    std::map<int,int> armyIds;
     std::set<int> resting;
     PythonRandom rng{0};
     double aggression{};

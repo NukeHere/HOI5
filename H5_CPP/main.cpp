@@ -1515,7 +1515,7 @@ struct World {
         if (!std::ranges::any_of(selection,[&](int index) {
             return selectableDivision(owner,index) && divisions[index].armyId == 0;
         })) return 0;
-        const int id = int(armies.size())+1;
+        const int id = armies.empty() ? 1 : std::ranges::max(armies,{},&Army::id).id+1;
         const int number = 1+int(std::ranges::count(armies,owner,&Army::owner));
         armies.push_back({id,owner,"Армия "+std::to_string(number)});
         addDivisionsToArmy(owner,id,selection);
@@ -2015,6 +2015,8 @@ struct World {
         if (hours <= 0) return;
         for (auto& army : armies) {
             if (!army.executing) continue;
+            if (std::ranges::any_of(supplyBots,[&](const auto& bot) { return bot.owner == army.owner; }))
+                continue;
             army.reviewHours += hours;
             if (army.reviewHours < 6) continue;
             army.reviewHours = 0;
@@ -3949,6 +3951,84 @@ struct World {
 
     struct BotMovement { int unit, tile; bool withdraw = false, attack = false; };
 
+    void synchronizeBotArmies(hoi5::BotSupplyState& bot,bool atWar) {
+        const int owner = bot.owner;
+        const auto position = [&](int index) { return divisions[index].r*size+divisions[index].q; };
+        const auto opponentAt = [&](int post) {
+            int opponent = -1;
+            for (const int neighbor : botGeography.adjacent(post)) {
+                const int other = tiles[neighbor].owner;
+                if (other < 0 || other == owner) continue;
+                if (diplomacy.hostile(owner,other) || diplomacy.goals.contains({owner,other}) ||
+                    diplomacy.goals.contains({other,owner})) {
+                    opponent = other;
+                    if (diplomacy.hostile(owner,other)) break;
+                }
+            }
+            return opponent;
+        };
+        std::map<int,std::vector<int>> groups;
+        for (int index = 0; index < int(divisions.size()); ++index) {
+            auto& unit = divisions[index];
+            if (unit.owner != owner) continue;
+            unit.armyId = 0;
+            if (unit.combat.strength <= 0.) continue;
+            const auto assigned = bot.hexAssignments.find(index);
+            const int opponent = assigned == bot.hexAssignments.end() ? -1 : opponentAt(assigned->second);
+            groups[opponent].push_back(index);
+        }
+        std::set<int> retained;
+        std::map<int,int> nextIds;
+        int number = 0;
+        for (auto& [opponent,members] : groups) {
+            std::ranges::sort(members,{},[&](int index) {
+                const auto assigned = bot.hexAssignments.find(index);
+                return std::tuple{assigned == bot.hexAssignments.end() ? std::numeric_limits<int>::max() :
+                    assigned->second,position(index),index};
+            });
+            for (int offset = 0,chunk = 0; offset < int(members.size()); offset += armyCapacity,++chunk) {
+                const int key = (opponent+2)*1000+chunk;
+                int id = 0;
+                if (const auto existing = bot.armyIds.find(key); existing != bot.armyIds.end() &&
+                    std::ranges::any_of(armies,[&](const Army& army) {
+                        return army.id == existing->second && army.owner == owner;
+                    })) id = existing->second;
+                const int end = std::min(offset+armyCapacity,int(members.size()));
+                std::set<int> selection(members.begin()+offset,members.begin()+end);
+                if (!id) id = createArmy(owner,selection);
+                else addDivisionsToArmy(owner,id,selection);
+                auto army = std::ranges::find(armies,id,&Army::id);
+                if (!id || army == armies.end()) continue;
+                retained.insert(id);
+                nextIds[key] = id;
+                army->name = opponent < 0 ? "Резервная армия "+std::to_string(++number) :
+                    "Фронтовая армия "+std::to_string(++number);
+                army->front.clear();
+                for (int index : selection)
+                    if (const auto assigned = bot.hexAssignments.find(index); assigned != bot.hexAssignments.end() &&
+                        tiles[assigned->second].owner == owner)
+                        army->front.push_back(assigned->second);
+                std::ranges::sort(army->front);
+                army->front.erase(std::unique(army->front.begin(),army->front.end()),army->front.end());
+                army->offensive.clear();
+                if (atWar && opponent >= 0) for (int post : army->front)
+                    for (int neighbor : botGeography.adjacent(post))
+                        if (tiles[neighbor].owner == opponent && !airDefenseWater(neighbor))
+                            army->offensive.push_back(neighbor);
+                std::ranges::sort(army->offensive);
+                army->offensive.erase(std::unique(army->offensive.begin(),army->offensive.end()),army->offensive.end());
+                army->borderOwner = opponent;
+                army->automaticLine = false;
+                army->executing = true;
+                army->reviewHours = 0;
+            }
+        }
+        std::erase_if(armies,[&](const Army& army) {
+            return army.owner == owner && !retained.contains(army.id);
+        });
+        bot.armyIds = std::move(nextIds);
+    }
+
     bool applyBotMovement(const BotMovement& order) {
         auto& unit = divisions[order.unit];
         const int origin = unit.r*size+unit.q;
@@ -4255,7 +4335,7 @@ struct World {
             orders.insert(orders.end(),package->begin(),package->end());
     }
 
-    void planBotFrontMoves(hoi5::BotSupplyState& bot,std::vector<BotMovement>& orders) const {
+    void planBotFrontMoves(hoi5::BotSupplyState& bot,std::vector<BotMovement>& orders) {
         const bool atWar = botAtWar(bot.owner);
         if (!atWar && botHours < bot.nextPeaceDeployment) return;
         if (!atWar) bot.nextPeaceDeployment = botHours+48;
@@ -4269,6 +4349,7 @@ struct World {
         }
         auto used = planBotRecovery(bot,atWar,orders);
         const auto pinned = assignBotFront(bot,atWar,used);
+        synchronizeBotArmies(bot,atWar);
         for (const auto& [index,tile] : bot.hexAssignments) {
             const auto& unit = divisions[index];
             if (pinned.contains(index) || tile == unit.r*size+unit.q ||
@@ -6109,6 +6190,15 @@ int main(int argc, char** argv) try {
         test.updateBots(6,nullptr);
         if (test.divisions[3].route != std::deque<int>{2} ||
             bot.lastOrders != std::map<int,int>{{3,6}} || !test.divisions[4].route.empty()) return 1;
+        if (bot.armyIds.size() != 2 || test.armies.size() != 2 ||
+            std::ranges::any_of(std::span(test.divisions).first(5),[](const auto& unit) { return unit.armyId == 0; }))
+            return 1;
+        const auto frontArmy = std::ranges::find_if(test.armies,[](const auto& army) { return army.borderOwner == 0; });
+        if (frontArmy == test.armies.end() || !frontArmy->executing || frontArmy->front.empty() ||
+            test.armyMembers(1,frontArmy->id).empty()) return 1;
+        const auto stableArmyIds = bot.armyIds;
+        test.synchronizeBotArmies(bot,true);
+        if (bot.armyIds != stableArmyIds || test.armies.size() != 2) return 1;
 
         World recovery;
         recovery.size = 8;
