@@ -22,7 +22,7 @@ struct BotSupplyChoice { double gain; int tile; };
 enum class BotTaskStatus { planned, blocked, executing, waitingMarket, succeeded, failed, cancelled };
 
 struct BotTask {
-    enum class Kind { supply, buy, fortify, rebuildDefense, recruit, air };
+    enum class Kind { supply, buy, sell, build, specialize, fortify, rebuildDefense, recruit, air };
     Kind kind;
     int createdHour;
     int tile = -1;
@@ -33,6 +33,8 @@ struct BotTask {
     double targetCoverage = 0.;
     int defenseType = -1;
     int trainingType = -1;
+    int buildingSpec = -1;
+    std::string_view sector;
 
     bool pending() const { return status == BotTaskStatus::planned || status == BotTaskStatus::blocked; }
     bool active() const { return pending() || status == BotTaskStatus::executing || status == BotTaskStatus::waitingMarket; }
@@ -76,6 +78,7 @@ struct BotSupplyState {
     double nextWeekly{}, nextMonthly{};
     double nextRecruitment{};
     double nextAir{};
+    double nextEconomy{};
     BotCourseChoice course{BotCourse::development,-1};
     int courseSince{};
     std::array<double,5> courseBias{};
