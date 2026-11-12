@@ -3759,6 +3759,34 @@ struct World {
         return reserve;
     }
 
+    void scheduleBotMobilizationStock(hoi5::BotSupplyState& bot) {
+        using Task = hoi5::BotTask;
+        const int owner = bot.owner;
+        const auto reserve = botMilitaryReserve(owner,true);
+        const auto contracts = market.contracts;
+        const double limit = hoi5::Market::monthlyCapacity(tiles,profiles)[owner];
+        for (const auto& order : contracts) {
+            if (order.country == owner && !order.buy && hoi5::value(reserve,order.resource) > 0 &&
+                market.changeContract(owner,order.resource,false,-order.amount,limit))
+                botBalanceRefresh.insert(owner);
+        }
+        const auto free = botAvailableResources(owner);
+        std::vector<std::tuple<double,std::string_view,double>> shortages;
+        for (const auto& [key,amount] : reserve) {
+            const double available = hoi5::value(free,key);
+            if (amount > std::max(0.,available))
+                shortages.emplace_back((amount-available)/amount,key,amount-available);
+        }
+        std::ranges::sort(shortages,std::greater{});
+        for (std::size_t i = 0; i < std::min<std::size_t>(4,shortages.size()); ++i) {
+            const auto& [priority,key,missing] = shortages[i];
+            if (std::ranges::any_of(bot.tasks,[&](const Task& task) {
+                return task.kind == Task::Kind::buy && task.resource == key && task.active();
+            })) continue;
+            addBotTask(bot,{Task::Kind::buy,botHours,-1,key,missing});
+        }
+    }
+
     int botTrainingSite(int owner) const {
         int best = -1;
         for (int tile = 0; tile < int(tiles.size()); ++tile)
@@ -3766,9 +3794,11 @@ struct World {
         return best;
     }
 
-    void scheduleBotRecruitment(hoi5::BotSupplyState& bot) {
-        if (botHours < bot.nextRecruitment) return;
-        bot.nextRecruitment = botHours+168;
+    void scheduleBotRecruitment(hoi5::BotSupplyState& bot,bool mobilizing = false) {
+        if (!mobilizing) {
+            if (botHours < bot.nextRecruitment) return;
+            bot.nextRecruitment = botHours+168;
+        }
         const int owner = bot.owner, site = botTrainingSite(owner);
         if (site < 0 || std::ranges::any_of(bot.tasks,[](const auto& task) {
             return task.kind == hoi5::BotTask::Kind::recruit && task.active();
@@ -3779,7 +3809,7 @@ struct World {
         for (int type = 0; type < baseDivisionTypes; ++type) {
             const auto& design = trainingDesign(type);
             if (trainingCost(design) > money || design.manpower > manpowerReserve[owner]) continue;
-            const auto reserve = botMilitaryReserve(owner,botPreparationTarget(owner) >= 0,type);
+            const auto reserve = botMilitaryReserve(owner,false,type);
             double coverage = std::numeric_limits<double>::infinity();
             std::set<std::string_view> keys;
             for (const auto& [key,amount] : reserve) keys.insert(key);
@@ -3794,17 +3824,14 @@ struct World {
         for (const auto& option : options) if (option.first >= 1.) covered.push_back(option);
         const auto* type = hoi5::botChooseClose(bot.rng,covered.empty() ? options : covered);
         if (!type) return;
-        const auto reserve = botMilitaryReserve(owner,botPreparationTarget(owner) >= 0,*type);
+        const auto reserve = botMilitaryReserve(owner,false,*type);
         std::vector<std::pair<double,std::string_view>> shortages;
-        std::set<std::string_view> keys;
-        for (const auto& [key,amount] : reserve) keys.insert(key);
-        for (const auto& [key,amount] : trainingDesign(*type).capacity) keys.insert(key);
-        for (auto key : keys) {
-            const double missing = hoi5::value(reserve,key)+hoi5::value(trainingDesign(*type).capacity,key)-
+        for (const auto& [key,amount] : reserve) {
+            const double missing = amount+hoi5::value(trainingDesign(*type).capacity,key)-
                 hoi5::value(free,key);
             if (missing > 0) shortages.emplace_back(missing,key);
         }
-        std::ranges::sort(shortages,[](const auto& a,const auto& b) { return a.first > b.first; });
+        std::ranges::sort(shortages,std::greater{});
         for (std::size_t i = 0; i < std::min<std::size_t>(4,shortages.size()); ++i)
             addBotTask(bot,{hoi5::BotTask::Kind::buy,botHours,-1,shortages[i].second,shortages[i].first});
         if (!shortages.empty()) return;
@@ -3959,6 +3986,15 @@ struct World {
             std::set<int> area(assigned->tiles.begin(),assigned->tiles.end());
             for (const int tile : assigned->borders) for (const int next : botGeography.adjacent(tile))
                 if (tiles[next].owner >= 0 && diplomacy.hostile(owner,tiles[next].owner)) area.insert(next);
+            const int casType = wing.missionType(0);
+            const auto addSupport = [&](int tile) {
+                if (hoi5::supplyHexDistance(center,tile,size) <= 6 && botAirReach(wing.base,tile,casType))
+                    area.insert(tile);
+            };
+            for (const auto& [tile,battle] : battles)
+                if (battle.attacker == owner || battle.defender == owner) addSupport(tile);
+            for (const auto& unit : divisions)
+                if (unit.owner == owner && unit.attackRoute && !unit.route.empty()) addSupport(unit.route.back());
             std::vector<std::pair<double,int>> strategic;
             for (int tile = 0; tile < int(tiles.size()); ++tile) {
                 if (tiles[tile].owner < 0 || !diplomacy.hostile(owner,tiles[tile].owner)) continue;
@@ -4191,6 +4227,13 @@ struct World {
             })) front.push_back(tile);
         }
         if (front.empty()) return false;
+        const auto goal = diplomacy.goals.find({owner,target});
+        if (goal != diplomacy.goals.end() && diplomacy.day < goal->second+14 &&
+            std::ranges::any_of(training,[&](const auto& project) {
+                if (project.country != owner) return false;
+                const int remaining = trainingHours(trainingDesign(project.type))-project.hours;
+                return remaining > 0 && remaining <= 14*24;
+            })) return false;
         std::set<int> near(front.begin(),front.end());
         for (const int tile : front)
             near.insert(botGeography.adjacent(tile).begin(),botGeography.adjacent(tile).end());
@@ -5068,7 +5111,9 @@ struct World {
                 }
                 {
                     hoi5::DebugMeasure recruitment(debug,"ai_recruitment_planning");
-                    scheduleBotRecruitment(bot);
+                    const bool mobilizing = botPreparationTarget(bot.owner) >= 0;
+                    if (mobilizing) scheduleBotMobilizationStock(bot);
+                    scheduleBotRecruitment(bot,mobilizing);
                 }
                 {
                     hoi5::DebugMeasure aviation(debug,"ai_air_planning");
@@ -6948,6 +6993,19 @@ int main(int argc, char** argv) try {
         test.updateBots(6,nullptr);
         if (test.divisions[3].route != std::deque<int>{2} ||
             bot.lastOrders != std::map<int,int>{{3,6}} || !test.divisions[4].route.empty()) return 1;
+        // A reassessment after the order cooldown must still preserve an in-flight reinforcement.
+        {
+            auto ongoing = test;
+            auto& reinforcement = ongoing.divisions[3];
+            reinforcement.progress = .5;
+            ongoing.botHours += 24;
+            std::vector<World::BotMovement> reassigned;
+            auto& controller = ongoing.supplyBots.front();
+            ongoing.planBotFrontMoves(controller,reassigned);
+            if (std::ranges::any_of(reassigned,[](const auto& order) { return order.unit == 3; }) ||
+                controller.hexAssignments.at(3) != 2 || controller.lastOrders.at(3) != 6 ||
+                reinforcement.route != std::deque<int>{2} || reinforcement.progress != .5) return 1;
+        }
         if (bot.armyIds.size() != 2 || test.armies.size() != 2 ||
             std::ranges::any_of(std::span(test.divisions).first(5),[](const auto& unit) { return unit.armyId == 0; }))
             return 1;
@@ -7026,6 +7084,36 @@ int main(int argc, char** argv) try {
             offensive.divisions[2].route == std::deque<int>{2} && offensive.divisions[2].attackRoute &&
             offensive.divisions[1].route.empty() && offensive.divisions[3].route.empty() ? 0 : 1;
     }
+    if (mode == "--check-bot-mobilization") {
+        auto test = generateWorld(20,2,918273,1);
+        test.startBots(918273);
+        auto& bot = test.supplyBots.front();
+        const int owner = bot.owner;
+        auto design = hoi5::divisionTemplates[0];
+        design.capacity = {{"steel",200},{"vehicles",200},{"weapons",200},
+            {"field_supplies",200},{"refined_fuel",200},{"small_arms_ammo",200}};
+        design.use.clear();
+        test.divisions.assign(1,Division{});
+        test.divisions.front().owner = owner;
+        test.divisions.front().design = &design;
+        test.air.defense.clear();
+        test.training.clear();
+        test.construction.queues[owner].clear();
+        test.stockpiles[owner] = {{"steel",10},{"vehicles",20},{"weapons",30},
+            {"field_supplies",40},{"refined_fuel",50},{"small_arms_ammo",60}};
+        test.market.contracts = {{owner,"steel",false,10},{owner,"coal",false,10}};
+        bot.tasks.clear();
+        auto& pending = bot.tasks.emplace_back(hoi5::BotTask::Kind::buy,0,-1,"vehicles",12);
+        pending.status = hoi5::BotTaskStatus::waitingMarket;
+        test.scheduleBotMobilizationStock(bot);
+        test.scheduleBotMobilizationStock(bot);
+        std::vector<std::pair<std::string_view,double>> purchases;
+        for (const auto& task : bot.tasks) purchases.emplace_back(task.resource,task.amount);
+        const std::vector<std::pair<std::string_view,double>> expected{
+            {"vehicles",12},{"steel",90},{"weapons",70},{"field_supplies",60}};
+        return purchases == expected && test.market.contractAmount(owner,"steel",false) == 0 &&
+            test.market.contractAmount(owner,"coal",false) == 10 && test.botBalanceRefresh.contains(owner) ? 0 : 1;
+    }
     if (mode == "--check-bot-recruitment") {
         auto test = generateWorld(20,2,918273,1);
         test.startBots(918273);
@@ -7048,8 +7136,11 @@ int main(int argc, char** argv) try {
         bot.tasks.clear();
         for (auto& [key,amount] : test.stockpiles[owner]) amount = 0.;
         test.manpowerReserve[owner] = 20000.;
-        bot.nextRecruitment = 0;
+        bot.nextRecruitment = 168;
         test.scheduleBotRecruitment(bot);
+        if (!bot.tasks.empty()) return 1;
+        test.scheduleBotRecruitment(bot,true);
+        if (bot.nextRecruitment != 168) return 1;
         return std::ranges::any_of(bot.tasks,[](const auto& task) {
             return task.kind == hoi5::BotTask::Kind::buy && task.amount > 0;
         }) && std::ranges::none_of(bot.tasks,[](const auto& task) {
@@ -13104,8 +13195,32 @@ int main(int argc, char** argv) try {
                     box(window,{x+3.f,y+3.f},{50,13},{18,24,27,235});
                     constexpr std::array status{sf::Color{122,54,58},sf::Color{56,116,68},sf::Color{78,110,70}};
                     for (int j = 0; j < int(status.size()); ++j) box(window,{x+7.f+16*j,y+6.f},{12,8},status[j],{24,31,34});
-                    box(window,{x+6.f,y+19.f},{32,32},{34,42,48,230},{92,108,122});
-                    battleLabel(window,cardFont,add ? "+" : std::to_string(i+1),{x+22.f,y+35.f},25,{210,220,226},.5f);
+                    constexpr float portraitSize = 32.f;
+                    const sf::Vector2f portrait{x+6.f,y+20.f};
+                    if (add) {
+                        box(window,portrait,{portraitSize,portraitSize},{34,42,48,230},{92,108,122});
+                        battleLabel(window,cardFont,"+",portrait+sf::Vector2f{16,15},24,{210,220,226},.5f);
+                    } else {
+                        const std::array<std::array<sf::Color,3>,3> palettes{{
+                            {{{116,91,68},{214,182,145},{36,42,34}}},
+                            {{{64,70,74},{204,166,126},{82,28,28}}},
+                            {{{70,62,54},{190,148,112},{44,34,28}}}
+                        }};
+                        const auto& [background,skin,uniform] = palettes[i%palettes.size()];
+                        box(window,portrait,{portraitSize,portraitSize},background,{34,42,44});
+                        sf::CircleShape face(portraitSize*.20f);
+                        face.setOrigin({face.getRadius(),face.getRadius()});
+                        face.setPosition(portrait+sf::Vector2f{.50f,.38f}*portraitSize);
+                        face.setFillColor(skin);
+                        window.draw(face);
+                        box(window,portrait+sf::Vector2f{.28f,.58f}*portraitSize,
+                            sf::Vector2f{.44f,.30f}*portraitSize,uniform);
+                        box(window,portrait+sf::Vector2f{.30f,.16f}*portraitSize,
+                            sf::Vector2f{.40f,.10f}*portraitSize,uniform);
+                        box(window,portrait+sf::Vector2f{.43f,.36f}*portraitSize,{.04f*portraitSize,1},{32,30,26});
+                        box(window,portrait+sf::Vector2f{.53f,.36f}*portraitSize,{.04f*portraitSize,1},{32,30,26});
+                        box(window,portrait+sf::Vector2f{.44f,.46f}*portraitSize,{.12f*portraitSize,1},{96,54,42});
+                    }
                     box(window,{x+5.f,y+54.f},{46,15},{12,17,19,235});
                     if (add) armyCommandHits.push_back({{{x,y},{56,72}},[&] {
                         const int id = world.createArmy(0,selectedDivisions);
@@ -13118,7 +13233,8 @@ int main(int argc, char** argv) try {
                         armyCommandHits.clear();
                     }});
                     else {
-                        battleLabel(window,cardFont,std::to_string(members.size())+"/20",{x+28.f,y+61.f},13,sf::Color::White,.5f);
+                        battleLabel(window,cardFont,std::to_string(members.size())+"/"+std::to_string(World::armyCapacity),
+                            {x+28.f,y+61.f},13,sf::Color::White,.5f);
                         armyCommandHits.push_back({{{x,y},{56,72}},selectArmy(id)});
                     }
                 }
