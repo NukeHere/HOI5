@@ -10,6 +10,7 @@ struct Market {
     static constexpr double buyMarkup = 1.08, sellMarkdown = .92;
     static constexpr double sellCapacityMultiplier = 2.;
     Stockpile prices, previousPrices, shocks;
+    std::vector<Stockpile> countryPrices, countryPreviousPrices, countryShocks, countryDemand, countrySupply;
     std::size_t revision = 0;
     Stockpile demand, supply, externalDemand, externalSupply;
     std::map<std::string_view,std::deque<double>> history;
@@ -23,6 +24,13 @@ struct Market {
     double priceChange(std::string_view key) const { return price(key)/previousPrice(key)-1; }
 
     double unitPrice(std::string_view key,bool buy) const { return price(key)*(buy ? buyMarkup : sellMarkdown); }
+    double countryPrice(int country,std::string_view key) const {
+        return country >= 0 && country < int(countryPrices.size())
+            ? std::max(.01,value(countryPrices[country],key,price(key))) : price(key);
+    }
+    double unitPrice(int country,std::string_view key,bool buy) const {
+        return countryPrice(country,key)*(buy ? buyMarkup : sellMarkdown);
+    }
 
     double contractAmount(int country,std::string_view resource,bool buy) const {
         double amount = 0.;
@@ -80,39 +88,70 @@ struct Market {
         return normalized;
     }
 
-    void updatePrices(const std::vector<MarketOrder>& orders, const Stockpile& quotas) {
-        previousPrices = prices;
-        demand = supply = externalDemand = externalSupply = quotas;
+    void updatePriceBook(Stockpile& current,Stockpile& previous,Stockpile& shockBook,
+                         const Stockpile& bookDemand,const Stockpile& bookSupply) {
+        previous = current;
         Stockpile next;
-        for (const auto& order : orders)
-            (order.buy ? demand : supply)[order.resource] += order.amount;
-        for (const auto& [key, quota] : quotas) {
-            const double baseline = base(key);
-            const double totalDemand = demand[key], totalSupply = supply[key];
+        for (const auto& [key, baseline] : TRADE_BASE_PRICES) {
+            const double totalDemand = value(bookDemand,key), totalSupply = value(bookSupply,key);
             const double imbalance = (totalDemand-totalSupply)/std::max(1.,std::min(totalDemand,totalSupply));
             const double cap = MARKET_MAX_WEEKLY_PRICE_MOVE;
-            const double move = std::clamp(imbalance*.10*value(MARKET_RESOURCE_VOLATILITY,key,1),-cap,cap);
-            double& shock = shocks[key];
+            const double move = std::clamp(imbalance*MARKET_PRICE_ELASTICITY*
+                value(MARKET_RESOURCE_VOLATILITY,key,1),-cap,cap);
+            double& shock = shockBook[key];
             shock = std::clamp(shock*MARKET_SHOCK_DECAY + move*std::max(0.,MARKET_SHOCK_FACTOR-1),-cap,cap);
             const double target = baseline*std::max(.25,1+move+shock);
-            next[key] = std::clamp(price(key)+(target-price(key))*MARKET_PRICE_SMOOTHING,baseline*.25,baseline*4);
+            const double old = std::max(.01,value(current,key,baseline));
+            next[key] = std::clamp(old+(target-old)*MARKET_PRICE_SMOOTHING,baseline*.25,baseline*4);
         }
-        prices = next;
+        current = next;
+        auto linked = current;
         for (const auto& [key, sources] : linkedPrices) {
-            if (!next.contains(key)) continue;
+            if (!current.contains(key)) continue;
             double pressure = 0;
             for (const auto& [source, weight] : sources)
-                pressure += (value(next,source,value(previousPrices,source,base(source)))/base(source)-1)*weight;
+                pressure += (value(current,source,value(previous,source,base(source)))/base(source)-1)*weight;
             const double baseline = base(key);
-            const double target = baseline*std::max(.25,1+pressure);
-            prices[key] = std::clamp(next[key]+(target-next[key])*MARKET_LINKED_PRICE_SMOOTHING,baseline*.25,baseline*4);
+            linked[key] = std::clamp(current[key]+baseline*pressure*MARKET_LINKED_PRICE_SMOOTHING,
+                baseline*.25,baseline*4);
         }
+        current = std::move(linked);
+    }
+
+    void updatePrices(const std::vector<MarketOrder>& orders, const Stockpile& quotas) {
+        demand = supply = externalDemand = externalSupply = quotas;
+        for (const auto& order : orders)
+            (order.buy ? demand : supply)[order.resource] += order.amount;
+        updatePriceBook(prices,previousPrices,shocks,demand,supply);
         for (const auto& [key,current] : prices) {
             auto& series = history[key];
             series.push_back(current);
             if (series.size() > 16) series.pop_front();
         }
         ++revision;
+    }
+
+    template<class TradeAllowed,class ExternalAccess>
+    void updateCountryPrices(const std::vector<MarketOrder>& orders,const Stockpile& quotas,int countries,
+                             TradeAllowed allowed,ExternalAccess externalAccess) {
+        countryPrices.resize(countries);
+        countryPreviousPrices.resize(countries);
+        countryShocks.resize(countries);
+        countryDemand.resize(countries);
+        countrySupply.resize(countries);
+        for (int country = 0; country < countries; ++country) {
+            auto& localDemand = countryDemand[country];
+            auto& localSupply = countrySupply[country];
+            localDemand.clear();
+            localSupply.clear();
+            if (externalAccess(country)) localDemand = localSupply = quotas;
+            for (const auto& order : orders) {
+                if (order.country != country && !allowed(country,order.country)) continue;
+                (order.buy ? localDemand : localSupply)[order.resource] += order.amount;
+            }
+            updatePriceBook(countryPrices[country],countryPreviousPrices[country],countryShocks[country],
+                localDemand,localSupply);
+        }
     }
 
     template<class Tile>
@@ -157,7 +196,9 @@ struct Market {
         for (std::size_t i = 0; i < countries.size(); ++i) {
             const double limit = monthly[i]*fraction;
             limits[i] = {sellCapacityMultiplier*limit*exportLimit(int(i)),limit};
-            externalCapacity += (1+sellCapacityMultiplier)*monthly[i]*weeklyFraction;
+            if (externalAccess(int(i)))
+                externalCapacity += (1+sellCapacityMultiplier*std::clamp(exportLimit(int(i)),0.,1.))*
+                    monthly[i]*weeklyFraction;
             budgets.push_back(std::max(0.,countries[i].budget));
             for (const auto& [bucket,amount] : capacities[i]) availableStorage[i][bucket] = amount;
             for (const auto& [key,amount] : stocks[i]) availableStorage[i][storageBucket(key)] -= amount;
@@ -170,7 +211,7 @@ struct Market {
             const auto key = contract.resource;
             auto& capacity = limits[i][contract.buy];
             auto& space = availableStorage[i][storageBucket(key)];
-            const double purchasePrice = unitPrice(key,true);
+            const double purchasePrice = unitPrice(i,key,true);
             double amount = std::min(contract.amount*fraction,capacity);
             amount = contract.buy ? std::min({amount,space,budgets[i]/purchasePrice})
                                   : std::min(amount,value(stocks[i],key));
@@ -185,13 +226,18 @@ struct Market {
             weeklyQuota[key] = std::max(750.,externalCapacity*std::max(.05,value(MARKET_RESOURCE_RARITY,key,.45))*.55);
             quota[key] = weeklyQuota[key]*fraction/weeklyFraction;
         }
-        if (reprice) updatePrices(orders,weeklyQuota);
+        if (reprice) {
+            updatePrices(orders,weeklyQuota);
+            updateCountryPrices(orders,weeklyQuota,int(countries.size()),allowed,externalAccess);
+        }
         MarketRules rules;
         rules.allowed = allowed;
         rules.priority = priority;
         rules.externalAccess = externalAccess;
-        rules.price = [&](auto key) { return price(key); };
-        rules.externalPrice = [&](auto key,bool buy) { return base(key)*(buy ? buyMarkup : sellMarkdown); };
+        rules.price = [&](auto key,int buyer,int seller) {
+            return (countryPrice(buyer,key)+countryPrice(seller,key))*.5;
+        };
+        rules.externalPrice = [&](auto key,bool buy,int country) { return unitPrice(country,key,buy); };
         rules.budget = [&](int i) { return countries[i].budget; };
         rules.stock = [&](int i,auto key) { return value(stocks[i],key); };
         rules.freeStorage = [&](int i,auto key) { return freeStorage(capacities[i],stocks[i],key); };

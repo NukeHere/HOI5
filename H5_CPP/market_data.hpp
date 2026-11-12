@@ -34,6 +34,7 @@ inline const std::map<std::string_view, Stockpile> linkedPrices = {
     {"ships",{{"steel",0.38}, {"machinery",0.2}, {"electronics",0.08}, {"refined_fuel",0.08}}},
 };
 inline constexpr double MARKET_MAX_WEEKLY_PRICE_MOVE = 0.35;
+inline constexpr double MARKET_PRICE_ELASTICITY = 0.65;
 inline constexpr double MARKET_SHOCK_DECAY = 0.55;
 inline constexpr double MARKET_SHOCK_FACTOR = 2.0;
 inline constexpr double MARKET_PRICE_SMOOTHING = 0.42;

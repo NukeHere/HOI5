@@ -162,6 +162,17 @@ std::string_view resourceDisplayName(std::string_view key) {
     return key;
 }
 
+std::string_view industrySectorDisplayName(std::string_view key) {
+    static constexpr std::pair<std::string_view,std::string_view> names[] = {
+        {"metallurgy","Металлургия"},{"construction_materials","Стройматериалы"},
+        {"chemicals","Химия"},{"machinery","Машиностроение"},{"vehicles","Транспорт"},
+        {"consumer_goods","Товары"},{"electronics","Электроника"},
+        {"shipbuilding","Судостроение"},{"weapons","Оружие"}
+    };
+    const auto found = std::ranges::find_if(names,[&](const auto& item) { return item.first == key; });
+    return found == std::end(names) ? key : found->second;
+}
+
 struct Tile {
     int owner{};
     int water{};
@@ -3621,9 +3632,9 @@ struct World {
         double committed = 0.;
         for (const auto& order : market.contracts)
             if (order.country == owner && order.buy && order.resource != task.resource)
-                committed += order.amount*market.unitPrice(order.resource,true);
+                committed += order.amount*market.unitPrice(owner,order.resource,true);
         const double amount = std::min({std::max(0.,task.amount),
-            std::max(0.,money*.15-committed)/std::max(1.,market.unitPrice(task.resource,true)),
+            std::max(0.,money*.15-committed)/std::max(1.,market.unitPrice(owner,task.resource,true)),
             hoi5::freeStorage(capacities[owner],stockpiles[owner],task.resource)});
         const double delta = amount-market.contractAmount(owner,task.resource,true);
         if (std::abs(delta) < std::max(1.,amount*.1)) return true;
@@ -4768,7 +4779,14 @@ std::vector<DivisionCounter> divisionCounters(const World& world,const sf::Rende
                 if (hoi5::airHexDistance(origin.r*world.size+origin.q,unit.r*world.size+unit.q,world.size)
                     <= neighborRadius) add(index);
             }
-        } else add(seed);
+        } else {
+            for (int index : eligible) {
+                if (assigned[index]) continue;
+                const auto& unit = world.divisions[index];
+                if (unit.owner == origin.owner && unit.q == origin.q && unit.r == origin.r &&
+                    unit.icon == origin.icon) add(index);
+            }
+        }
     }
     const float iconSize = 30.f/std::clamp(std::pow(zoom,.25f),.35f,1.f);
     const sf::Vector2f size = overview ? sf::Vector2f{54,34} :
@@ -5338,6 +5356,17 @@ void battleLabel(sf::RenderWindow& window,const sf::Font& font,const std::string
     window.draw(text);
 }
 
+void fittedBattleLabel(sf::RenderWindow& window,const sf::Font& font,const std::string& value,
+                       sf::Vector2f anchor,unsigned size,float maxWidth,sf::Color color = sf::Color::White) {
+    sf::Text text(font,sf::String::fromUtf8(value.begin(),value.end()),size);
+    const auto bounds = text.getLocalBounds();
+    text.setOrigin(bounds.position+sf::Vector2f{0,bounds.size.y*.5f});
+    text.setPosition(anchor);
+    text.setFillColor(color);
+    if (bounds.size.x > maxWidth) text.setScale({maxWidth/bounds.size.x,1.f});
+    window.draw(text);
+}
+
 std::vector<std::string> countryTextLines(const std::string& caption,int maxChars) {
     std::istringstream words(caption);
     std::vector<std::string> lines;
@@ -5366,47 +5395,47 @@ void drawBudgetSummary(sf::RenderWindow& window,const sf::Font& font,const sf::F
     double budget,const hoi5::TreasuryFlows& flows,double trade) {
     constexpr sf::Color income(190,226,174), expense(236,168,154), detail(206,178,168);
     const auto cost = [](double value) { return "-"+formatMoney(value); };
-    struct Row { std::string_view name; std::string value; sf::Color color = sf::Color::White; unsigned points = 12; };
+    struct Row { std::string_view name; std::string value; sf::Color color = sf::Color::White; unsigned points = 14; };
     const double balance = flows.balance()+trade;
     const Row rows[]{
         {"Бюджет",formatMoney(budget)},
         {"Месячный баланс",formatMoneyDelta(balance)+"/мес",balance >= 0 ? sf::Color(174,224,158) : sf::Color(236,148,132)},
         {}, {"Доходы:",{}},
-        {"Налоги населения",formatMoneyDelta(flows.population),income,11},
-        {"Компании",formatMoneyDelta(flows.companies),income,11},
-        {"Возврат кредитов (прогноз)",formatMoneyDelta(flows.loanRepayments),income,11},
-        {"Торговля",formatMoneyDelta(trade),trade >= 0 ? income : expense,11},
+        {"Налоги населения",formatMoneyDelta(flows.population),income,13},
+        {"Компании",formatMoneyDelta(flows.companies),income,13},
+        {"Возврат кредитов (прогноз)",formatMoneyDelta(flows.loanRepayments),income,13},
+        {"Торговля",formatMoneyDelta(trade),trade >= 0 ? income : expense,13},
         {}, {"Расходы:",{}},
-        {"Армия",cost(hoi5::monthlyArmyExpenses()),expense,11},
-        {"Правительство",cost(flows.government),expense,11},
-        {"Соц. обеспечение",cost(flows.social),expense,11},
-        {"  Пенсии",cost(flows.pensions),detail,10},
-        {"  Дети/школы",cost(flows.children),detail,10},
-        {"  Инвалиды",cost(flows.disability),detail,10},
-        {"  Соцслужбы",cost(flows.localServices),detail,10},
-        {"Инфраструктура",cost(flows.infrastructure),expense,11},
-        {"Программы поддержки",cost(flows.politicalPrograms),expense,11},
-        {"Платежи по кредитам",cost(flows.debtService),expense,11}
+        {"Армия",cost(hoi5::monthlyArmyExpenses()),expense,13},
+        {"Правительство",cost(flows.government),expense,13},
+        {"Соц. обеспечение",cost(flows.social),expense,13},
+        {"  Пенсии",cost(flows.pensions),detail,12},
+        {"  Дети/школы",cost(flows.children),detail,12},
+        {"  Инвалиды",cost(flows.disability),detail,12},
+        {"  Соцслужбы",cost(flows.localServices),detail,12},
+        {"Инфраструктура",cost(flows.infrastructure),expense,13},
+        {"Программы поддержки",cost(flows.politicalPrograms),expense,13},
+        {"Платежи по кредитам",cost(flows.debtService),expense,13}
     };
     float width = 300, height = 28;
     for (const auto& row : rows) {
-        height += row.name.empty() ? 7 : 17;
+        height += row.name.empty() ? 8 : 20;
         if (row.name.empty()) continue;
         const auto name = sf::String::fromUtf8(row.name.begin(),row.name.end());
         const auto value = sf::String::fromUtf8(row.value.begin(),row.value.end());
         const float textWidth = row.value.empty() ? name.getSize()*row.points*.58f
             : name.getSize()*row.points*.52f+value.getSize()*row.points*.58f+46;
-        width = std::max(width,std::min(430.f,textWidth+34));
+        width = std::max(width,std::min(480.f,textWidth+34));
     }
     const float x = std::max(12.f,std::min(anchor.position.x,float(window.getSize().x)-width-12));
     const float top = anchor.position.y+anchor.size.y+8;
     box(window,{x,top},{width,height},{18,24,31,247},{140,160,184});
     float y = top+20;
     for (const auto& row : rows) {
-        if (row.name.empty()) { y += 7; continue; }
+        if (row.name.empty()) { y += 8; continue; }
         battleLabel(window,font,std::string(row.name),{x+14,y},row.points,row.color);
         if (!row.value.empty()) battleLabel(window,font,row.value,{x+width-14,y},row.points,row.color,1.f);
-        y += 17;
+        y += 20;
     }
 }
 
@@ -5426,19 +5455,19 @@ void drawPopulationSummary(sf::RenderWindow& window,const sf::Font& font,const s
         {"Добровольцы",formatPopulation(obligated*willingness)}, {"Готовность",percent(willingness)}, {},
         {"Стабильность",percent(stability)}, {"Легитимность",percent(legitimacy)}, {"Поддержка войны",percent(warSupport)}
     }};
-    const float x = std::max(12.f,std::min(anchor.position.x,float(window.getSize().x)-342));
+    const float x = std::max(12.f,std::min(anchor.position.x,float(window.getSize().x)-392));
     const float top = anchor.position.y+anchor.size.y+8;
-    box(window,{x,top},{330,311},{18,24,31,247},{140,160,184});
+    box(window,{x,top},{380,359},{18,24,31,247},{140,160,184});
     float y = top+20;
     for (std::size_t i = 0; i < rows.size(); ++i) {
         const auto& [name,value] = rows[i];
         if (name.empty()) { y += 7; continue; }
         const auto color = i == 0 || value.empty() ? sf::Color::White : i == 13 || i == 14
             ? sf::Color(190,226,174) : sf::Color(220,230,240);
-        const unsigned points = i == 0 || value.empty() ? 12 : 11;
+        const unsigned points = i == 0 || value.empty() ? 14 : 13;
         battleLabel(window,font,std::string(name),{x+14,y},points,color);
-        if (!value.empty()) battleLabel(window,font,value,{x+316,y},points,color,1.f);
-        y += 17;
+        if (!value.empty()) battleLabel(window,font,value,{x+366,y},points,color,1.f);
+        y += 20;
     }
 }
 
@@ -6862,6 +6891,48 @@ int main(int argc, char** argv) try {
         if (formatMoney(-1250000000.) != "-$1.2B" || formatMoney(999.) != "$999" ||
             formatMoneyDelta(12500.) != "+$12.5K" || formatMoneyDelta(0.) != "$0" ||
             formatMoneyDelta(-1200000.) != "-$1.2M") return 1;
+        {
+            hoi5::Market fuel;
+            const std::vector<hoi5::MarketOrder> orders{{0,"refined_fuel",true,7000.}};
+            const hoi5::Stockpile background{{"refined_fuel",123000.}};
+            fuel.updatePrices(orders,background);
+            const double first = fuel.price("refined_fuel")/fuel.base("refined_fuel")-1.;
+            if (first < .030 || first > .032) return 1;
+            for (int week = 1; week < 60; ++week) fuel.updatePrices(orders,background);
+            const double persistent = fuel.price("refined_fuel")/fuel.base("refined_fuel")-1.;
+            if (persistent < .13 || persistent > .14 || std::abs(fuel.priceChange("refined_fuel")) > .0001)
+                return 1;
+        }
+        {
+            std::vector<Tile> tiles(2);
+            tiles[0].owner = 0;
+            tiles[1].owner = 1;
+            tiles[0].supply = tiles[1].supply = 1.;
+            std::vector<hoi5::StartingProfile> profiles(2);
+            profiles[0].budget = profiles[1].budget = 1e9;
+            std::vector<hoi5::Stockpile> stocks(2), capacities(2);
+            stocks[1]["coal"] = 1e6;
+            for (auto& capacity : capacities) capacity[hoi5::storageBucket("coal")] = 1e9;
+            const std::vector<hoi5::MarketOrder> contracts{{0,"coal",true,8000.},{1,"coal",false,8000.}};
+            const auto run = [&](bool access) {
+                hoi5::Market result;
+                result.contracts = contracts;
+                auto countries = profiles;
+                auto reserves = stocks;
+                result.execute(tiles,countries,reserves,capacities,0,
+                    [=](int,int) { return access; },[](int,int) { return 0; },
+                    [](int) { return true; },[](int) { return 1.; });
+                return result;
+            };
+            const auto open = run(true);
+            if (std::abs(open.countryPrice(0,"coal")-open.price("coal")) > 1e-8 ||
+                std::abs(open.countryPrice(1,"coal")-open.price("coal")) > 1e-8) return 1;
+            const auto embargo = run(false);
+            if (embargo.countryPrice(0,"coal") <= embargo.price("coal") ||
+                embargo.countryPrice(1,"coal") >= embargo.price("coal") ||
+                hoi5::value(embargo.countrySupply[0],"coal") >= hoi5::value(embargo.supply,"coal") ||
+                hoi5::value(embargo.countryDemand[1],"coal") >= hoi5::value(embargo.demand,"coal")) return 1;
+        }
         if (formatPopulationDelta(std::nullopt) != "--" || formatPopulationDelta(0.) != "0" ||
             formatPopulationDelta(12500.) != "+12.5K" || formatPopulationDelta(-1200000.) != "-1.2M") return 1;
         {
@@ -6984,9 +7055,18 @@ int main(int argc, char** argv) try {
                 (market.price("coal") <= 34 || market.price("coal") >= 68)) return 1;
             const double ordered = 2160/(68*hoi5::Market::buyMarkup);
             if (market.last.fills.size() != 1 || std::abs(market.last.fills.front().amount-ordered) > 1e-8 ||
+                std::abs(market.last.fills.front().price-market.unitPrice(0,"coal",true)) > 1e-8 ||
                 std::abs(market.demand.at("coal")-market.externalDemand.at("coal")-ordered) > 1e-8 ||
                 market.revision != 1 || market.previousPrices.at("coal") != 68 || market.history.at("coal").size() != 1 ||
                 !market.unfilled.empty()) return 1;
+            hoi5::Market restricted;
+            restricted.changeContract(0,"coal",true,1000,200);
+            auto restrictedProfiles = generated.profiles;
+            auto restrictedStocks = generated.stockpiles;
+            restricted.execute(generated.tiles,restrictedProfiles,restrictedStocks,generated.capacities,0,
+                [](int,int) { return false; },[](int,int) { return 0; },
+                [](int country) { return country == 0; },[](int) { return 1.; });
+            if (restricted.externalDemand.at("coal") >= market.externalDemand.at("coal")) return 1;
         }
         const double coal = generated.stockpiles[0].at("coal");
         const auto stocksBeforeForecast = generated.stockpiles;
@@ -7190,13 +7270,10 @@ int main(int argc, char** argv) try {
     const char* windows = std::getenv("WINDIR");
     if (!windows || !font.openFromFile(std::filesystem::path(windows) / "Fonts/segoeui.ttf"))
         throw std::runtime_error("Could not open Segoe UI");
-    sf::Font countryFont;
-    const auto fonts = std::filesystem::path(windows)/"Fonts";
-    const bool hasCountryFont = countryFont.openFromFile(fonts/"calibri.ttf") ||
-        countryFont.openFromFile(fonts/"arial.ttf");
-    const auto& cardFont = hasCountryFont ? countryFont : font;
+    // Keep one Cyrillic-capable face across the interface. Mixing fonts made
+    // adjacent captions look blurred and shifted at the same nominal size.
+    const auto& cardFont = font;
     font.setSmooth(true);
-    countryFont.setSmooth(true);
     std::array<sf::Texture, 8> icons;
     const std::array names{"politics", "economy", "resources", "trade", "construction", "research", "diplomacy", "military"};
     for (std::size_t i = 0; i < names.size(); ++i) {
@@ -7279,6 +7356,9 @@ int main(int argc, char** argv) try {
     float hexScroll = 0;
     bool hexResourcesExpanded = false;
     sf::FloatRect hexResourcesToggle;
+    bool hexSpecializationMode = false;
+    sf::FloatRect hexSpecializationButton;
+    std::vector<std::pair<sf::FloatRect,std::string_view>> hexSpecializationRows;
     std::vector<std::pair<sf::FloatRect,int>> defenseMoveButtons;
     int movingDefense = -1;
     std::set<int> selectedDefense;
@@ -7408,12 +7488,12 @@ int main(int argc, char** argv) try {
     int economicPanel = resourcesSmoke ? 2 : 0, resourceScroll = 0;
     std::optional<World::ResourceForecast> resourceForecast;
     int resourceCategory = 0;
-    constexpr int resourceRowsTop = 370, resourceRowHeight = 26;
+    constexpr int resourceRowsTop = 398, resourceRowHeight = 26;
     const auto resourcePanelBottom = [&] { return std::max(514,int(window.getSize().y)-12); };
     const auto resourceVisibleRows = [&] {
         return std::max(8,(resourcePanelBottom()-26-resourceRowsTop)/resourceRowHeight);
     };
-    constexpr int resourceWarningsTop = 280, resourceWarningHeight = 20;
+    constexpr int resourceWarningsTop = 304, resourceWarningHeight = 20;
     std::vector<std::pair<int,std::string_view>> resourceWarnings;
     constexpr std::array resourceCategories{"Сырьё","Полуфабрикаты","Готовая продукция"};
     hoi5::Stockpile groundResources;
@@ -7445,6 +7525,10 @@ int main(int argc, char** argv) try {
     const auto resourceCardClose = [&] {
         const auto card = resourceCardRect();
         return sf::FloatRect(card.position+sf::Vector2f{card.size.x-32,10},{24,24});
+    };
+    const auto resourceCardTrade = [&] {
+        const auto card = resourceCardRect();
+        return sf::FloatRect(card.position+sf::Vector2f{12,card.size.y-40},{card.size.x-24,28});
     };
     bool resourceMapDirty = true;
     sf::VertexArray resourceMap(sf::PrimitiveType::Triangles);
@@ -7506,7 +7590,7 @@ int main(int argc, char** argv) try {
         }
     };
     const auto armyBounds = [&] {
-        return sf::IntRect({int((armyPanelProgress-1)*456),94},{456,int(window.getSize().y)-106});
+        return sf::IntRect({int((armyPanelProgress-1)*500),94},{500,int(window.getSize().y)-106});
     };
     int buildingSpec = 0;
     bool constructionPlacement = constructionSmoke, constructionQueueExpanded = false;
@@ -7526,7 +7610,10 @@ int main(int argc, char** argv) try {
     std::vector<double> constructionCoverage;
     std::vector<sf::String> constructionLabels;
     const auto constructionPriorityButton = [](int row,int direction) {
-        return sf::FloatRect({direction < 0 ? 318.f : 342.f,151.f+26*row},{20,17});
+        return sf::FloatRect({direction < 0 ? 388.f : 412.f,151.f+26*row},{20,17});
+    };
+    const auto constructionCancelButton = [](int row) {
+        return sf::FloatRect({362.f,151.f+26*row},{20,17});
     };
     const auto constructionRows = [&](int groups) {
         const int limit = constructionQueueExpanded ? std::max(4,(int(window.getSize().y)-630)/26+4) : 4;
@@ -7558,7 +7645,7 @@ int main(int argc, char** argv) try {
         if (militaryPanel) return std::max(0,armyBounds().position.x+armyBounds().size.x);
         if (economicPanel == 1) return int(620*economyPanelProgress);
         if (economicPanel == 2 || tradePanel) return 760;
-        if (constructionPanel) return 390;
+        if (constructionPanel) return 460;
         return 0;
     };
     const auto openCountryList = [&] {
@@ -7651,7 +7738,13 @@ int main(int argc, char** argv) try {
         const float top = 174;
         const float height = std::min(560.f,std::max(240.f,size.y-top-78));
         const float bottom = height < 300 ? std::max(12.f,size.y-top-height) : 78.f;
-        return sf::FloatRect({size.x-width-16,size.y-bottom-height},{width,height});
+        sf::FloatRect panel({size.x-width-16,size.y-bottom-height},{width,height});
+        if (armyCommandBounds.size.x > 0) {
+            const sf::FloatRect army(sf::Vector2f(armyCommandBounds.position),sf::Vector2f(armyCommandBounds.size));
+            if (const auto overlap = panel.findIntersection(army))
+                panel.position.y = std::max(top,panel.position.y-overlap->size.y-8.f);
+        }
+        return panel;
     };
     const auto hexCloseRect = [](sf::FloatRect panel) {
         return sf::FloatRect(panel.position+sf::Vector2f(panel.size.x-36,12),{24,24});
@@ -7955,7 +8048,7 @@ int main(int argc, char** argv) try {
                     const int x = button->position.x, y = button->position.y;
                     if (menuPage == MenuPage::main) {
                         for (int row = 0; row < 6; ++row) {
-                            if (!sf::IntRect({cx-150,cy-152+54*row},{300,42}).contains({x,y})) continue;
+                            if (!sf::IntRect({cx-188,cy-186+64*row},{376,52}).contains({x,y})) continue;
                             if (row == 0) setup = true;
                             if (row == 1 && resumable) playing = true;
                             if (row == 3) openSettings();
@@ -8140,6 +8233,10 @@ int main(int argc, char** argv) try {
                         if (resourceCardClose().contains(sf::Vector2f(button->position))) {
                             selectedMapResource = {};
                             resourceMapDirty = constructionMapDirty = true;
+                        } else if (resourceCardTrade().contains(pointer)) {
+                            tradePanel = true;
+                            economicPanel = 0;
+                            tradeForecast.reset();
                         }
                     } else if (economicPanel == 2 && x >= 0 && x < 760 && y >= 90 && y < resourcePanelBottom()) {
                         if (y >= 136 && y < 198 && x >= 18 && x < 522) {
@@ -8179,7 +8276,7 @@ int main(int argc, char** argv) try {
                         constructionPlacement = false;
                         economicPanel = 0;
                         diplomacyPanel = tradePanel = militaryPanel = false;
-                    } else if (constructionPanel && x >= 20 && x < 390 && y >= 90 &&
+                    } else if (constructionPanel && x >= 20 && x < 460 && y >= 90 &&
                                y < 544+26*std::max(4,constructionRows(int(hoi5::Construction::groups(world.construction.queues[0]).size())))) {
                         auto& queue = world.construction.queues[0];
                         const auto groups = hoi5::Construction::groups(queue);
@@ -8193,6 +8290,15 @@ int main(int argc, char** argv) try {
                             tradeForecast.reset();
                         } else if (y >= 148 && y < 148+26*rows) {
                             const int row = (y-148)/26;
+                            if (constructionCancelButton(row).contains(pointer) && row < int(groups.size())) {
+                                const auto project = queue[groups[row].end-1];
+                                if (world.construction.cancel(0,project.tile,project.spec)) {
+                                    resourceForecast.reset();
+                                    tradeForecast.reset();
+                                    constructionMapDirty = resourceMapDirty = true;
+                                }
+                                continue;
+                            }
                             for (int direction : {-1,1}) {
                                 if (constructionPriorityButton(row,direction).contains(pointer) &&
                                     hoi5::Construction::moveGroup(queue,groups,row,direction)) {
@@ -8203,7 +8309,7 @@ int main(int argc, char** argv) try {
                         } else if (groups.size() > 4 && y >= 148+26*rows && y < 170+26*rows) {
                             constructionQueueExpanded = !constructionQueueExpanded;
                         } else if (y >= 190+offset && y < 351+offset) {
-                            const int index = 2*((y-190-offset)/23)+(x >= 205);
+                            const int index = 2*((y-190-offset)/23)+(x >= 241);
                             if (index < int(std::size(hoi5::constructionSpecs))) {
                                 buildingSpec = index;
                                 constructionMapDirty = true;
@@ -8359,7 +8465,7 @@ int main(int argc, char** argv) try {
                                 tradeScroll = 0;
                             }
                         if (y >= tradeRowTop && y < tradeRowTop+tradeRowHeight*tradeRows() &&
-                            (y-tradeRowTop)%tradeRowHeight < 20) {
+                            (y-tradeRowTop)%tradeRowHeight >= 21 && (y-tradeRowTop)%tradeRowHeight < 41) {
                             const auto keys = resourceCategoryKeys(tradeCategory);
                             const int row = tradeScroll+(y-tradeRowTop)/tradeRowHeight;
                             for (int i = 0; i < int(tradeButtons.size()) && row < int(keys.size()); ++i) {
@@ -8420,6 +8526,7 @@ int main(int argc, char** argv) try {
                         if (hexCloseRect(hexPanelRect()).contains(sf::Vector2f(button->position))) {
                             selectedTiles.clear();
                             movingDefense = -1;
+                            hexSpecializationMode = false;
                         } else if (selectedTiles.size() == 1 && hexCountryButton.contains(pointer)) {
                             const int owner = world.tiles[selectedTiles.front()].owner;
                             if (owner >= 0 && owner < int(world.profiles.size())) openCountry(owner);
@@ -8432,6 +8539,38 @@ int main(int argc, char** argv) try {
                         }
                         else if (hexResourcesToggle.contains(sf::Vector2f(button->position)))
                             hexResourcesExpanded = !hexResourcesExpanded;
+                        else if (hexSpecializationButton.contains(pointer))
+                            hexSpecializationMode = !hexSpecializationMode;
+                        else if (const auto sector = std::ranges::find_if(hexSpecializationRows,[&](const auto& row) {
+                            return row.first.contains(pointer);
+                        }); sector != hexSpecializationRows.end()) {
+                            std::vector<int> industryTiles;
+                            for (int cell : selectedTiles)
+                                if (world.tiles[cell].owner == 0 && world.tiles[cell].buildings[hoi5::industry].area > 0)
+                                    industryTiles.push_back(cell);
+                            const bool remove = std::ranges::any_of(industryTiles,[&](int cell) {
+                                return std::ranges::find(world.tiles[cell].industries,sector->second) !=
+                                    world.tiles[cell].industries.end();
+                            });
+                            std::map<std::string_view,int> fallback;
+                            for (int cell : industryTiles)
+                                for (auto key : world.tiles[cell].industries)
+                                    if (key != sector->second) ++fallback[key];
+                            auto replacement = sector->second == "consumer_goods" ?
+                                std::string_view("machinery") : std::string_view("consumer_goods");
+                            if (!fallback.empty()) replacement = std::ranges::max_element(fallback,{},&decltype(fallback)::value_type::second)->first;
+                            for (int cell : industryTiles) {
+                                auto& allocation = world.tiles[cell].industries;
+                                if (remove) {
+                                    std::erase(allocation,sector->second);
+                                    if (allocation.empty()) allocation.push_back(replacement);
+                                } else if (std::ranges::find(allocation,sector->second) == allocation.end())
+                                    allocation.push_back(sector->second);
+                            }
+                            resourceForecast.reset();
+                            tradeForecast.reset();
+                            resourceMapDirty = true;
+                        }
                     } else if (constructionPanel && constructionPlacement && y >= 82) {
                         const auto point = window.mapPixelToCoords(button->position,camera);
                         const int cell = tileAtWorldPosition(world.size,point);
@@ -8905,8 +9044,17 @@ int main(int argc, char** argv) try {
                             });
                         }
                         if (amount <= 0) continue;
-                        const auto color = mapResourceOverlay(amount,mapResourceScale,rawMapResource,
+                        auto color = mapResourceOverlay(amount,mapResourceScale,rawMapResource,
                             map[i*verticesPerHex].color,false);
+                        if (rawMapResource) {
+                            const double extraction = tileResourceOutput(tile,mapResourceKey);
+                            if (extraction > 0) {
+                                const double intensity = std::min(1.,std::log10(extraction+1)/4.);
+                                const auto active = blendMapColors(sf::Color{72,156,218},
+                                    sf::Color{142,228,255},intensity);
+                                color = blendMapColors(color,active,.48+intensity*.30);
+                            }
+                        }
                         for (int j = 0; j < verticesPerHex; ++j)
                             resourceMap[i*verticesPerHex+j].color = color;
                     }
@@ -9001,7 +9149,7 @@ int main(int argc, char** argv) try {
             }
             debug.record("world_tiles",drawStart);
             const auto visualsStart = DebugClock::now();
-            if (mapLayer == MapLayer::terrain && selectedMapResource.empty() && zoom >= .38f &&
+            if (mapLayer == MapLayer::terrain && zoom >= .38f &&
                 !(constructionPanel && constructionPlacement)) {
                 const auto visibilityStart = DebugClock::now();
                 const auto half = camera.getSize()*.5f+sf::Vector2f{radius,radius};
@@ -9187,7 +9335,8 @@ int main(int argc, char** argv) try {
             for (const auto& unit : world.air.defense) {
                 const auto position = center(unit.tile%world.size,unit.tile/world.size);
                 const bool selectedHex = !selectedTiles.empty() && selectedTiles.back() == unit.tile;
-                if (showAllDefenseRanges ? unit.health > 0 && unit.readiness() > 0 : selectedHex)
+                if (unit.route.empty() &&
+                    (showAllDefenseRanges ? unit.health > 0 && unit.readiness() > 0 : selectedHex))
                     drawDefenseRanges(window,unit,position);
             }
             if (!airDefenseOverlay) {
@@ -9289,6 +9438,9 @@ int main(int argc, char** argv) try {
             for (const auto& base : world.air.bases) {
                 const auto& tile = world.tiles[base.tile];
                 if (tile.owner != base.owner) continue;
+                if (std::ranges::any_of(world.divisions,[&](const auto& unit) {
+                    return unit.combat.strength > 0 && unit.r*world.size+unit.q == base.tile;
+                })) continue;
                 const auto point = center(base.tile%world.size,base.tile/world.size);
                 if (!airVisible.contains(point)) continue;
                 if (zoom <= .35f) {
@@ -9400,11 +9552,12 @@ int main(int argc, char** argv) try {
             box(window,{0,36},{size.x,46},{24,31,40,238});
             box(window,{0,81},{size.x,2},{70,88,108});
             const auto mouse = sf::Mouse::getPosition(window);
-            const auto statusWidth = [](const std::string& field) {
-                return float(sf::String::fromUtf8(field.begin(),field.end()).getSize())*7;
+            const auto statusWidth = [&](const std::string& field) {
+                const sf::Text text(font,sf::String::fromUtf8(field.begin(),field.end()),14);
+                return text.getLocalBounds().size.x;
             };
             const auto statusText = [&](const std::string& field,float left,sf::Color color,float maxWidth = 10000.f) {
-                sf::Text text(font,sf::String::fromUtf8(field.begin(),field.end()),12);
+                sf::Text text(font,sf::String::fromUtf8(field.begin(),field.end()),14);
                 const auto bounds = text.getLocalBounds();
                 text.setPosition({left,18-bounds.position.y-bounds.size.y/2});
                 text.setFillColor(color);
@@ -9434,7 +9587,7 @@ int main(int argc, char** argv) try {
                 compactPolitics && policy ? "Война: "+std::to_string(int(std::lround(policy->warSupport*100)))+"%" : world.status[6],
                 std::string(compactPolitics ? "Полит. кап.: " : "Полит. капитал: ")+(policy ? formatAmount(policy->capital) : "—")};
             const auto policyWidth = [&](const std::string& value) {
-                const sf::Text text(font,sf::String::fromUtf8(value.begin(),value.end()),12);
+                const sf::Text text(font,sf::String::fromUtf8(value.begin(),value.end()),14);
                 return text.getLocalBounds().size.x+16.f;
             };
             float politicsWidth = 0.f;
@@ -9575,7 +9728,7 @@ int main(int argc, char** argv) try {
                     box(window,bounds.position,bounds.size,{36,48,62,210},{118,146,176,180});
                     hoverHelp = HoverHelp{policyTitles[index],countryTextLines(policyHelp[index],36)};
                 }
-                statusText(policyValues[index],x,index == 3 ? sf::Color{238,199,111} : sf::Color{210,220,232});
+                statusText(policyValues[index],x,{210,220,232});
                 x += width;
             }
 
@@ -9738,7 +9891,9 @@ int main(int argc, char** argv) try {
                 const float storageY = 205.f + (shown ? 16.f*shown : 18.f) + (expandable ? 16.f : 0.f);
                 const float buildingsY = storageY+28+16*storageCount;
                 const auto count = std::count_if(coverage.begin(),coverage.end(),[](double area) { return area > 0; });
-                const float bottom = panel.size.y-(coverage[hoi5::industry] > 0 ? 96.f : 58.f);
+                const bool editableIndustry = coverage[hoi5::industry] > 0 &&
+                    std::ranges::all_of(selectedTiles,[&](int cell) { return world.tiles[cell].owner == 0; });
+                const float bottom = panel.size.y-(editableIndustry ? 96.f : 58.f);
                 const auto containsTile = [&](int index) {
                     return std::find(selectedTiles.begin(),selectedTiles.end(),index) != selectedTiles.end();
                 };
@@ -9824,9 +9979,22 @@ int main(int argc, char** argv) try {
                     aviation.push_back(airName(key)+": "+std::to_string(count));
                 debug.record("hex_aviation_lookup",hex_aviation_lookupStart);
                 const float aviationY = buildingsY+28+16*std::max<std::ptrdiff_t>(1,count);
-                const float climateY = aviationY+(aviation.empty() ? 0.f : 28.f+16.f*aviation.size());
+                std::map<std::string_view,double> industryAllocation;
+                int industryTileCount = 0;
+                for (int cell : selectedTiles) {
+                    const auto& selected = world.tiles[cell];
+                    if (selected.buildings[hoi5::industry].area <= 0 || selected.industries.empty()) continue;
+                    ++industryTileCount;
+                    for (auto sector : selected.industries)
+                        industryAllocation[sector] += 1./selected.industries.size();
+                }
+                const float productionY = aviationY+(aviation.empty() ? 0.f : 28.f+16.f*aviation.size());
+                const float productionHeight = industryTileCount == 0 ? 0.f :
+                    28.f+16.f*industryAllocation.size()+(hexSpecializationMode && editableIndustry ?
+                        25.f+29.f*(std::size(hoi5::sectors)+1) : 0.f);
+                const float climateY = productionY+productionHeight;
                 const bool showGroundEffects = !multiple && !tile.water;
-                const float contentEnd = climateY+20+4*16+12+(showGroundEffects ? 56 : 0);
+                const float contentEnd = climateY+20+4*16+12+(showGroundEffects ? 76 : 0);
                 const float maxScroll = std::max(0.f,contentEnd-bottom);
                 hexScroll = std::min(hexScroll,maxScroll);
                 const auto panelLine = [&](std::string value,float y,unsigned points,float x = 16) {
@@ -9911,6 +10079,44 @@ int main(int argc, char** argv) try {
                         rowY += 16;
                     }
                 }
+                hexSpecializationRows.clear();
+                hexSpecializationButton = {};
+                if (industryTileCount > 0) {
+                    panelLine("Производство",productionY,14);
+                    rowY = productionY+20;
+                    double efficiency = 0;
+                    for (int cell : selectedTiles) {
+                        const auto& selected = world.tiles[cell];
+                        if (selected.buildings[hoi5::industry].area > 0 && !selected.industries.empty())
+                            efficiency += std::pow(.9,selected.industries.size()-1);
+                    }
+                    panelLine("Эффективность: "+percent(efficiency/industryTileCount),rowY,11);
+                    rowY += 16;
+                    for (const auto& [sector,share] : industryAllocation) {
+                        panelLine(std::string(industrySectorDisplayName(sector))+": "+
+                            percent(share/industryTileCount),rowY,11);
+                        rowY += 16;
+                    }
+                    if (hexSpecializationMode && editableIndustry) {
+                        rowY += 6;
+                        panelLine("Выбор категории",rowY,10);
+                        rowY += 18;
+                        const auto drawSector = [&](std::string_view sector) {
+                            const float visibleY = rowY-hexScroll;
+                            if (visibleY >= 52 && visibleY+24 <= bottom) {
+                                const sf::FloatRect rect(panel.position+sf::Vector2f{16,visibleY},{panel.size.x-32,24});
+                                const bool active = industryAllocation.contains(sector);
+                                box(window,rect.position,rect.size,active ? sf::Color(54,76,96,190) :
+                                    sf::Color(32,42,54,160),{84,108,132});
+                                label(window,font,std::string(industrySectorDisplayName(sector)),rect.position+sf::Vector2f{8,4},11);
+                                hexSpecializationRows.emplace_back(rect,sector);
+                            }
+                            rowY += 29;
+                        };
+                        for (const auto& sector : hoi5::sectors) drawSector(sector.name);
+                        drawSector("consumer_goods");
+                    }
+                } else hexSpecializationMode = false;
                 const double tilesCount = double(selectedTiles.size());
                 temperature = std::clamp(temperature/tilesCount,0.,1.);
                 moisture = std::clamp(moisture/tilesCount,0.,1.);
@@ -9936,13 +10142,27 @@ int main(int argc, char** argv) try {
                         const int change = int(std::lround((factor-1.)*100));
                         return (change > 0 ? "+" : "")+std::to_string(change)+"%";
                     };
-                    panelLine("Местность: атака / оборона / скорость",rowY+6,12);
+                    panelLine("Местность",rowY+6,13);
+                    panelLine("Атака",rowY+25,10,152);
+                    panelLine("Оборона",rowY+25,10,218);
+                    panelLine("Скорость",rowY+25,10,292);
                     const auto show = [&](std::string name,double vehicles,float y) {
                         const auto effects = hoi5::groundTerrainEffects(tile.natural,vehicles);
-                        panelLine(name+": "+delta(effects.attack)+" / "+delta(effects.defense)+" / "+delta(effects.speed),y,11);
+                        panelLine(std::move(name),y,11);
+                        panelLine(delta(effects.attack),y,11,152);
+                        panelLine(delta(effects.defense),y,11,218);
+                        panelLine(delta(effects.speed),y,11,292);
                     };
-                    show("Пехота",0.,rowY+24);
-                    show("Техника",1.,rowY+40);
+                    show("Пехота",0.,rowY+43);
+                    show("Техника",1.,rowY+61);
+                }
+                if (editableIndustry) {
+                    hexSpecializationButton = {panel.position+sf::Vector2f{16,panel.size.y-80},
+                        {panel.size.x-32,28}};
+                    box(window,hexSpecializationButton.position,hexSpecializationButton.size,
+                        hexSpecializationMode ? sf::Color(64,92,118) : sf::Color(38,50,66),{95,118,145});
+                    battleLabel(window,font,hexSpecializationMode ? "Закрыть специализацию" :
+                        "Изменить специализацию",hexSpecializationButton.getCenter(),12,sf::Color::White,.5f);
                 }
                 if (maxScroll > 2) {
                     const float track = std::max(1.f,bottom-52);
@@ -10185,6 +10405,7 @@ int main(int argc, char** argv) try {
                     ? sf::Color(96,56,58) : sf::Color(50,58,68),{150,166,184});
                 label(window,font,"X",{591,109},14);
                 const auto text = [&](std::string value,float x,float y,unsigned points,sf::Color color,bool right = false) {
+                    points += 2;
                     sf::Text line(font,sf::String::fromUtf8(value.begin(),value.end()),points);
                     const auto bounds = line.getLocalBounds();
                     line.setPosition({right ? x-bounds.position.x-bounds.size.x : x,
@@ -10320,7 +10541,7 @@ int main(int argc, char** argv) try {
                         fill.a = alpha;
                     }
                     box(window,{x,136},{162,62},fill,{120,142,166});
-                    label(window,cardFont,resourceCategories[i],{x+8,141},16);
+                    label(window,cardFont,resourceCategories[i],{x+8,139},18);
                     battleLabel(window,cardFont,"Недостаток: "+std::to_string(shortage),{x+8,168},14,{226,234,242});
                     battleLabel(window,cardFont,"Избыток: "+std::to_string(surplus),{x+8,185},14,{180,222,166});
                 }
@@ -10339,7 +10560,7 @@ int main(int argc, char** argv) try {
                         " ("+std::to_string(int(std::nearbyint(fullness*100)))+"%)";
                 };
                 for (int i = 0; i < 4; ++i)
-                    battleLabel(window,cardFont,storageLine(i),{18.f+252.f*(i%2),230.f+18.f*(i/2)},14,{190,210,224});
+                    battleLabel(window,cardFont,storageLine(i),{18.f+252.f*(i%2),238.f+18.f*(i/2)},14,{190,210,224});
                 double supply = 0;
                 int land = 0, low = 0, critical = 0;
                 for (const auto& tile : world.tiles) {
@@ -10351,7 +10572,7 @@ int main(int argc, char** argv) try {
                 }
                 battleLabel(window,font,"Снабжение: "+std::to_string(int(std::nearbyint(supply*100/std::max(1,land))))+
                     "% | слабых: "+std::to_string(low)+" | крит.: "+std::to_string(critical),
-                    {18,266},14,{190,210,224});
+                    {18,278},14,{190,210,224});
                 resourceWarnings.clear();
                 for (int severity : {2,1})
                     for (auto key : warnings[2-severity])
@@ -10369,7 +10590,7 @@ int main(int argc, char** argv) try {
                 constexpr std::array columns{18.f,184.f,266.f,326.f,384.f,446.f};
                 constexpr std::array headers{"Ресурс","В земле","Склад","+/мес","-/мес","Хватит"};
                 for (std::size_t column = 0; column < columns.size(); ++column)
-                    battleLabel(window,cardFont,headers[column],{columns[column],356},13,{150,166,184});
+                    battleLabel(window,cardFont,headers[column],{columns[column],384},13,{150,166,184});
                 const auto keys = resourceKeys();
                 const int visibleRows = resourceVisibleRows();
                 resourceScroll = std::clamp(resourceScroll,0,std::max(0,int(keys.size())-visibleRows));
@@ -10414,15 +10635,17 @@ int main(int argc, char** argv) try {
                             selectedMapResource);
                     };
                     float y = top+92;
-                    sf::Text measure(font,"",11);
-                    const auto wrapped = [&](const std::string& text,float x,sf::Color color,int maxChars = 0,int maxLines = 0) {
+                    sf::Text measure(font,"",13);
+                    const auto wrapped = [&](const std::string& text,float x,sf::Color color,int maxChars = 0,
+                                             int maxLines = 0,unsigned points = 13) {
+                        measure.setCharacterSize(points);
                         std::istringstream words(text);
                         std::string line, word;
                         int lines = 0;
                         const auto drawLine = [&] {
-                            battleLabel(window,font,line,{x,y+6},11,color);
+                            battleLabel(window,font,line,{x,y+6},points,color);
                             ++lines;
-                            y += 16;
+                            y += points+6;
                         };
                         while (words >> word) {
                             const auto candidate = line.empty() ? word : line+" "+word;
@@ -10463,9 +10686,14 @@ int main(int argc, char** argv) try {
                         Entry{"Производство",flow(hoi5::semiFinished,false)+flow(hoi5::agriculture,false)+flow(hoi5::finished,false)},
                         Entry{"Поддержание",flow(hoi5::upkeep,false)},
                         Entry{"Экспорт",hoi5::value(forecast.exports,selectedMapResource)}},true);
-                    label(window,font,"Описание",{left+14,y},12);
-                    y += 20;
-                    wrapped(std::string(hoi5::resourceUsageDescription(selectedMapResource)),left+14,{196,208,220},29,6);
+                    label(window,font,"Описание",{left+14,y},15);
+                    y += 24;
+                    wrapped(std::string(hoi5::resourceUsageDescription(selectedMapResource)),left+14,
+                        {196,208,220},29,6,15);
+                    const auto trade = resourceCardTrade();
+                    box(window,trade.position,trade.size,{48,72,94},{132,170,206});
+                    battleLabel(window,font,"Перейти в торговлю",trade.position+sf::Vector2f{trade.size.x*.5f,14},
+                        13,{228,238,247},.5f);
                 }
             }
             const float armyTarget = militaryPanel ? 1.f : 0.f;
@@ -10500,10 +10728,13 @@ int main(int argc, char** argv) try {
                 armyHits.clear();
                 box(window,{0,top},sf::Vector2f(bounds.size),{18,24,31,244},{110,130,154});
                 battleLabel(window,cardFont,"Армия",{18,top+28},24,{238,244,250});
-                const auto button = [&](std::string caption,int x,int y,int width,std::function<void()> activate,int height = 22) {
+                const auto button = [&](std::string caption,int x,int y,int width,std::function<void()> activate,
+                                        int height = 22,bool selectedTab = false,unsigned points = 13) {
                     if (y < top || y+height > bottom) return;
-                    box(window,{float(x),float(y)},{float(width),float(height)},{42,57,72});
-                    battleLabel(window,cardFont,caption,{x+6.f,y+height*.5f},13,{225,234,244});
+                    box(window,{float(x),float(y)},{float(width),float(height)},
+                        selectedTab ? sf::Color(66,94,120) : sf::Color(42,57,72),
+                        selectedTab ? sf::Color(176,211,240) : sf::Color(110,130,154));
+                    battleLabel(window,cardFont,caption,{x+6.f,y+height*.5f},points,{225,234,244});
                     armyHits.push_back({{{x+bounds.position.x,y},{width,height}},std::move(activate)});
                 };
                 button("X",382,int(top)+10,28,[&] {
@@ -10516,9 +10747,9 @@ int main(int argc, char** argv) try {
                         armyTab = ArmyTab(i);
                         armyPickingSite = false;
                         armyHits.clear();
-                    });
+                    },28,armyTab == ArmyTab(i),16);
                 float y = top+108;
-                const auto line = [&](std::string caption,sf::Color color = {210,224,236},unsigned points = 15) {
+                    const auto line = [&](std::string caption,sf::Color color = {210,224,236},unsigned points = 16) {
                     if (y+12 < bottom) battleLabel(window,cardFont,caption,{left,y},points,color);
                     y += 20;
                 };
@@ -10545,22 +10776,22 @@ int main(int argc, char** argv) try {
                         {"Средняя прочн.",decimal(strength/std::max(1,divisions))+"%"}
                     }};
                     for (int i = 0; i < int(stats.size()); ++i) {
-                        const float x = left+(i%2)*189;
-                        const float row = y+(i/2)*19;
-                        battleLabel(window,cardFont,std::string(stats[i].first),{x,row},13,muted);
-                        battleLabel(window,cardFont,stats[i].second,{x+118,row},13,ink,1.f);
+                        const float x = left+(i%2)*222;
+                        const float row = y+(i/2)*22;
+                        battleLabel(window,cardFont,std::string(stats[i].first),{x,row},14,muted);
+                        battleLabel(window,cardFont,stats[i].second,{x+205,row+16},14,ink,1.f);
                     }
-                    y += 72;
+                    y += 82;
                     box(window,{left,y-14},{right-left,1},{72,92,112,180});
                     line("Армейские ресурсы",sf::Color::White,20);
                     y += 14;
                     const auto columns = [&](std::string a,std::string b,std::string c,sf::Color color = {210,224,236}) {
                         if (y+12 < bottom) {
-                            battleLabel(window,cardFont,a,{left,y},15,ink);
-                            battleLabel(window,cardFont,b,{left+216,y},15,ink,1.f);
-                            battleLabel(window,cardFont,c,{right,y},15,color,1.f);
+                            battleLabel(window,cardFont,a,{left,y},16,ink);
+                            battleLabel(window,cardFont,b,{left+246,y},16,ink,1.f);
+                            battleLabel(window,cardFont,c,{right,y},16,color,1.f);
                         }
-                        y += 17;
+                        y += 19;
                     };
                     columns("Ресурс","Склад","В дивизиях",muted);
                     constexpr std::array<std::string_view,18> resources{"weapons","infantry_equipment","old_assault_rifles","small_arms_ammo",
@@ -10596,8 +10827,8 @@ int main(int argc, char** argv) try {
                         }
                     }
                 } else if (armyTab == ArmyTab::designer) {
-                    button(utf8(armyDesignName)+(armyNameFocus ? " |" : " (изменить)"),18,int(y)-10,384,[&] { armyNameFocus = true; });
-                    y += 28;
+                    button(utf8(armyDesignName)+(armyNameFocus ? " |" : " (изменить)"),18,int(y)-12,444,[&] { armyNameFocus = true; },30,false,16);
+                    y += 34;
                     line("Батальоны: от 1 до 20; 10 одного типа = готовый тип");
                     for (int i = 0; i < World::baseDivisionTypes; ++i) {
                         auto caption = std::string(hoi5::divisionTemplates[i].name);
@@ -10765,43 +10996,49 @@ int main(int argc, char** argv) try {
                 const auto groups = hoi5::Construction::groups(queue);
                 const int rows = constructionRows(int(groups.size()));
                 const float offset = 130+26.f*std::max(4,rows);
-                box(window,{20,90},{370,324+offset},{18,24,31,250},{92,112,136});
-                label(window,font,"Строительство",{30,96},18);
-                box(window,{30,119},{346,23},{30,39,50},{82,108,132});
+                box(window,{20,90},{440,324+offset},{18,24,31,250},{92,112,136});
+                label(window,font,"Строительство",{30,96},22);
+                box(window,{30,119},{416,23},{30,39,50},{82,108,132});
                 label(window,font,!queue.empty() && queue.front().paused ? "Возобновить" : "Приостановить",
-                    {38,121},14);
-                if (queue.empty()) label(window,font,"Пока пусто",{38,151},14);
+                    {38,121},16);
+                if (queue.empty()) label(window,font,"Пока пусто",{38,151},16);
                 for (int i = 0; i < rows; ++i) {
                     const auto [first,end] = groups[i];
                     const auto& project = queue[first];
                     const float y = 148+i*26.f;
                     const bool active = project.status != hoi5::ConstructionStatus::queued;
-                    box(window,{30,y},{346,23},active ? sf::Color(46,70,58,190) :
+                    box(window,{30,y},{416,23},active ? sf::Color(46,70,58,190) :
                         sf::Color(30,40,52,160),{82,108,132});
                     const auto title = std::string(active ? hoi5::constructionStatusLabel(project.status) : "Ждет")+
                         ": "+(project.repair ? "Ремонт: " : "")+
                         std::string(hoi5::constructionSpecs[project.spec].label)+" "+
                         std::to_string(project.tile%world.size)+":"+std::to_string(project.tile/world.size);
-                    battleLabel(window,font,title+(end-first > 1 ? " x"+std::to_string(end-first) : ""),
-                        {38,y+11.5f},10,{226,236,244});
+                    fittedBattleLabel(window,font,title+(end-first > 1 ? " x"+std::to_string(end-first) : ""),
+                        {38,y+11.5f},12,318,{226,236,244});
                     const auto percent = [](double value) { return std::to_string(int(std::nearbyint(value*100)))+"%"; };
                     const double coverage = std::lerp(project.from,project.target,std::clamp(project.progress,0.,1.));
                     const double target = project.repair ? 1. : queue[end-1].target;
-                    battleLabel(window,font,percent(coverage)+"->"+percent(target),{310,y+11.5f},
-                        10,{226,236,244},1.f);
+                    battleLabel(window,font,percent(coverage)+"->"+percent(target),{380,y+11.5f},
+                        12,{226,236,244},1.f);
+                    const auto cancel = constructionCancelButton(i);
+                    const bool cancelable = !queue[end-1].paid && queue[end-1].progress <= 0;
+                    box(window,cancel.position,cancel.size,cancelable ? sf::Color(92,48,52,220) :
+                        sf::Color(42,45,50,160),cancelable ? sf::Color(214,130,130) : sf::Color(80,84,90));
+                    battleLabel(window,font,"X",cancel.getCenter(),11,cancelable ? sf::Color(248,224,224) :
+                        sf::Color(120,124,130),.5f);
                     for (int direction : {-1,1}) {
                         const auto rect = constructionPriorityButton(i,direction);
                         const bool enabled = hoi5::Construction::canMoveGroup(queue,groups,i,direction);
                         box(window,rect.position,rect.size,enabled ? sf::Color(52,70,88,210) :
                             sf::Color(34,40,48,150),enabled ? sf::Color(128,156,184,220) :
                             sf::Color(70,82,96,150));
-                        battleLabel(window,font,direction < 0 ? "^" : "v",rect.getCenter(),10,
+                        battleLabel(window,font,direction < 0 ? "^" : "v",rect.getCenter(),12,
                             enabled ? sf::Color(232,240,248) : sf::Color(128,138,148),.5f);
                     }
                 }
                 if (groups.size() > 4)
                     label(window,font,constructionQueueExpanded ? "Свернуть очередь" :
-                        "Показать еще "+std::to_string(groups.size()-rows),{36,151+rows*26.f},13);
+                        "Показать еще "+std::to_string(groups.size()-rows),{36,151+rows*26.f},15);
                 const double power = hoi5::Construction::buildPower(world.tiles,0,world.profiles[0]);
                 const int activeCount = std::min(3,int(std::ranges::count_if(queue,[](const auto& project) {
                     return !project.paused;
@@ -10828,8 +11065,8 @@ int main(int argc, char** argv) try {
                         }
                         if (!missing.empty()) status = Status::waitingResources;
                     }
-                    label(window,font,"Статус: "+std::string(hoi5::constructionStatusLabel(status)),{38,detailY},11);
-                    label(window,font,"Осталось: "+formatBuildDuration(duration),{38,detailY+15},11);
+                    label(window,font,"Статус: "+std::string(hoi5::constructionStatusLabel(status)),{38,detailY},13);
+                    label(window,font,"Осталось: "+formatBuildDuration(duration),{38,detailY+17},13);
                     const auto formatNeeds = [&](const hoi5::Stockpile& amounts,int limit) {
                         std::vector<std::pair<std::string_view,double>> sorted;
                         for (const auto& [key,amount] : amounts)
@@ -10859,16 +11096,16 @@ int main(int argc, char** argv) try {
                         if (!needs.empty()) label(window,font,"Расход/мес: "+needs,{38,detailY+(contested ? 44 : 30)},10);
                     }
                 }
-                label(window,font,"Скорость строительства",{30,detailY+54},14);
+                label(window,font,"Скорость строительства",{30,detailY+54},17);
                 label(window,font,std::to_string(int(std::nearbyint(power)))+" строй-очков в месяц",
-                    {38,detailY+76},12);
-                label(window,font,"До 3 проектов делят строймощность между собой.",{38,detailY+96},10);
+                    {38,detailY+78},14);
+                label(window,font,"До 3 проектов делят строймощность между собой.",{38,detailY+100},12);
                 for (int i = 0; i < int(std::size(hoi5::constructionSpecs)); ++i) {
-                    const float x = i%2 ? 205.f : 30.f, y = 190+offset+(i/2)*23.f;
-                    box(window,{x,y},{171,21},i == buildingSpec ? sf::Color(47,71,88) : sf::Color(30,39,50));
-                    label(window,font,std::string(hoi5::constructionSpecs[i].label),{x+3,y+2},10);
+                    const float x = i%2 ? 241.f : 30.f, y = 190+offset+(i/2)*23.f;
+                    box(window,{x,y},{205,21},i == buildingSpec ? sf::Color(47,71,88) : sf::Color(30,39,50));
+                    label(window,font,std::string(hoi5::constructionSpecs[i].label),{x+3,y+1},12);
                 }
-                box(window,{30,355+offset},{346,26},constructionPlacement ? sf::Color(47,71,88) :
+                box(window,{30,355+offset},{416,26},constructionPlacement ? sf::Color(47,71,88) :
                     sf::Color(30,39,50),{82,108,132});
                 label(window,font,constructionPlacement ? "Завершить размещение" : "Начать строительство",
                     {38,358+offset},15);
@@ -11241,7 +11478,9 @@ int main(int argc, char** argv) try {
                         box(window,{left+17.f,y+3.f},{21,21},{52,65,79},{103,127,151});
                         battleLabel(window,cardFont,row.icon,{left+27.5f,y+13.f},16,row.ink,.5f);
                     }
-                    battleLabel(window,cardFont,row.text,{left+(row.icon.empty() ? 18.f : 44.f),y+13.f},17,row.ink);
+                    const float textX = left+(row.icon.empty() ? 18.f : 44.f);
+                    fittedBattleLabel(window,cardFont,row.text,{textX,y+13.f},17,
+                        left+width-14.f-textX,row.ink);
                     if (hovered && !row.help.empty()) hoverHelp = HoverHelp{row.text,countryTextLines(row.help,48)};
                 }
                 if (countryScrollMax) {
@@ -11273,14 +11512,14 @@ int main(int argc, char** argv) try {
                 box(window,sf::Vector2f(tradeClose.position),sf::Vector2f(tradeClose.size),{44,54,66},{120,142,164});
                 label(window,font,"X",{tradeWidth-28,tradeTop+15},13);
                 label(window,font,policy.externalAccess ? "Торговля: внешний рынок открыт" :
-                    "Внешний рынок закрыт. Доступны только сделки со странами",{18,tradeTop+60},13);
+                    "Внешний рынок закрыт. Доступны только сделки со странами",{18,tradeTop+60},15);
                 label(window,font,"Покупка: "+resourceAmountLabel(total(tradeForecast->imports))+"/"+
-                    resourceAmountLabel(tradeMonthly)+" ед./мес",{18,tradeTop+85},11);
+                    resourceAmountLabel(tradeMonthly)+" ед./мес",{18,tradeTop+85},13);
                 label(window,font,"Продажа: "+resourceAmountLabel(total(tradeForecast->exports))+"/"+
-                    resourceAmountLabel(sellLimit)+" ед./мес",{18,tradeTop+103},11);
+                    resourceAmountLabel(sellLimit)+" ед./мес",{18,tradeTop+105},13);
                 const double balance = world.economyCurrent.empty() ? 0. : world.economyCurrent.front().trade;
                 label(window,font,"Деньги от торговли: "+std::string(balance < 0 ? "−$" : "$")+
-                    formatAmount(std::abs(balance))+"/мес",{330,tradeTop+85},11);
+                    formatAmount(std::abs(balance))+"/мес",{330,tradeTop+85},13);
                 const year_month_day nextTrade{sys_days{year{2000}/1/1}+days{simulation.nextMarketExecutionHour()/24}};
                 std::ostringstream execution;
                 execution << "Исполнение: понедельник 00:00, раз в неделю. След.: " << int(nextTrade.year())
@@ -11292,12 +11531,13 @@ int main(int argc, char** argv) try {
                     box(window,sf::Vector2f(rect.position),sf::Vector2f(rect.size),
                         tradeCategory == i ? sf::Color(58,88,112,220) : sf::Color(30,40,52,175),
                         tradeCategory == i ? sf::Color(170,202,232) : sf::Color(86,108,132));
-                    label(window,font,resourceCategories[i],sf::Vector2f(rect.position)+sf::Vector2f{10,11},12);
+                    label(window,font,resourceCategories[i],sf::Vector2f(rect.position)+sf::Vector2f{10,7},16);
                 }
-                constexpr std::array columns{18.f,136.f,198.f,262.f,350.f,396.f,484.f};
-                constexpr std::array headings{"Ресурс","Склад","Баланс","Рынок","К базе","Спрос/пр.","Контракт"};
+                constexpr std::array columns{18.f,146.f,210.f,274.f,350.f,492.f,570.f};
+                constexpr std::array headings{"Ресурс","Склад","Баланс","Мир","Покупка / продажа","Доступно","Контракт"};
                 for (int i = 0; i < int(columns.size()); ++i)
-                    battleLabel(window,font,headings[i],{columns[i],tradeTop+254},10,{150,166,184});
+                    battleLabel(window,font,headings[i],{columns[i],tradeTop+254},12,{150,166,184});
+                battleLabel(window,font,"Изменить",{640,tradeTop+254},12,{150,166,184});
                 debug.record("trade_header",trade_headerStart);
                 const auto keys = resourceCategoryKeys(tradeCategory);
                 const int visible = tradeRows(), maxScroll = std::max(0,int(keys.size())-visible);
@@ -11310,17 +11550,17 @@ int main(int argc, char** argv) try {
                         sf::Color(24,32,42,118) : sf::Color(30,38,48,118));
                     const double amount = hoi5::value(stocks,key);
                     const double net = hoi5::value(tradeForecast->outputs,key)-hoi5::value(tradeForecast->inputs,key);
-                    const double change = world.market.price(key)/world.market.base(key)-1.;
-                    std::ostringstream changeText;
-                    changeText << std::showpos << std::fixed << std::setprecision(1) << change*100 << '%';
-                    if (sf::FloatRect({260,y-2},{132,42}).contains(sf::Vector2f(sf::Mouse::getPosition(window)))) {
+                    if (sf::FloatRect({260,y-2},{304,42}).contains(sf::Vector2f(sf::Mouse::getPosition(window)))) {
                         std::ostringstream week;
                         week << std::showpos << std::fixed << std::setprecision(2) << world.market.priceChange(key)*100 << '%';
+                        std::ostringstream local;
+                        local << std::showpos << std::fixed << std::setprecision(2)
+                              << (world.market.countryPrice(0,key)/world.market.price(key)-1)*100 << '%';
                         hoverHelp = HoverHelp{std::string(resourceDisplayName(key)),
-                            {"К прошлой неделе: "+week.str(),"К базовой цене: "+changeText.str(),
-                             "Внешний рынок, покупка / продажа: "+
-                             formatMoney(world.market.base(key)*hoi5::Market::buyMarkup)+" / "+
-                             formatMoney(world.market.base(key)*hoi5::Market::sellMarkdown)}};
+                            {"Мировая цена к прошлой неделе: "+week.str(),
+                             "Наш рынок к мировой цене: "+local.str(),
+                             "Наша покупка / продажа: "+formatMoney(world.market.unitPrice(0,key,true))+" / "+
+                             formatMoney(world.market.unitPrice(0,key,false))}};
                     }
                     const double buyOrder = world.market.contractAmount(0,key,true);
                     const bool buy = buyOrder > 0;
@@ -11332,24 +11572,25 @@ int main(int argc, char** argv) try {
                         partial ? sf::Color(238,198,90) : sf::Color(236,148,132);
                     const std::array values{std::string(resourceDisplayName(key)),resourceAmountLabel(amount),
                         resourceAmountLabel(net),formatMoney(world.market.price(key)),
-                        changeText.str(),
-                        world.market.revision == 0 ? std::string("--") :
-                            resourceAmountLabel(hoi5::value(world.market.demand,key))+"/"+
-                            resourceAmountLabel(hoi5::value(world.market.supply,key)),
+                        formatMoney(world.market.unitPrice(0,key,true))+" / "+
+                            formatMoney(world.market.unitPrice(0,key,false)),
+                        world.market.revision == 0 || world.market.countryDemand.empty() ? std::string("--") :
+                            resourceAmountLabel(hoi5::value(world.market.countryDemand[0],key))+"/"+
+                            resourceAmountLabel(hoi5::value(world.market.countrySupply[0],key)),
                         ordered <= 0 ? std::string("--") : (buy ? "Покупка " : "Продажа ")+resourceAmountLabel(ordered)};
                     for (int i = 0; i < int(values.size()); ++i) {
-                        const sf::Color color = i == 6 ? orderColor : i == 2 || i == 4 ?
-                            ((i == 2 ? net : change) >= 0 ? sf::Color(174,224,158) : sf::Color(236,168,154)) :
+                        const sf::Color color = i == 6 ? orderColor : i == 2 ?
+                            (net >= 0 ? sf::Color(174,224,158) : sf::Color(236,168,154)) :
                             sf::Color(220,230,240);
-                        battleLabel(window,font,values[i],{columns[i],y+10},10,color);
+                        battleLabel(window,font,values[i],{columns[i],y+10},i == 0 ? 15 : 13,color);
                     }
                     {
                         hoi5::DebugMeasure timing(&debug,"trade_buttons");
                         for (int i = 0; i < int(tradeButtons.size()); ++i) {
                             const float x = float(tradeButtons[i]);
-                            box(window,{x,y},{24,20},{42,62,82,210},i < 2 ? sf::Color(124,178,232) : sf::Color(180,210,128));
-                            box(window,{x+7,y+9},{10,2},sf::Color::White);
-                            if (i%2) box(window,{x+11,y+5},{2,10},sf::Color::White);
+                            box(window,{x,y+21},{24,20},{42,62,82,210},i < 2 ? sf::Color(124,178,232) : sf::Color(180,210,128));
+                            box(window,{x+7,y+30},{10,2},sf::Color::White);
+                            if (i%2) box(window,{x+11,y+26},{2,10},sf::Color::White);
                         }
                     }
                     if (ordered <= 0) continue;
@@ -11373,12 +11614,12 @@ int main(int argc, char** argv) try {
                             }
                             if (!policy.externalAccess && !eligible)
                                 status += partners ? "Война / эмбарго с контрагентами" : "Нет встречных заявок стран";
-                            else if (buy && world.profiles[0].budget < ordered*world.market.unitPrice(key,true))
+                            else if (buy && world.profiles[0].budget < ordered*world.market.unitPrice(0,key,true))
                                 status += "Недостаточно средств на весь объём";
                             else status += "Недостаточно доступного объёма / лимита";
                         }
                     }
-                    battleLabel(window,font,status,{22,y+28},9,ready ? sf::Color(170,210,180) : orderColor);
+                    battleLabel(window,font,status,{22,y+31},12,ready ? sf::Color(170,210,180) : orderColor);
                 }
                 if (maxScroll > 0) {
                     const float track = std::max(40.f,float(visible*tradeRowHeight-16));
@@ -11389,7 +11630,7 @@ int main(int argc, char** argv) try {
                 label(window,font,world.market.revision == 0 ?
                     "Спрос/предложение появятся после первых торгов. Контракты ожидают исполнения." :
                     "Спрос/предложение: итоги последних торгов. Объём контракта не гарантирован.",
-                    {18,size.y-36},10);
+                    {18,size.y-36},12);
             }
             if (const auto found = world.battles.find(selectedBattle); found != world.battles.end()) {
                 const auto& battle = found->second;
@@ -11478,8 +11719,11 @@ int main(int argc, char** argv) try {
                 const float filtersInset = (mapLayerMenu || mapLayerProgress > .01f || resourceGroupMenu ||
                     resourceGroupProgress > .01f) ? 258.f : 0.f;
                 const float hexInset = selectedTiles.empty() ? 0.f : size.x-hexPanelRect().position.x;
+                const float armyInset = armyCommandBounds.size.x > 0
+                    ? size.y-armyCommandBounds.position.y+8.f : 0.f;
                 newsPanel.update(world.news,dt,size,newsLeft,stackNews ?
-                    (size.y-wingBounds.position.y)*airDockScale+8.f : 0.f,std::max(filtersInset,hexInset));
+                    (size.y-wingBounds.position.y)*airDockScale+8.f : 0.f,
+                    std::max(filtersInset,hexInset),armyInset);
                 newsPanel.draw(window,font);
             }
             if (pauseMenu) {
@@ -11564,14 +11808,14 @@ int main(int argc, char** argv) try {
                 const std::array<std::string,6> buttons{"Новая игра", "Продолжить игру",
                     "Мультиплеер", "Настройки", "Помощь", "Выход из игры"};
                 for (std::size_t i=0;i<buttons.size();++i) {
-                    const float y=size.y/2-152+54*i;
-                    box(window,{size.x/2-150,y},{300,42},{30,39,50},{92,112,136});
+                    const float y=size.y/2-186+64*i;
+                    box(window,{size.x/2-188,y},{376,52},{30,39,50},{92,112,136});
                     const auto value = sf::String::fromUtf8(buttons[i].begin(),buttons[i].end());
-                    sf::Text text(font,value,18);
+                    sf::Text text(font,value,20);
                     if (i==2 || (i==1 && !resumable)) text.setFillColor({152,164,180});
                     const auto bounds=text.getLocalBounds();
                     text.setPosition({size.x/2-bounds.size.x/2-bounds.position.x,
-                                      y+21-bounds.size.y/2-bounds.position.y});
+                                      y+26-bounds.size.y/2-bounds.position.y});
                     window.draw(text);
                 }
                 if (!errorMessage.empty()) label(window,font,errorMessage,{80,size.y-60});
@@ -11815,7 +12059,7 @@ int main(int argc, char** argv) try {
         if (playing && countryModalOpen()) {
             window.setView(gui);
             const auto windowSize = sf::Vector2i(window.getSize());
-            const sf::Vector2i dialog{std::min(720,windowSize.x-40),std::min(660,windowSize.y-108)};
+            const sf::Vector2i dialog{std::min(840,windowSize.x-40),std::min(720,windowSize.y-108)};
             const auto origin = (windowSize-dialog)/2;
             const auto p = sf::Vector2f(origin);
             box(window,{0,0},size,{0,0,0,95});
@@ -11827,9 +12071,9 @@ int main(int argc, char** argv) try {
                 box(window,position,sf::Vector2f(rect.size),
                     fullRow ? sf::Color{35,55,63} : sf::Color{36,52,64},
                     fullRow ? sf::Color::Transparent : sf::Color{116,144,163});
-                battleLabel(window,cardFont,caption,
+                    battleLabel(window,cardFont,caption,
                     position+sf::Vector2f{fullRow ? 10.f : rect.size.x/2.f,rect.size.y/2.f},
-                    15,{170,220,195},fullRow ? 0.f : .5f);
+                    18,{170,220,195},fullRow ? 0.f : .5f);
                 countryDecisionHits.push_back({rect,std::move(activate)});
             };
             button("X",{{dialog.x-50,18},{30,30}},closeCountryDetail);
@@ -11837,29 +12081,44 @@ int main(int argc, char** argv) try {
             int y = 90 - (countryDetail != CountryDetail::none ? countryDialogScroll : 0);
             const auto rowVisible = [&](int height) { return y >= 85 && y+height <= dialog.y-26; };
             const auto textRow = [&](std::string caption,sf::Color color = {224,234,244}) {
-                const auto lines = countryTextLines(caption,std::max(20,(dialog.x-56)/7));
-                const int height = std::max(36,int(lines.size())*19+12);
+                std::vector<std::string> lines;
+                std::istringstream words(caption);
+                std::string line,word;
+                sf::Text measure(cardFont,"",18);
+                const float available = float(dialog.x-56);
+                while (words >> word) {
+                    const auto candidate = line.empty() ? word : line+" "+word;
+                    const auto utf = sf::String::fromUtf8(candidate.begin(),candidate.end());
+                    measure.setString(utf);
+                    if (!line.empty() && measure.getLocalBounds().size.x > available) {
+                        lines.push_back(std::move(line));
+                        line = word;
+                    } else line = candidate;
+                }
+                if (!line.empty()) lines.push_back(std::move(line));
+                if (lines.empty()) lines.emplace_back();
+                const int height = std::max(42,int(lines.size())*23+12);
                 if (rowVisible(height))
                     for (int i = 0; i < int(lines.size()); ++i)
-                        battleLabel(window,cardFont,lines[i],p+sf::Vector2f{28,float(y+14+i*19)},15,color);
+                        battleLabel(window,cardFont,lines[i],p+sf::Vector2f{28,float(y+16+i*23)},18,color);
                 y += height;
             };
             constexpr sf::Color muted{163,184,202}, gold{238,199,111}, blue{126,186,235}, green{133,213,169};
             constexpr sf::Color red{237,127,128};
             const auto titleRow = [&](std::string title) {
-                battleLabel(window,cardFont,title,p+sf::Vector2f{24,28},21,{224,234,244});
+                fittedBattleLabel(window,cardFont,title,p+sf::Vector2f{24,28},23,dialog.x-88,{224,234,244});
             };
             const auto section = [&](std::string_view title) {
                 if (rowVisible(44)) {
                     box(window,p+sf::Vector2f{28,float(y+12)},{float(dialog.x-56),1},{56,76,91});
-                    battleLabel(window,cardFont,std::string(title),p+sf::Vector2f{28,float(y+31)},16,gold);
+                    battleLabel(window,cardFont,std::string(title),p+sf::Vector2f{28,float(y+31)},19,gold);
                 }
                 y += 44;
             };
             const auto metric = [&](std::string name,std::string value,sf::Color color) {
                 if (rowVisible(32)) {
-                    battleLabel(window,cardFont,name,p+sf::Vector2f{28,float(y+15)},15,{224,234,244});
-                    battleLabel(window,cardFont,value,p+sf::Vector2f{float(dialog.x-28),float(y+15)},15,color,1.f);
+                    battleLabel(window,cardFont,name,p+sf::Vector2f{28,float(y+15)},18,{224,234,244});
+                    battleLabel(window,cardFont,value,p+sf::Vector2f{float(dialog.x-28),float(y+15)},18,color,1.f);
                 }
                 y += 32;
             };
@@ -11876,15 +12135,15 @@ int main(int argc, char** argv) try {
             };
             const auto hero = [&](std::string name,std::string value,sf::Color color) {
                 if (rowVisible(66)) {
-                    battleLabel(window,cardFont,name,p+sf::Vector2f{28,float(y+15)},16,muted);
+                    battleLabel(window,cardFont,name,p+sf::Vector2f{28,float(y+15)},19,muted);
                     battleLabel(window,cardFont,value,p+sf::Vector2f{28,float(y+44)},32,color);
                 }
                 y += 66;
             };
             const auto bar = [&](std::string name,std::string value,double fraction,sf::Color color) {
                 if (rowVisible(53)) {
-                    battleLabel(window,cardFont,name,p+sf::Vector2f{28,float(y+15)},15,{224,234,244});
-                    battleLabel(window,cardFont,value,p+sf::Vector2f{float(dialog.x-28),float(y+15)},15,color,1.f);
+                    battleLabel(window,cardFont,name,p+sf::Vector2f{28,float(y+15)},18,{224,234,244});
+                    battleLabel(window,cardFont,value,p+sf::Vector2f{float(dialog.x-28),float(y+15)},18,color,1.f);
                     box(window,p+sf::Vector2f{28,float(y+29)},{float(dialog.x-56),8},{49,65,80});
                     if (fraction > 0)
                         box(window,p+sf::Vector2f{28,float(y+29)},{float((dialog.x-56)*std::min(1.,fraction)),8},color);
@@ -11998,7 +12257,7 @@ int main(int argc, char** argv) try {
                         section(policyGroups[group]);
                         if (rowVisible(40)) {
                             battleLabel(window,cardFont,std::to_string(100+10*policy.taxes[group])+"% базового уровня",
-                                p+sf::Vector2f{28,float(y+20)},15,gold);
+                                p+sf::Vector2f{28,float(y+20)},18,gold);
                             for (const int delta : {-1,1})
                                 button(delta < 0 ? "−" : "+",{{dialog.x-(delta < 0 ? 112 : 68),y+7},{38,28}},[&,group,delta] {
                                     domesticGroup = group;
@@ -12026,8 +12285,8 @@ int main(int argc, char** argv) try {
                                 if (policy.programFunding[group] < .999)
                                     value += " | финансирование "+percent(policy.programFunding[group]);
                             }
-                            battleLabel(window,cardFont,policyGroups[group],p+sf::Vector2f{28,float(y+18)},16);
-                            battleLabel(window,cardFont,value,p+sf::Vector2f{28,float(y+44)},15,active ? green : muted);
+                            battleLabel(window,cardFont,policyGroups[group],p+sf::Vector2f{28,float(y+18)},18);
+                            battleLabel(window,cardFont,value,p+sf::Vector2f{28,float(y+46)},17,active ? green : muted);
                             button(active ? "Завершить" : "Начать",{{dialog.x-124,y+23},{96,28}},[&,group] {
                                 domesticGroup = group;
                                 savedCountryDialogScroll = countryDialogScroll;

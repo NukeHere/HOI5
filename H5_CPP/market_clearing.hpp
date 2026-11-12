@@ -27,8 +27,8 @@ struct MarketPlan {
 struct MarketRules {
     std::function<bool(int,int)> allowed;
     std::function<int(int,int)> priority;
-    std::function<double(std::string_view)> price;
-    std::function<double(std::string_view,bool)> externalPrice;
+    std::function<double(std::string_view,int,int)> price;
+    std::function<double(std::string_view,bool,int)> externalPrice;
     std::function<double(int)> budget;
     std::function<double(int,std::string_view)> stock, freeStorage;
     std::function<std::string_view(std::string_view)> bucket;
@@ -102,17 +102,18 @@ inline MarketPlan clearMarket(std::span<const MarketOrder> orders, const MarketR
         };
         std::stable_sort(pairs.begin(),pairs.end(),[&](const auto& a,const auto& b) { return pairRank(a) < pairRank(b); });
         for (auto [buy,sell] : pairs)
-            transfer(buy,sell,std::min(plan.remaining[buy],plan.remaining[sell]),rules.price(resource));
+            transfer(buy,sell,std::min(plan.remaining[buy],plan.remaining[sell]),
+                rules.price(resource,orders[buy].country,orders[sell].country));
         const auto compare = [&](auto a, auto b) { return rank[orders[a].country] < rank[orders[b].country]; };
         std::stable_sort(sides.sells.begin(),sides.sells.end(),compare);
         std::stable_sort(sides.buys.begin(),sides.buys.end(),compare);
         double demand = quota(rules.externalDemand,resource), supply = quota(rules.externalSupply,resource);
         for (auto sell : sides.sells)
             if (rules.externalAccess(orders[sell].country))
-                demand -= transfer({},sell,demand,rules.externalPrice(resource,false));
+                demand -= transfer({},sell,demand,rules.externalPrice(resource,false,orders[sell].country));
         for (auto buy : sides.buys)
             if (rules.externalAccess(orders[buy].country))
-                supply -= transfer(buy,{},supply,rules.externalPrice(resource,true));
+                supply -= transfer(buy,{},supply,rules.externalPrice(resource,true,orders[buy].country));
     }
     return plan;
 }

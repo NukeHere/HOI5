@@ -80,7 +80,7 @@ class NewsPanel {
         return it == items.end() ? nullptr : *it;
     }
 
-    int popupRows() const { return std::max(1,int((popupRect.size.y-118)/18)); }
+    int popupRows() const { return std::max(1,int((popupRect.size.y-122)/21)); }
     int archiveRows() const { return std::max(1,int((archiveRect.size.y-65)/48)); }
 
 public:
@@ -97,7 +97,8 @@ public:
         return true;
     }
 
-    void update(const News& news,float dt,sf::Vector2f size,float left,float minimumBottom = 0.f,float rightInset = 0.f) {
+    void update(const News& news,float dt,sf::Vector2f size,float left,float minimumBottom = 0.f,
+                float rightInset = 0.f,float popupBottom = 0.f) {
         items = news.visible(0);
         const float margin = size.x >= 1100 ? 310 : 74;
         float width = std::min(560.f,size.x-left-margin);
@@ -110,8 +111,9 @@ public:
         const float available = std::max(180.f,size.x-rightInset-24);
         const float aw = std::min(400.f,available), ah = std::clamp(size.y-215,260.f,440.f);
         const float pw = std::min(350.f,available), ph = std::clamp(size.y-260,155.f,220.f);
-        archiveRect = {{std::max(10.f,size.x-aw-14-rightInset),size.y-ah-125},{aw,ah}};
-        popupRect = {{std::max(10.f,size.x-pw-14-rightInset),size.y-ph-104},{pw,ph}};
+        const float overlayBottom = std::max(104.f,popupBottom);
+        archiveRect = {{std::max(10.f,size.x-aw-14-rightInset),size.y-ah-std::max(125.f,overlayBottom)},{aw,ah}};
+        popupRect = {{std::max(10.f,size.x-pw-14-rightInset),size.y-ph-overlayBottom},{pw,ph}};
         if (popup && !find(popup)) popup = 0;
         if (!items.empty() && items.front()->id > seen) {
             std::erase_if(pending,[&](int id) { return !find(id); });
@@ -210,9 +212,9 @@ public:
         const bool compact = width < 360;
         const float offset = compact ? 96 : 155;
         box(window,tickerRect,{20,29,39,240},{96,122,148});
-        text(window,font,utf8(compact ? "Новости" : "Мировые новости"),{tx+10,ty+19},12,{235,239,244});
+        text(window,font,utf8(compact ? "Новости" : "Мировые новости"),{tx+10,ty+19},14,{235,239,244});
         if (items.empty()) {
-            text(window,font,utf8("Пока нет сообщений"),{tx+offset,ty+19},11);
+            text(window,font,utf8("Пока нет сообщений"),{tx+offset,ty+19},13);
         } else {
             const auto& item = *items[tickerIndex];
             const auto message = utf8("  •  "+item.title+"  •  ");
@@ -220,13 +222,13 @@ public:
             sf::String snippet;
             const auto count = std::max(8,int((width-offset-5)/7));
             for (int i = 0; i < count; ++i) snippet += message[(start+i)%message.getSize()];
-            text(window,font,snippet,{tx+offset,ty+19},11,color(item));
+            text(window,font,snippet,{tx+offset,ty+19},13,color(item));
         }
         if (archive) {
             const auto [x,y] = archiveRect.position;
             const auto [w,h] = archiveRect.size;
             box(window,archiveRect,{21,29,39,248},{110,137,165},2);
-            text(window,font,utf8("Мировые новости и события"),{x+14,y+25},15);
+            text(window,font,utf8("Мировые новости и события"),{x+14,y+25},17);
             text(window,font,"X",{x+w-26,y+25},15);
             const int count = archiveRows();
             archiveScroll = std::clamp(archiveScroll,0,std::max(0,int(items.size())-count));
@@ -236,8 +238,8 @@ public:
                 const float row = y+72+48*i;
                 const sf::FloatRect hit({x+10,row-28},{w-20,42});
                 box(window,hit,{35,46,59,235});
-                text(window,font,dateAndPriority(item),{x+18,row-15},10,color(item));
-                text(window,font,utf8(item.title).substring(0,std::max(20,int((w-40)/7))),{x+18,row+3},11);
+                text(window,font,dateAndPriority(item),{x+18,row-15},11,color(item));
+                text(window,font,utf8(item.title).substring(0,std::max(20,int((w-40)/7))),{x+18,row+4},13);
                 archiveHits.emplace_back(hit,item.id);
             }
             if (int(items.size()) > count)
@@ -247,18 +249,18 @@ public:
             const auto [x,y] = popupRect.position;
             const auto [w,h] = popupRect.size;
             box(window,popupRect,{24,32,43,248},color(*item),2);
-            text(window,font,dateAndPriority(*item),{x+14,y+24},11,color(*item));
+            text(window,font,dateAndPriority(*item),{x+14,y+24},12,color(*item));
             text(window,font,"X",{x+w-25,y+24},15);
             const auto lineWidth = std::max(25,int((w-30)/7.5));
             const auto title = wrap(item->title,lineWidth);
             for (int i = 0; i < 2 && i < int(title.size()); ++i)
-                text(window,font,title[i],{x+14,y+52+19*i},13);
+                text(window,font,title[i],{x+14,y+52+20*i},15);
             bodyLines = wrap(item->body,lineWidth);
             const int count = popupRows();
             popupScroll = std::clamp(popupScroll,0,std::max(0,int(bodyLines.size())-count));
             for (int i = 0; i < count && popupScroll+i < int(bodyLines.size()); ++i)
-                text(window,font,bodyLines[popupScroll+i],{x+14,y+100+18*i},11,{205,219,232});
-            text(window,font,utf8("Все новости"),{x+14,y+h-19},11,{150,204,241});
+                text(window,font,bodyLines[popupScroll+i],{x+14,y+102+21*i},13,{205,219,232});
+            text(window,font,utf8("Все новости"),{x+14,y+h-19},13,{150,204,241});
             if (int(bodyLines.size()) > count)
                 text(window,font,utf8(std::to_string(popupScroll+1)+"/"+
                     std::to_string(bodyLines.size()-count+1)+" ↓"),{x+w-76,y+h-19},10,{170,188,202});
