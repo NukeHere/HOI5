@@ -71,8 +71,7 @@ struct CountryPolitics {
     std::map<std::pair<ForeignAction,int>,int> cooldowns;
 
     bool warReadiness() const {
-        return support >= .45 && legitimacy >= .45 && warSupport >= .35 && capital >= 20 &&
-            std::max(factionRadicalization[1],factionRadicalization[2]) < .7;
+        return support >= .45 && legitimacy >= .45 && warSupport >= .35 && capital >= 20;
     }
 
     double programSupportEffect(int group,double population,double monthlyCost,double funding = 1.) const {
@@ -322,7 +321,7 @@ struct Diplomacy {
             if (day < goal->second) return "Цель войны будет готова "+politicalDate(goal->second);
             if (day > goal->second+180) return "Срок подготовленной цели войны истёк";
             if (!state.warReadiness())
-                return "Нужно 45% поддержки, 45% легитимности, 35% поддержки войны, 20 политического капитала и отсутствие сильного сопротивления фракций";
+                return "Нужно 45% поддержки, 45% легитимности, 35% поддержки войны и 20 политического капитала";
         }
         if (action == A::revokeTransit && !r.transitGrantors.contains(actor))
             return "Вы не выдавали этой стране разрешение на проход";

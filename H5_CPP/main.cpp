@@ -562,25 +562,39 @@ struct World {
         flows.loanRepayments = incoming;
         flows.debtService = outgoing;
         flows.politicalPrograms = diplomacy.programExpenses(country);
+        for (const auto& unit : divisions) if (unit.owner == country)
+            flows.army += std::max(0,unit.manpower)*8.;
+        for (const auto& wing : air.wings) if (wing.owner == country)
+            flows.army += std::max(0,wing.count)*18000.;
+        for (const auto& unit : air.defense) if (unit.owner == country)
+            flows.army += 60000.*std::max(.25,unit.health);
         return flows;
     }
 
     struct CountryPower {
-        std::array<double,3> indices{};
+        std::array<double,5> indices{};
         double total{};
         int rank = 1;
     };
 
     std::vector<CountryPower> powerRanking() const {
         std::vector<CountryPower> result(profiles.size());
-        std::array<double,3> maxima{};
+        std::array<double,5> maxima{};
         for (int country = 0; country < int(profiles.size()); ++country) {
             const auto income = taxedTreasury(country);
             const auto& policy = diplomacy.countries[country];
             auto& components = result[country].indices;
             components[0] = std::max(0.,income.population)+std::max(0.,income.companies);
             const double cohesion = (policy.stability+policy.legitimacy+policy.support)/3;
-            components[2] = std::max(0.,profiles[country].population)*std::clamp(cohesion,0.,1.);
+            components[4] = std::max(0.,profiles[country].population)*std::clamp(cohesion,0.,1.);
+            for (const auto& tile : tiles) if (tile.owner == country && !tile.water) {
+                const auto infantry = hoi5::groundTerrainEffects(tile.natural,false);
+                const auto armor = hoi5::groundTerrainEffects(tile.natural,true);
+                components[3] += 1.+1.5*hoi5::agricultureScore(tile.natural)+
+                    .35*std::max(infantry.defense,armor.defense);
+                for (const auto& deposit : tile.deposits)
+                    components[3] += .12*std::log1p(std::max(0.,deposit.mass));
+            }
         }
         for (const auto& unit : divisions) {
             const double readiness = std::clamp(unit.organization/std::max(1.,unit.maxOrganization),0.,1.);
@@ -589,10 +603,17 @@ struct World {
             result[unit.owner].indices[1] += std::max(0,unit.manpower)*std::max(0.,equipment)*strength*
                 (.25+.75*readiness)*std::clamp(unit.lastSupplyRatio,0.,1.);
         }
+        for (const auto& wing : air.wings) if (wing.owner >= 0 && wing.owner < int(result.size())) {
+            double quality = 1.;
+            for (int type = 0; type < int(std::size(hoi5::aircraftTypes)); ++type)
+                if (wing.typeCount(type) > 0)
+                    quality = std::max(quality,.65+hoi5::aircraftTypes[type].range*.08);
+            result[wing.owner].indices[2] += std::max(0,wing.readyCount())*quality;
+        }
         for (const auto& entry : result)
             for (std::size_t i = 0; i < maxima.size(); ++i)
                 maxima[i] = std::max(maxima[i],entry.indices[i]);
-        constexpr std::array weights{.4,.4,.2};
+        constexpr std::array weights{.35,.30,.15,.05,.15};
         for (auto& entry : result)
             for (std::size_t i = 0; i < maxima.size(); ++i) {
                 entry.indices[i] = maxima[i] > 0 ? 100*entry.indices[i]/maxima[i] : 0.;
@@ -617,7 +638,8 @@ struct World {
 
     std::string countryThreat(int country,const std::vector<CountryPower>& ratings) const {
         const auto& relation = diplomacy.relation(0,country);
-        const double military = ratings[country].indices[1], ownMilitary = ratings[0].indices[1];
+        const double military = ratings[country].indices[1]*.67+ratings[country].indices[2]*.33;
+        const double ownMilitary = ratings[0].indices[1]*.67+ratings[0].indices[2]*.33;
         const auto it = relation.opinion.find(country);
         const double attitude = it == relation.opinion.end() ? 0. : it->second;
         if (relation.war)
@@ -981,20 +1003,20 @@ struct World {
             const auto alert = [&](std::string_view key,bool active,const char* title,const char* body,const char* recovery) {
                 news.alert(day,country,countryNames[country],key,active,title,body,recovery);
             };
-            alert("radicalization_blocks_war",std::max(state.factionRadicalization[1],state.factionRadicalization[2]) >= .7,
-                "Фракции блокируют подготовку войны",
-                "Радикализация либералов или социалистов достигла 70%. Проверьте их требования и поддержку.",
-                "Радикализация фракций больше не блокирует войну");
+            alert("radicalization_unrest",std::max(state.factionRadicalization[1],state.factionRadicalization[2]) >= .7,
+                "Высокая радикализация фракций",
+                "Радикализация либералов или социалистов достигла 70%. Война разрешена, но недовольство вызовет внутренние последствия.",
+                "Радикализация фракций снизилась ниже опасного уровня");
             alert("political_capital_low",state.capital < 20,"Политический капитал на исходе",
                 "Осталось менее 20 единиц политического капитала. Часть решений недоступна.","Политический капитал восстановился до 20");
             alert("storage_overflow",overflow,"Склады переполнены",
                 "Объём запасов превышает доступное хранилище. Проверьте вместимость складов и экспорт.","Переполнение складов устранено");
             alert("budget_deficit",taxedTreasury(country).balance()+trade[country] < 0,"Бюджет исполняется с дефицитом",
                 "Текущие расходы превышают доходы. Проверьте бюджет.","Бюджет вышел из дефицита");
-            alert("food_shortage",state.food < .5,"Населению не хватает продовольствия",
-                "Обеспечение продовольствием ниже половины потребности. Проверьте производство и импорт.","Обеспечение продовольствием улучшилось");
-            alert("goods_shortage",state.goods < .5,"Нехватка потребительских товаров",
-                "Обеспечение населения товарами ниже половины потребности.","Обеспечение потребительскими товарами улучшилось");
+            alert("food_shortage",state.food < .75,"Населению не хватает продовольствия",
+                "Обеспечение продовольствием ниже 75% потребности. Проверьте производство и импорт.","Обеспечение продовольствием улучшилось");
+            alert("goods_shortage",state.goods < .75,"Нехватка потребительских товаров",
+                "Обеспечение населения товарами ниже 75% потребности.","Обеспечение потребительскими товарами улучшилось");
             alert("government_support_low",state.support < .45,"Низкая поддержка правительства",
                 "Поддержка власти ниже 45%. Часть политических решений может быть недоступна.","Поддержка правительства восстановилась до 45%");
             alert("legitimacy_low",state.legitimacy < .45,"Легитимность власти снизилась",
@@ -1164,7 +1186,7 @@ struct World {
 
     struct ResourceForecast {
         hoi5::Production stages;
-        hoi5::Stockpile inputs, outputs, imports, exports, building, army;
+        hoi5::Stockpile inputs, required, outputs, imports, exports, building, army;
     };
 
     ResourceForecast forecastResources(int owner,int rotation) const {
@@ -1199,10 +1221,14 @@ struct World {
             if (fill.seller == owner) exports[fill.resource] += fill.amount;
         }
         for (const auto& [key,amount] : imports) supply(key,amount,forecast.imports);
-        for (const auto& [key,amount] : exports) consume(key,amount,forecast.exports);
+        for (const auto& [key,amount] : exports) {
+            forecast.required[key] += amount;
+            consume(key,amount,forecast.exports);
+        }
         for (int stage = 0; stage < hoi5::productionStages; ++stage) {
             const auto& planned = production[owner][stage];
             auto& actual = forecast.stages[stage];
+            for (const auto& [key,amount] : planned.inputs) forecast.required[key] += amount;
             if (stage == hoi5::agriculture) {
                 const double fertilizer = hoi5::value(planned.inputs,"fertilizer");
                 const double bonusFood = hoi5::value(planned.outputs,"food");
@@ -1223,8 +1249,10 @@ struct World {
                 for (const auto& [key,amount] : planned.outputs) supply(key,amount*ratio,actual.outputs);
         }
         for (const auto& [key,amount] : construction.monthlyNeeds(tiles,owner,profiles[owner],stock,
-             [&](int tile) { return battles.contains(tile); }))
+             [&](int tile) { return battles.contains(tile); })) {
+            forecast.required[key] += amount;
             consume(key,amount,forecast.building);
+        }
         hoi5::Stockpile military;
         for (const auto& unit : divisions) {
             if (unit.owner != owner || unit.combat.strength <= 0) continue;
@@ -1240,7 +1268,10 @@ struct World {
             for (auto key : hoi5::DIVISION_EQUIPMENT_LOSS_KEYS)
                 military[key] += hoi5::value(unit.design->capacity,key)*strength/maximum*.42;
         }
-        for (const auto& [key,amount] : military) consume(key,amount,forecast.army);
+        for (const auto& [key,amount] : military) {
+            forecast.required[key] += amount;
+            consume(key,amount,forecast.army);
+        }
         return forecast;
     }
 
@@ -5555,7 +5586,7 @@ std::vector<DivisionCounter> divisionCounters(const World& world,const sf::Rende
         const auto& second = world.divisions[b];
         return std::tie(first.owner,first.r,first.q,a) < std::tie(second.owner,second.r,second.q,b);
     });
-    const int neighborRadius = zoom <= .10f ? 4 : zoom <= .25f ? 2 : zoom <= .40f ? 1 : 0;
+    const int neighborRadius = zoom <= .10f ? 12 : zoom <= .25f ? 8 : zoom <= .40f ? 5 : 0;
     std::map<std::pair<int,std::string_view>,std::vector<int>> byIcon;
     if (overview) for (int index : eligible) {
         const auto& unit = world.divisions[index];
@@ -6145,7 +6176,7 @@ void box(sf::RenderWindow& window, sf::Vector2f position, sf::Vector2f size,
 void label(sf::RenderWindow& window, const sf::Font& font, const std::string& value,
            sf::Vector2f position, unsigned size = 13,sf::Color color = {224,234,244}) {
     sf::Text text(font, sf::String::fromUtf8(value.begin(), value.end()), size);
-    text.setPosition(position);
+    text.setPosition({std::round(position.x),std::round(position.y)});
     text.setFillColor(color);
     window.draw(text);
 }
@@ -6155,7 +6186,7 @@ void battleLabel(sf::RenderWindow& window,const sf::Font& font,const std::string
     sf::Text text(font,sf::String::fromUtf8(value.begin(),value.end()),size);
     const auto bounds = text.getLocalBounds();
     text.setOrigin(bounds.position+sf::Vector2f(bounds.size.x*alignment,bounds.size.y*.5f));
-    text.setPosition(anchor);
+    text.setPosition({std::round(anchor.x),std::round(anchor.y)});
     text.setFillColor(color);
     window.draw(text);
 }
@@ -6165,7 +6196,7 @@ void fittedBattleLabel(sf::RenderWindow& window,const sf::Font& font,const std::
     sf::Text text(font,sf::String::fromUtf8(value.begin(),value.end()),size);
     const auto bounds = text.getLocalBounds();
     text.setOrigin(bounds.position+sf::Vector2f{0,bounds.size.y*.5f});
-    text.setPosition(anchor);
+    text.setPosition({std::round(anchor.x),std::round(anchor.y)});
     text.setFillColor(color);
     if (bounds.size.x > maxWidth) text.setScale({maxWidth/bounds.size.x,1.f});
     window.draw(text);
@@ -6210,7 +6241,7 @@ void drawBudgetSummary(sf::RenderWindow& window,const sf::Font& font,const sf::F
         {"Возврат кредитов (прогноз)",formatMoneyDelta(flows.loanRepayments),income,13},
         {"Торговля",formatMoneyDelta(trade),trade >= 0 ? income : expense,13},
         {}, {"Расходы:",{}},
-        {"Армия",cost(hoi5::monthlyArmyExpenses()),expense,13},
+        {"Армия",cost(flows.army),expense,13},
         {"Правительство",cost(flows.government),expense,13},
         {"Соц. обеспечение",cost(flows.social),expense,13},
         {"  Пенсии",cost(flows.pensions),detail,12},
@@ -7738,7 +7769,7 @@ int main(int argc, char** argv) try {
             unit.organization = i == 0 ? 100 : 0;
         }
         const auto ratings = ranking.powerRanking();
-        if (std::abs(ratings[0].total-100.) > 1e-10 || std::abs(ratings[1].total-40.) > 1e-10 ||
+        if (std::abs(ratings[0].total-80.) > 1e-10 || std::abs(ratings[1].total-32.5) > 1e-10 ||
             ratings[0].rank != 1 || ratings[1].rank != 2 ||
             World::relativePower(ratings[1].total,ratings[0].total) != "Значительно слабее нас" ||
             World::relativePower(0,0) != "Сопоставимая мощь") return 1;
@@ -7824,8 +7855,6 @@ int main(int argc, char** argv) try {
         if (!expired.diplomacy.goals.empty() || !hasNews(expired.news.visible(0),211,"war_goal_expired") ||
             hasNews(expired.news.visible(1),211,"war_goal_expired")) return 1;
         test.diplomacy.countries[0].factionRadicalization[2] = .7;
-        if (test.performForeignAction(0,1,action(hoi5::ForeignAction::war)).empty()) return 1;
-        test.diplomacy.countries[0].factionRadicalization[2] = .69;
         if (!test.performForeignAction(0,1,action(hoi5::ForeignAction::war)).empty()) return 1;
         const auto* declaration = test.news.latest(1);
         if (!declaration || declaration->key != "war" || declaration->priority != hoi5::NewsPriority::critical) return 1;
@@ -8066,7 +8095,16 @@ int main(int argc, char** argv) try {
             const auto flows = hoi5::monthlyTreasury(std::vector<Tile>{tile},0,2000000.);
             if (std::abs(flows.population-1062331.2883435583) > 1e-8 ||
                 flows.companies != 30000. || flows.infrastructure != 95500. ||
-                flows.government != 549500. || hoi5::monthlyArmyExpenses() != 0.) return 1;
+                flows.government != 549500. || flows.army != 0.) return 1;
+            World upkeep;
+            upkeep.profiles.resize(1);
+            upkeep.diplomacy.countries.resize(1);
+            upkeep.treasury.resize(1);
+            upkeep.divisions.resize(1);
+            upkeep.divisions[0].owner = 0;
+            upkeep.divisions[0].manpower = 100000;
+            if (upkeep.taxedTreasury(0).army != 800000. || upkeep.taxedTreasury(0).balance() != -1250000.)
+                return 1;
             Tile village{};
             village.owner = 0;
             village.population = 1000000.;
@@ -8291,22 +8329,34 @@ int main(int argc, char** argv) try {
     }
     const bool constructionSmoke = mode == "--smoke-construction";
     const bool resourcesSmoke = mode == "--smoke-resources";
+    const bool tradeSmoke = mode == "--smoke-trade";
     const bool wingCreationSmoke = mode == "--smoke-wing-creation";
     const bool countrySmoke = mode == "--smoke-diplomacy";
     const bool armySmoke = mode == "--smoke-army";
     const bool warningSmoke = mode == "--smoke-warnings";
     const bool inspectBattle = mode == "--inspect-battle";
     const bool inspectNews = mode == "--inspect-news";
-    if (!mode.empty() && !constructionSmoke && !resourcesSmoke && !wingCreationSmoke && !countrySmoke &&
+    if (!mode.empty() && !constructionSmoke && !resourcesSmoke && !tradeSmoke && !wingCreationSmoke && !countrySmoke &&
         !armySmoke && !warningSmoke && !inspectBattle && !inspectNews &&
         mode != "--smoke-window" && mode != "--smoke-generation" &&
         !(mode == "--check-settings-window" && argc == 3)) {
         std::cerr << "Unknown or incomplete command: " << mode << '\n';
         return 2;
     }
-    if (constructionSmoke || resourcesSmoke || wingCreationSmoke || countrySmoke || armySmoke || warningSmoke ||
+    if (constructionSmoke || resourcesSmoke || tradeSmoke || wingCreationSmoke || countrySmoke || armySmoke || warningSmoke ||
         inspectBattle || inspectNews)
         world = generateWorld(50,countrySmoke ? 3 : 2,823558,1);
+    if (constructionSmoke) {
+        auto& queue = world.construction.queues[0];
+        queue.clear();
+        const int tile = world.capitals[0];
+        queue.push_back({tile,0,0.,.2,1800.,1200000.,{{"construction_goods",2400.}},.37,true,false,false,
+            {{"construction_goods",888.}}, {},0.,hoi5::ConstructionStatus::building});
+        queue.push_back({tile,6,0.,.15,2400.,1800000.,{{"steel",3200.}},.18,true,false,false,
+            {{"steel",576.}},{{"steel",400.}},0.,hoi5::ConstructionStatus::waitingResources});
+        queue.push_back({tile,10,0.,.25,1500.,900000.,{{"construction_goods",1600.}},0.,false,false,false,
+            {},{},250000.,hoi5::ConstructionStatus::waitingMoney});
+    }
     if (warningSmoke) {
         world.stockpiles[0].clear();
         world.stockpiles[0]["coal"] = 2*hoi5::value(world.capacities[0],"fuel")+1;
@@ -8352,7 +8402,7 @@ int main(int argc, char** argv) try {
     }
     constexpr std::array<sf::Vector2u,5> resolutions{{{1024,768},{1200,800},{1366,768},{1600,900},{1920,1080}}};
     const bool generationSmoke = mode == "--smoke-generation";
-    const bool smoke = mode == "--smoke-window" || generationSmoke || constructionSmoke || resourcesSmoke ||
+    const bool smoke = mode == "--smoke-window" || generationSmoke || constructionSmoke || resourcesSmoke || tradeSmoke ||
         wingCreationSmoke || countrySmoke || armySmoke || warningSmoke;
     const bool settingsCheck = mode == "--check-settings-window" && argc == 3;
     const auto settingsPaths = hoi5::settingsFiles(directory);
@@ -8431,19 +8481,20 @@ int main(int argc, char** argv) try {
     sf::View camera = window.getDefaultView();
     auto target = center(world.capitalQ, world.capitalR);
     camera.setCenter(target);
-    bool playing = mode == "--smoke-window" || constructionSmoke || resourcesSmoke ||
+    bool playing = mode == "--smoke-window" || constructionSmoke || resourcesSmoke || tradeSmoke ||
         wingCreationSmoke || countrySmoke || armySmoke || warningSmoke || inspectBattle || inspectNews;
     bool dragging = false;
     bool setup = false, pauseMenu = false;
     sf::FloatRect populationHoverRect,budgetHoverRect,resourceHoverRect;
     std::array<std::vector<std::string_view>,2> resourceProblems;
-    enum class WarningAction { resources, supply, trade, construction, news };
+    enum class WarningAction { resources, supply, trade, construction, news, diplomacy };
     struct TopWarning {
         std::string label, title;
         std::vector<std::string> lines;
         WarningAction action;
         bool critical;
         int newsId{};
+        int country{-1};
     };
     std::vector<TopWarning> topWarnings;
     std::vector<sf::IntRect> warningBounds;
@@ -8513,16 +8564,16 @@ int main(int argc, char** argv) try {
         return sf::FloatRect(panel.position+sf::Vector2f{panel.size.x-36,12},{24,24});
     };
     int difficulty = 1, dropdown = -1;
-    bool tradePanel = false;
+    bool tradePanel = tradeSmoke;
     int tradeScroll = 0, tradeCategory = 0;
-    constexpr int tradeTop = 94, tradeWidth = 760, tradeRowTop = tradeTop+266, tradeRowHeight = 44;
-    constexpr std::array tradeButtons{604,632,678,706};
+    constexpr int tradeTop = 94, tradeWidth = 900, tradeRowTop = tradeTop+266, tradeRowHeight = 52;
+    constexpr std::array tradeButtons{760,790,830,860};
     const auto tradeRows = [&] { return std::max(1,(int(window.getSize().y)-12-tradeTop-310)/tradeRowHeight); };
     const auto tradeBounds = [&] {
         return sf::IntRect({0,tradeTop},{tradeWidth,std::max(0,int(window.getSize().y)-tradeTop-12)});
     };
     const auto tradeCategoryRect = [](int category) {
-        return sf::IntRect({18+200*category,tradeTop+158},{190,40});
+        return sf::IntRect({18+230*category,tradeTop+158},{220,40});
     };
     const sf::IntRect tradeClose({tradeWidth-38,tradeTop+10},{28,28});
     std::optional<World::ResourceForecast> tradeForecast;
@@ -8732,14 +8783,15 @@ int main(int argc, char** argv) try {
     sf::VertexArray constructionMap(sf::PrimitiveType::Triangles);
     std::vector<double> constructionCoverage;
     std::vector<sf::String> constructionLabels;
+    constexpr int constructionPanelWidth = 580, constructionListTop = 164, constructionRowHeight = 32;
     const auto constructionPriorityButton = [](int row,int direction) {
-        return sf::FloatRect({direction < 0 ? 388.f : 412.f,151.f+26*row},{20,17});
+        return sf::FloatRect({direction < 0 ? 510.f : 536.f,float(constructionListTop+3+constructionRowHeight*row)},{22,22});
     };
     const auto constructionCancelButton = [](int row) {
-        return sf::FloatRect({362.f,151.f+26*row},{20,17});
+        return sf::FloatRect({480.f,float(constructionListTop+3+constructionRowHeight*row)},{22,22});
     };
     const auto constructionRows = [&](int groups) {
-        const int limit = constructionQueueExpanded ? std::max(4,(int(window.getSize().y)-630)/26+4) : 4;
+        const int limit = constructionQueueExpanded ? std::max(4,(int(window.getSize().y)-680)/constructionRowHeight+4) : 4;
         return std::min(groups,limit);
     };
     std::string constructionMessage;
@@ -9134,6 +9186,14 @@ int main(int argc, char** argv) try {
                         const auto& item = topWarnings[warning-warningBounds.begin()];
                         if (item.action == WarningAction::news) {
                             if (newsPanel.openItem(item.newsId)) acknowledgedLosses[item.label == "A" ? 0 : 1] = item.newsId;
+                        } else if (item.action == WarningAction::diplomacy) {
+                            economicPanel = 0;
+                            constructionPanel = tradePanel = militaryPanel = false;
+                            diplomacyPanel = true;
+                            countryList = false;
+                            foreignTarget = item.country;
+                            countryTab = CountryTab::actions;
+                            countryDetail = CountryDetail::none;
                         } else {
                             militaryPanel = diplomacyPanel = false;
                             constructionPanel = item.action == WarningAction::construction;
@@ -9399,20 +9459,20 @@ int main(int argc, char** argv) try {
                         constructionPlacement = false;
                         economicPanel = 0;
                         diplomacyPanel = tradePanel = militaryPanel = false;
-                    } else if (constructionPanel && x >= 20 && x < 460 && y >= 90 &&
-                               y < 544+26*std::max(4,constructionRows(int(hoi5::Construction::groups(world.construction.queues[0]).size())))) {
+                    } else if (constructionPanel && x >= 20 && x < 20+constructionPanelWidth && y >= 90 &&
+                               y < 500+(150+constructionRowHeight*std::max(4,constructionRows(int(hoi5::Construction::groups(world.construction.queues[0]).size()))))) {
                         auto& queue = world.construction.queues[0];
                         const auto groups = hoi5::Construction::groups(queue);
                         const int rows = constructionRows(int(groups.size()));
-                        const int offset = 130+26*std::max(4,rows);
-                        if (y >= 119 && y < 142 && !queue.empty()) {
+                        const int offset = 150+constructionRowHeight*std::max(4,rows);
+                        if (y >= 132 && y < 160 && !queue.empty()) {
                             auto& project = queue.front();
                             project.paused = !project.paused;
                             project.status = project.paused ? hoi5::ConstructionStatus::paused : hoi5::ConstructionStatus::queued;
                             resourceForecast.reset();
                             tradeForecast.reset();
-                        } else if (y >= 148 && y < 148+26*rows) {
-                            const int row = (y-148)/26;
+                        } else if (y >= constructionListTop && y < constructionListTop+constructionRowHeight*rows) {
+                            const int row = (y-constructionListTop)/constructionRowHeight;
                             if (constructionCancelButton(row).contains(pointer) && row < int(groups.size())) {
                                 const auto project = queue[groups[row].end-1];
                                 if (world.construction.cancel(0,project.tile,project.spec)) {
@@ -9429,15 +9489,16 @@ int main(int argc, char** argv) try {
                                     tradeForecast.reset();
                                 }
                             }
-                        } else if (groups.size() > 4 && y >= 148+26*rows && y < 170+26*rows) {
+                        } else if (groups.size() > 4 && y >= constructionListTop+constructionRowHeight*rows &&
+                                   y < constructionListTop+constructionRowHeight*rows+28) {
                             constructionQueueExpanded = !constructionQueueExpanded;
-                        } else if (y >= 190+offset && y < 351+offset) {
-                            const int index = 2*((y-190-offset)/23)+(x >= 241);
+                        } else if (y >= 238+offset && y < 434+offset) {
+                            const int index = 2*((y-238-offset)/28)+(x >= 310);
                             if (index < int(std::size(hoi5::constructionSpecs))) {
                                 buildingSpec = index;
                                 constructionMapDirty = true;
                             }
-                        } else if (y >= 355+offset && y < 381+offset) {
+                        } else if (y >= 442+offset && y < 474+offset) {
                             constructionPlacement = !constructionPlacement;
                             constructionMapDirty = true;
                         }
@@ -9588,7 +9649,7 @@ int main(int argc, char** argv) try {
                                 tradeScroll = 0;
                             }
                         if (y >= tradeRowTop && y < tradeRowTop+tradeRowHeight*tradeRows() &&
-                            (y-tradeRowTop)%tradeRowHeight >= 21 && (y-tradeRowTop)%tradeRowHeight < 41) {
+                            (y-tradeRowTop)%tradeRowHeight >= 15 && (y-tradeRowTop)%tradeRowHeight < 37) {
                             const auto keys = resourceCategoryKeys(tradeCategory);
                             const int row = tradeScroll+(y-tradeRowTop)/tradeRowHeight;
                             for (int i = 0; i < int(tradeButtons.size()) && row < int(keys.size()); ++i) {
@@ -9917,7 +9978,8 @@ int main(int argc, char** argv) try {
                     if (constructionPanel && constructionPlacement) {
                         const int rows = constructionRows(int(hoi5::Construction::groups(world.construction.queues[0]).size()));
                         const auto p = release->position;
-                        if (nearest >= 0 && !(p.x >= 20 && p.x < 390 && p.y >= 90 && p.y < 544+26*std::max(4,rows)) &&
+                        if (nearest >= 0 && !(p.x >= 20 && p.x < 20+constructionPanelWidth && p.y >= 90 &&
+                            p.y < 500+(150+constructionRowHeight*std::max(4,rows))) &&
                             (selectedTiles.empty() || !hexPanelRect().contains(sf::Vector2f(p))) &&
                             world.construction.cancel(0,nearest,buildingSpec)) {
                             constructionMessage = "Заявка отменена";
@@ -10682,7 +10744,7 @@ int main(int argc, char** argv) try {
             const auto statusText = [&](const std::string& field,float left,sf::Color color,float maxWidth = 10000.f) {
                 sf::Text text(font,sf::String::fromUtf8(field.begin(),field.end()),14);
                 const auto bounds = text.getLocalBounds();
-                text.setPosition({left,18-bounds.position.y-bounds.size.y/2});
+                text.setPosition({std::round(left),std::round(18-bounds.position.y-bounds.size.y/2)});
                 text.setFillColor(color);
                 if (bounds.size.x > maxWidth) text.setScale({maxWidth/bounds.size.x,1.f});
                 window.draw(text);
@@ -10733,7 +10795,7 @@ int main(int argc, char** argv) try {
                     const std::array start{resourceProblems[0].size(),resourceProblems[1].size()};
                     for (const auto key : resourceCategoryKeys(category)) {
                         const int severity = resourceShortageLevel(hoi5::value(world.stockpiles[0],key),
-                            hoi5::value(forecast.inputs,key)-hoi5::value(forecast.outputs,key));
+                            hoi5::value(forecast.required,key)-hoi5::value(forecast.outputs,key));
                         if (severity > 0) resourceProblems[2-severity].push_back(key);
                     }
                     for (int level = 0; level < int(start.size()); ++level)
@@ -10765,6 +10827,23 @@ int main(int argc, char** argv) try {
                         {"Среднее снабжение: "+std::to_string(int(std::nearbyint(100*supply.average)))+"%",
                          "Критичных клеток: "+std::to_string(supply.critical),
                          "Слабых клеток: "+std::to_string(supply.low)},WarningAction::supply,supply.critical > 0});
+                const auto& living = world.diplomacy.countries[0];
+                if (living.food < .75 || living.goods < .75) {
+                    std::vector<std::string> lines;
+                    if (living.food < .75) lines.push_back("Продовольствие: "+
+                        std::to_string(int(std::lround(living.food*100)))+"%");
+                    if (living.goods < .75) lines.push_back("Потребительские товары: "+
+                        std::to_string(int(std::lround(living.goods*100)))+"%");
+                    topWarnings.push_back({"P","Дефицит товаров для населения",std::move(lines),
+                        WarningAction::resources,living.food < .5 || living.goods < .5});
+                }
+                for (const auto& [goal,ready] : world.diplomacy.goals) {
+                    if (goal.first != 0 || simulation.elapsedHours/24 < ready ||
+                        simulation.elapsedHours/24 > ready+180) continue;
+                    topWarnings.push_back({"W","Цель войны готова",
+                        {"Цель: "+std::string(world.countryNames[goal.second]),"ЛКМ — открыть решения страны"},
+                        WarningAction::diplomacy,true,0,goal.second});
+                }
                 double buy = 0., sell = 0.;
                 for (const auto& contract : world.market.contracts) {
                     if (contract.country != 0 || contract.amount <= 0 || !std::isfinite(contract.amount)) continue;
@@ -11596,7 +11675,7 @@ int main(int argc, char** argv) try {
                     prior([](const auto& p) { return p.flows.population+p.flows.companies+p.trade+p.flows.loanRepayments; }));
                 row += 8;
                 section("Расходы");
-                item("Армия",hoi5::monthlyArmyExpenses(),true);
+                item("Армия",flows.army,true);
                 item("Правительство",flows.government,true,prior([](const auto& p) { return p.flows.government; }));
                 item("Соц. обеспечение",flows.social,true,prior([](const auto& p) { return p.flows.social; }));
                 const double millions = world.profiles[0].population/1e6;
@@ -11648,7 +11727,7 @@ int main(int argc, char** argv) try {
                     int severity = 0, shortage = 0, surplus = 0;
                     for (const auto key : resourceCategoryKeys(i)) {
                         const double stock = hoi5::value(stocks,key);
-                        const double input = hoi5::value(forecast.inputs,key);
+                        const double input = hoi5::value(forecast.required,key);
                         const double output = hoi5::value(forecast.outputs,key);
                         const int level = resourceShortageLevel(stock,input-output);
                         severity = std::max(severity,level);
@@ -11722,7 +11801,7 @@ int main(int argc, char** argv) try {
                     const auto key = keys[row+resourceScroll];
                     const double amount = hoi5::value(stocks,key);
                     const double output = hoi5::value(forecast.outputs,key);
-                    const double input = hoi5::value(forecast.inputs,key);
+                    const double input = hoi5::value(forecast.required,key);
                     const float y = resourceRowsTop+row*resourceRowHeight;
                     const auto fill = key == selectedMapResource ? sf::Color(44,58,74,180) :
                         (row+resourceScroll)%2 == 0 ? sf::Color(24,32,42,120) : sf::Color(30,38,48,120);
@@ -12119,31 +12198,31 @@ int main(int argc, char** argv) try {
                 const auto& queue = world.construction.queues[0];
                 const auto groups = hoi5::Construction::groups(queue);
                 const int rows = constructionRows(int(groups.size()));
-                const float offset = 130+26.f*std::max(4,rows);
-                box(window,{20,90},{440,324+offset},{18,24,31,250},{92,112,136});
-                label(window,font,"Строительство",{30,96},22);
-                box(window,{30,119},{416,23},{30,39,50},{82,108,132});
+                const float offset = 150+constructionRowHeight*std::max(4,rows);
+                box(window,{20,90},{float(constructionPanelWidth),410+offset},{18,24,31,250},{92,112,136});
+                label(window,font,"Строительство",{30,98},25);
+                box(window,{30,132},{constructionPanelWidth-44.f,28},{30,39,50},{82,108,132});
                 label(window,font,!queue.empty() && queue.front().paused ? "Возобновить" : "Приостановить",
-                    {38,121},16);
-                if (queue.empty()) label(window,font,"Пока пусто",{38,151},16);
+                    {38,134},19);
+                if (queue.empty()) label(window,font,"Пока пусто",{38,170},19);
                 for (int i = 0; i < rows; ++i) {
                     const auto [first,end] = groups[i];
                     const auto& project = queue[first];
-                    const float y = 148+i*26.f;
+                    const float y = constructionListTop+i*constructionRowHeight;
                     const bool active = project.status != hoi5::ConstructionStatus::queued;
-                    box(window,{30,y},{416,23},active ? sf::Color(46,70,58,190) :
+                    box(window,{30,y},{constructionPanelWidth-44.f,28},active ? sf::Color(46,70,58,190) :
                         sf::Color(30,40,52,160),{82,108,132});
                     const auto title = std::string(active ? hoi5::constructionStatusLabel(project.status) : "Ждет")+
                         ": "+(project.repair ? "Ремонт: " : "")+
                         std::string(hoi5::constructionSpecs[project.spec].label)+" "+
                         std::to_string(project.tile%world.size)+":"+std::to_string(project.tile/world.size);
                     fittedBattleLabel(window,font,title+(end-first > 1 ? " x"+std::to_string(end-first) : ""),
-                        {38,y+11.5f},12,318,{226,236,244});
+                        {38,y+14.f},15,400,{226,236,244});
                     const auto percent = [](double value) { return std::to_string(int(std::nearbyint(value*100)))+"%"; };
                     const double coverage = std::lerp(project.from,project.target,std::clamp(project.progress,0.,1.));
                     const double target = project.repair ? 1. : queue[end-1].target;
-                    battleLabel(window,font,percent(coverage)+"->"+percent(target),{380,y+11.5f},
-                        12,{226,236,244},1.f);
+                    battleLabel(window,font,percent(coverage)+"->"+percent(target),{470,y+14.f},
+                        14,{226,236,244},1.f);
                     const auto cancel = constructionCancelButton(i);
                     const bool cancelable = !queue[end-1].paid && queue[end-1].progress <= 0;
                     box(window,cancel.position,cancel.size,cancelable ? sf::Color(92,48,52,220) :
@@ -12162,13 +12241,14 @@ int main(int argc, char** argv) try {
                 }
                 if (groups.size() > 4)
                     label(window,font,constructionQueueExpanded ? "Свернуть очередь" :
-                        "Показать еще "+std::to_string(groups.size()-rows),{36,151+rows*26.f},15);
+                        "Показать еще "+std::to_string(groups.size()-rows),
+                        {36,float(constructionListTop+rows*constructionRowHeight+3)},18);
                 const double power = hoi5::Construction::buildPower(world.tiles,0,world.profiles[0]);
                 const int activeCount = std::min(3,int(std::ranges::count_if(queue,[](const auto& project) {
                     return !project.paused;
                 })));
                 const auto firstActive = std::ranges::find_if(queue,[](const auto& project) { return !project.paused; });
-                float detailY = 68+offset;
+                float detailY = 78+offset;
                 if (!queue.empty()) {
                     const auto& project = firstActive == queue.end() ? queue.front() : *firstActive;
                     const bool contested = world.battles.contains(project.tile);
@@ -12189,8 +12269,8 @@ int main(int argc, char** argv) try {
                         }
                         if (!missing.empty()) status = Status::waitingResources;
                     }
-                    label(window,font,"Статус: "+std::string(hoi5::constructionStatusLabel(status)),{38,detailY},13);
-                    label(window,font,"Осталось: "+formatBuildDuration(duration),{38,detailY+17},13);
+                    label(window,font,"Статус: "+std::string(hoi5::constructionStatusLabel(status)),{38,detailY},16);
+                    label(window,font,"Осталось: "+formatBuildDuration(duration),{38,detailY+22},16);
                     const auto formatNeeds = [&](const hoi5::Stockpile& amounts,int limit) {
                         std::vector<std::pair<std::string_view,double>> sorted;
                         for (const auto& [key,amount] : amounts)
@@ -12212,28 +12292,29 @@ int main(int argc, char** argv) try {
                     else if (status == Status::waitingMoney) reason = "Не хватает: "+formatMoney(missingMoney);
                     else if (status == Status::waitingResources) reason = "Не хватает: "+formatNeeds(missing,3);
                     else if (status == Status::waitingPower) reason = "Нет строительной мощности";
-                    if (!reason.empty()) battleLabel(window,font,reason,{38,detailY+36},10,{236,178,154});
+                    if (!reason.empty()) battleLabel(window,font,reason,{38,detailY+52},13,{236,178,154});
                     else {
-                        if (contested) label(window,font,"Работы замедлены: бой на клетке",{38,detailY+30},10);
+                        if (contested) label(window,font,"Работы замедлены: бой на клетке",{38,detailY+48},13);
                         const auto delta = hoi5::Construction::progressDelta(project,speed,1.);
                         const auto needs = formatNeeds(hoi5::Construction::projectNeeds(project,delta),2);
-                        if (!needs.empty()) label(window,font,"Расход/мес: "+needs,{38,detailY+(contested ? 44 : 30)},10);
+                        if (!needs.empty()) label(window,font,"Расход/мес: "+needs,
+                            {38,detailY+(contested ? 66.f : 48.f)},13);
                     }
                 }
-                label(window,font,"Скорость строительства",{30,detailY+54},17);
+                label(window,font,"Скорость строительства",{30,detailY+82},20);
                 label(window,font,std::to_string(int(std::nearbyint(power)))+" строй-очков в месяц",
-                    {38,detailY+78},14);
-                label(window,font,"До 3 проектов делят строймощность между собой.",{38,detailY+100},12);
+                    {38,detailY+110},17);
+                label(window,font,"До 3 проектов делят строймощность между собой.",{38,detailY+136},15);
                 for (int i = 0; i < int(std::size(hoi5::constructionSpecs)); ++i) {
-                    const float x = i%2 ? 241.f : 30.f, y = 190+offset+(i/2)*23.f;
-                    box(window,{x,y},{205,21},i == buildingSpec ? sf::Color(47,71,88) : sf::Color(30,39,50));
-                    label(window,font,std::string(hoi5::constructionSpecs[i].label),{x+3,y+1},12);
+                    const float x = i%2 ? 310.f : 30.f, y = 238+offset+(i/2)*28.f;
+                    box(window,{x,y},{260,26},i == buildingSpec ? sf::Color(47,71,88) : sf::Color(30,39,50));
+                    label(window,font,std::string(hoi5::constructionSpecs[i].label),{x+5,y+2},15);
                 }
-                box(window,{30,355+offset},{416,26},constructionPlacement ? sf::Color(47,71,88) :
+                box(window,{30,442+offset},{540,32},constructionPlacement ? sf::Color(47,71,88) :
                     sf::Color(30,39,50),{82,108,132});
                 label(window,font,constructionPlacement ? "Завершить размещение" : "Начать строительство",
-                    {38,358+offset},15);
-                label(window,font,constructionMessage,{30,386+offset},14);
+                    {38,446+offset},18);
+                label(window,font,constructionMessage,{30,482+offset},17);
             }
             const float countryPanelTarget = diplomacyPanel ? 1.f : 0.f;
             countryPanelProgress += (countryPanelTarget-countryPanelProgress)*std::min(1.f,dt*12);
@@ -12632,36 +12713,36 @@ int main(int argc, char** argv) try {
                 const double sellLimit = tradeMonthly*2*policy.exportLimit;
                 const auto trade_headerStart = DebugClock::now();
                 box(window,sf::Vector2f(bounds.position),sf::Vector2f(bounds.size),{18,24,31,250},{92,112,136});
-                label(window,font,"Торговля",{18,tradeTop+12},19);
+                label(window,font,"Торговля",{18,tradeTop+12},23);
                 box(window,sf::Vector2f(tradeClose.position),sf::Vector2f(tradeClose.size),{44,54,66},{120,142,164});
                 label(window,font,"X",{tradeWidth-28,tradeTop+15},13);
                 label(window,font,policy.externalAccess ? "Торговля: внешний рынок открыт" :
-                    "Внешний рынок закрыт. Доступны только сделки со странами",{18,tradeTop+60},15);
+                    "Внешний рынок закрыт. Доступны только сделки со странами",{18,tradeTop+60},18);
                 label(window,font,"Покупка: "+resourceAmountLabel(total(tradeForecast->imports))+"/"+
-                    resourceAmountLabel(tradeMonthly)+" ед./мес",{18,tradeTop+85},13);
+                    resourceAmountLabel(tradeMonthly)+" ед./мес",{18,tradeTop+87},16);
                 label(window,font,"Продажа: "+resourceAmountLabel(total(tradeForecast->exports))+"/"+
-                    resourceAmountLabel(sellLimit)+" ед./мес",{18,tradeTop+105},13);
+                    resourceAmountLabel(sellLimit)+" ед./мес",{18,tradeTop+109},16);
                 const double balance = world.economyCurrent.empty() ? 0. : world.economyCurrent.front().trade;
                 label(window,font,"Деньги от торговли: "+std::string(balance < 0 ? "−$" : "$")+
-                    formatAmount(std::abs(balance))+"/мес",{330,tradeTop+85},13);
+                    formatAmount(std::abs(balance))+"/мес",{400,tradeTop+87},16);
                 const year_month_day nextTrade{sys_days{year{2000}/1/1}+days{simulation.nextMarketExecutionHour()/24}};
                 std::ostringstream execution;
                 execution << "Исполнение: понедельник 00:00, раз в неделю. След.: " << int(nextTrade.year())
                           << '-' << std::setfill('0') << std::setw(2) << unsigned(nextTrade.month())
                           << '-' << std::setw(2) << unsigned(nextTrade.day()) << " 00:00";
-                label(window,font,execution.str(),{18,tradeTop+137},10);
+                label(window,font,execution.str(),{18,tradeTop+139},12);
                 for (int i = 0; i < 3; ++i) {
                     const auto rect = tradeCategoryRect(i);
                     box(window,sf::Vector2f(rect.position),sf::Vector2f(rect.size),
                         tradeCategory == i ? sf::Color(58,88,112,220) : sf::Color(30,40,52,175),
                         tradeCategory == i ? sf::Color(170,202,232) : sf::Color(86,108,132));
-                    label(window,font,resourceCategories[i],sf::Vector2f(rect.position)+sf::Vector2f{10,7},16);
+                    label(window,font,resourceCategories[i],sf::Vector2f(rect.position)+sf::Vector2f{10,6},19);
                 }
-                constexpr std::array columns{18.f,146.f,210.f,274.f,350.f,492.f,570.f};
+                constexpr std::array columns{18.f,176.f,252.f,324.f,396.f,554.f,680.f};
                 constexpr std::array headings{"Ресурс","Склад","Баланс","Мир","Покупка / продажа","Доступно","Контракт"};
                 for (int i = 0; i < int(columns.size()); ++i)
-                    battleLabel(window,font,headings[i],{columns[i],tradeTop+254},12,{150,166,184});
-                battleLabel(window,font,"Изменить",{640,tradeTop+254},12,{150,166,184});
+                    battleLabel(window,font,headings[i],{columns[i],tradeTop+254},14,{150,166,184});
+                battleLabel(window,font,"Изменить",{760,tradeTop+254},14,{150,166,184});
                 debug.record("trade_header",trade_headerStart);
                 const auto keys = resourceCategoryKeys(tradeCategory);
                 const int visible = tradeRows(), maxScroll = std::max(0,int(keys.size())-visible);
@@ -12670,10 +12751,10 @@ int main(int argc, char** argv) try {
                     hoi5::DebugMeasure rowTiming(&debug,"trade_rows");
                     const auto key = keys[tradeScroll+row];
                     const float y = float(tradeRowTop+row*tradeRowHeight);
-                    box(window,{18,y-2},{724,44},(tradeScroll+row)%2 == 0 ?
+                    box(window,{18,y-2},{864,52},(tradeScroll+row)%2 == 0 ?
                         sf::Color(24,32,42,118) : sf::Color(30,38,48,118));
                     const double amount = hoi5::value(stocks,key);
-                    const double net = hoi5::value(tradeForecast->outputs,key)-hoi5::value(tradeForecast->inputs,key);
+                    const double net = hoi5::value(tradeForecast->outputs,key)-hoi5::value(tradeForecast->required,key);
                     if (sf::FloatRect({260,y-2},{304,42}).contains(sf::Vector2f(sf::Mouse::getPosition(window)))) {
                         std::ostringstream week;
                         week << std::showpos << std::fixed << std::setprecision(2) << world.market.priceChange(key)*100 << '%';
@@ -12706,15 +12787,15 @@ int main(int argc, char** argv) try {
                         const sf::Color color = i == 6 ? orderColor : i == 2 ?
                             (net >= 0 ? sf::Color(174,224,158) : sf::Color(236,168,154)) :
                             sf::Color(220,230,240);
-                        battleLabel(window,font,values[i],{columns[i],y+10},i == 0 ? 15 : 13,color);
+                        battleLabel(window,font,values[i],{columns[i],y+13},i == 0 ? 17 : 15,color);
                     }
                     {
                         hoi5::DebugMeasure timing(&debug,"trade_buttons");
                         for (int i = 0; i < int(tradeButtons.size()); ++i) {
                             const float x = float(tradeButtons[i]);
-                            box(window,{x,y+21},{24,20},{42,62,82,210},i < 2 ? sf::Color(124,178,232) : sf::Color(180,210,128));
-                            box(window,{x+7,y+30},{10,2},sf::Color::White);
-                            if (i%2) box(window,{x+11,y+26},{2,10},sf::Color::White);
+                            box(window,{x,y+15},{24,22},{42,62,82,210},i < 2 ? sf::Color(124,178,232) : sf::Color(180,210,128));
+                            box(window,{x+7,y+25},{10,2},sf::Color::White);
+                            if (i%2) box(window,{x+11,y+21},{2,10},sf::Color::White);
                         }
                     }
                     if (ordered <= 0) continue;
@@ -12743,13 +12824,13 @@ int main(int argc, char** argv) try {
                             else status += "Недостаточно доступного объёма / лимита";
                         }
                     }
-                    battleLabel(window,font,status,{22,y+31},12,ready ? sf::Color(170,210,180) : orderColor);
+                    battleLabel(window,font,status,{22,y+41},14,ready ? sf::Color(170,210,180) : orderColor);
                 }
                 if (maxScroll > 0) {
                     const float track = std::max(40.f,float(visible*tradeRowHeight-16));
                     const float thumb = std::max(24.f,track*visible/keys.size());
-                    box(window,{742,tradeRowTop+4},{4,track},{42,52,64,180});
-                    box(window,{740,tradeRowTop+4+(track-thumb)*tradeScroll/maxScroll},{8,thumb},{130,154,184,220});
+                    box(window,{888,tradeRowTop+4},{4,track},{42,52,64,180});
+                    box(window,{886,tradeRowTop+4+(track-thumb)*tradeScroll/maxScroll},{8,thumb},{130,154,184,220});
                 }
                 label(window,font,world.market.revision == 0 ?
                     "Спрос/предложение появятся после первых торгов. Контракты ожидают исполнения." :
@@ -12938,8 +13019,8 @@ int main(int argc, char** argv) try {
                     sf::Text text(font,value,20);
                     if (i==2 || (i==1 && !resumable)) text.setFillColor({152,164,180});
                     const auto bounds=text.getLocalBounds();
-                    text.setPosition({size.x/2-bounds.size.x/2-bounds.position.x,
-                                      y+26-bounds.size.y/2-bounds.position.y});
+                    text.setPosition({std::round(size.x/2-bounds.size.x/2-bounds.position.x),
+                                      std::round(y+26-bounds.size.y/2-bounds.position.y)});
                     window.draw(text);
                 }
                 if (!errorMessage.empty()) label(window,font,errorMessage,{80,size.y-60});
@@ -13284,10 +13365,12 @@ int main(int argc, char** argv) try {
                     textRow(world.countryThreat(foreignTarget,ratings),gold);
                 }
                 section("Сравнение с лидерами");
-                constexpr std::array names{"Экономика","Сухопутные силы","Общество"};
-                constexpr std::array explanations{"Вес в общем рейтинге: 40%. Налоговая база населения и предприятий.",
-                    "Вес в общем рейтинге: 40%. Личный состав, вооружение, состояние, организация и снабжение.",
-                    "Вес в общем рейтинге: 20%. Население, устойчивость, легитимность и поддержка правительства."};
+                constexpr std::array names{"Экономика","Сухопутные силы","Авиация","География","Общество"};
+                constexpr std::array explanations{"Вес в общем рейтинге: 35%. Налоговая база населения и предприятий.",
+                    "Вес в общем рейтинге: 30%. Личный состав, вооружение, состояние, организация и снабжение.",
+                    "Вес в общем рейтинге: 15%. Численность, готовность и дальность авиации.",
+                    "Вес в общем рейтинге: 5%. Территория, ресурсы, сельское хозяйство и защитный рельеф.",
+                    "Вес в общем рейтинге: 15%. Население, устойчивость, легитимность и поддержка правительства."};
                 for (int i = 0; i < int(names.size()); ++i) {
                     bar(names[i],std::to_string(int(std::nearbyint(rating.indices[i])))+"% от лидера",rating.indices[i]/100,blue);
                     textRow(explanations[i],muted);
@@ -13297,7 +13380,7 @@ int main(int argc, char** argv) try {
                 score << std::fixed << std::setprecision(1) << rating.total << " из 100";
                 bar("Сводный индекс",score.str(),rating.total/100,gold);
                 textRow("100% в категории означает уровень сильнейшей страны именно в этой категории. Лидеры категорий могут различаться.",muted);
-                textRow("Авиация и география пока не учтены. Рейтинг не предсказывает исход войны.",muted);
+                textRow("Рейтинг оценивает потенциал страны и не предсказывает исход конкретной войны.",muted);
             } else if (countryDetail != CountryDetail::none) {
                 const auto& policy = world.diplomacy.countries[0];
                 const int day = world.diplomacy.day;
@@ -13727,7 +13810,7 @@ int main(int argc, char** argv) try {
                     return 1;
             }
         }
-        if (argc == 3 && ((warningSmoke && warningSmokeFrame == 0) || constructionSmoke)) {
+        if (argc == 3 && ((warningSmoke && warningSmokeFrame == 0) || constructionSmoke || tradeSmoke)) {
             sf::Texture capture(window.getSize());
             capture.update(window);
             if (!capture.copyToImage().saveToFile(argv[2])) return 1;

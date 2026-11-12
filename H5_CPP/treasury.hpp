@@ -33,11 +33,11 @@ double monthlyTileCompanyIncome(const Tile& tile) {
 }
 
 struct TreasuryFlows {
-    double population{}, companies{}, government = 450000, social{}, infrastructure{};
+    double population{}, companies{}, government = 450000, social{}, infrastructure{}, army{};
     double pensions{}, children{}, disability{}, localServices{};
     double loanRepayments{}, debtService{}, politicalPrograms{};
-    double operatingBalance() const { return population+companies-government-social-infrastructure-monthlyArmyExpenses(); }
-    double expenses() const { return government+social+infrastructure+debtService+politicalPrograms+monthlyArmyExpenses(); }
+    double operatingBalance() const { return population+companies-government-social-infrastructure-army; }
+    double expenses() const { return government+social+infrastructure+army+debtService+politicalPrograms; }
     double balance() const { return operatingBalance()+loanRepayments-debtService-politicalPrograms; }
 };
 

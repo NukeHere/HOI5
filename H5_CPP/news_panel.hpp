@@ -3,6 +3,7 @@
 #include "news.hpp"
 #include <SFML/Graphics.hpp>
 #include <chrono>
+#include <cmath>
 #include <iomanip>
 #include <sstream>
 
@@ -28,7 +29,7 @@ class NewsPanel {
         sf::Text label(font,value,size);
         const auto bounds = label.getLocalBounds();
         label.setOrigin({0,bounds.position.y+bounds.size.y*.5f});
-        label.setPosition(point);
+        label.setPosition({std::round(point.x),std::round(point.y)});
         label.setFillColor(color);
         window.draw(label);
     }
@@ -80,8 +81,8 @@ class NewsPanel {
         return it == items.end() ? nullptr : *it;
     }
 
-    int popupRows() const { return std::max(1,int((popupRect.size.y-122)/21)); }
-    int archiveRows() const { return std::max(1,int((archiveRect.size.y-65)/48)); }
+    int popupRows() const { return std::max(1,int((popupRect.size.y-128)/25)); }
+    int archiveRows() const { return std::max(1,int((archiveRect.size.y-72)/60)); }
 
 public:
     sf::FloatRect tickerBounds() const { return tickerRect; }
@@ -228,42 +229,42 @@ public:
             const auto [x,y] = archiveRect.position;
             const auto [w,h] = archiveRect.size;
             box(window,archiveRect,{21,29,39,248},{110,137,165},2);
-            text(window,font,utf8("Мировые новости и события"),{x+14,y+25},17);
-            text(window,font,"X",{x+w-26,y+25},15);
+            text(window,font,utf8("Мировые новости и события"),{x+14,y+27},20);
+            text(window,font,"X",{x+w-28,y+27},18);
             const int count = archiveRows();
             archiveScroll = std::clamp(archiveScroll,0,std::max(0,int(items.size())-count));
             archiveHits.clear();
             for (int i = 0; i < count && archiveScroll+i < int(items.size()); ++i) {
                 const auto& item = *items[archiveScroll+i];
-                const float row = y+72+48*i;
-                const sf::FloatRect hit({x+10,row-28},{w-20,42});
+                const float row = y+82+60*i;
+                const sf::FloatRect hit({x+10,row-34},{w-20,54});
                 box(window,hit,{35,46,59,235});
-                text(window,font,dateAndPriority(item),{x+18,row-15},11,color(item));
-                text(window,font,utf8(item.title).substring(0,std::max(20,int((w-40)/7))),{x+18,row+4},13);
+                text(window,font,dateAndPriority(item),{x+18,row-18},13,color(item));
+                text(window,font,utf8(item.title).substring(0,std::max(20,int((w-40)/8))),{x+18,row+8},16);
                 archiveHits.emplace_back(hit,item.id);
             }
             if (int(items.size()) > count)
                 text(window,font,utf8(std::to_string(archiveScroll+1)+"–"+std::to_string(archiveScroll+count)+
-                    " из "+std::to_string(items.size())+" · колесо мыши"),{x+14,y+h-18},10,{170,188,202});
+                    " из "+std::to_string(items.size())+" · колесо мыши"),{x+14,y+h-20},12,{170,188,202});
         } else if (const auto* item = find(popup)) {
             const auto [x,y] = popupRect.position;
             const auto [w,h] = popupRect.size;
             box(window,popupRect,{24,32,43,248},color(*item),2);
-            text(window,font,dateAndPriority(*item),{x+14,y+24},12,color(*item));
-            text(window,font,"X",{x+w-25,y+24},15);
-            const auto lineWidth = std::max(25,int((w-30)/7.5));
+            text(window,font,dateAndPriority(*item),{x+14,y+25},14,color(*item));
+            text(window,font,"X",{x+w-27,y+25},18);
+            const auto lineWidth = std::max(25,int((w-30)/8.5));
             const auto title = wrap(item->title,lineWidth);
             for (int i = 0; i < 2 && i < int(title.size()); ++i)
-                text(window,font,title[i],{x+14,y+52+20*i},15);
+                text(window,font,title[i],{x+14,y+55+23*i},18);
             bodyLines = wrap(item->body,lineWidth);
             const int count = popupRows();
             popupScroll = std::clamp(popupScroll,0,std::max(0,int(bodyLines.size())-count));
             for (int i = 0; i < count && popupScroll+i < int(bodyLines.size()); ++i)
-                text(window,font,bodyLines[popupScroll+i],{x+14,y+102+21*i},13,{205,219,232});
-            text(window,font,utf8("Все новости"),{x+14,y+h-19},13,{150,204,241});
+                text(window,font,bodyLines[popupScroll+i],{x+14,y+108+25*i},16,{205,219,232});
+            text(window,font,utf8("Все новости"),{x+14,y+h-20},15,{150,204,241});
             if (int(bodyLines.size()) > count)
                 text(window,font,utf8(std::to_string(popupScroll+1)+"/"+
-                    std::to_string(bodyLines.size()-count+1)+" ↓"),{x+w-76,y+h-19},10,{170,188,202});
+                    std::to_string(bodyLines.size()-count+1)+" ↓"),{x+w-84,y+h-20},12,{170,188,202});
         }
     }
 };
