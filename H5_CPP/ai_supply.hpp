@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ai_regions.hpp"
+#include "ai_flow.hpp"
 #include "python_seed.hpp"
 #include <algorithm>
 #include <cmath>
@@ -90,6 +91,7 @@ struct BotSupplyState {
     std::array<double,5> courseBias{};
     std::map<int,double> militaryBias;
     std::map<int,BotMilitaryReport> militaryReports;
+    std::map<std::pair<int,std::string_view>,BotDependency> dependencies;
     std::vector<BotReview> reviews;
     struct WarObjective { int hour, anchor; std::map<int,int> distances; };
     std::map<int,WarObjective> warObjectives;

@@ -64,6 +64,7 @@ inline constexpr DebugRow debugRows[] = {
     {"    ИИ: обзоры",{"ai_reviews"}},
     {"    ИИ: суточный цикл всего",{"ai_daily"}},
     {"    ИИ: регионы/оценка сил",{"ai_regions"}},
+    {"    ИИ: торговые зависимости",{"ai_dependencies"}},
     {"    ИИ: снабжение",{"ai_supply_planning"}},
     {"    ИИ: оборона/ПВО",{"ai_defense_planning"}},
     {"    ИИ: набор дивизий",{"ai_recruitment_planning"}},
@@ -111,6 +112,8 @@ public:
         }
         return total;
     }
+
+    bool hasAverage(std::string_view key) const { return averages.contains(key); }
 
 private:
     double elapsed{};

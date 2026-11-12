@@ -324,6 +324,7 @@ struct World {
     std::vector<hoi5::Production> production;
     std::vector<hoi5::TreasuryFlows> treasury;
     hoi5::Market market;
+    hoi5::FlowLedger botLedger;
     hoi5::News news;
     struct EconomySnapshot {
         hoi5::TreasuryFlows flows;
@@ -650,8 +651,16 @@ struct World {
         ++botMarketTick;
         std::vector<std::array<hoi5::Stockpile,2>> quantities(profiles.size());
         for (const auto& fill : market.last.fills) {
-            if (fill.buyer) quantities[*fill.buyer][1][fill.resource] += fill.amount;
-            if (fill.seller) quantities[*fill.seller][0][fill.resource] += fill.amount;
+            if (fill.buyer) {
+                quantities[*fill.buyer][1][fill.resource] += fill.amount;
+                botLedger.record(*fill.buyer,hoi5::FlowKind::import,fill.resource,fill.amount,
+                    fill.seller ? *fill.seller : -1);
+            }
+            if (fill.seller) {
+                quantities[*fill.seller][0][fill.resource] += fill.amount;
+                botLedger.record(*fill.seller,hoi5::FlowKind::export_,fill.resource,fill.amount,
+                    fill.buyer ? *fill.buyer : -1);
+            }
             news.recordTrade(diplomacy.day,fill,[&](int i) { return countryNames[i]; },resourceDisplayName);
         }
         std::vector<std::string> missing(profiles.size());
@@ -3263,6 +3272,7 @@ struct World {
     }
 
     void startBots(unsigned seed) {
+        for (int owner = 0; owner < int(profiles.size()); ++owner) botLedger.sample(owner,botHours);
         if (profiles.size() > 1)
             botGeography.build(size,[&](int tile) { return airDefenseWater(tile); },
                 [&](int tile,auto visit) { forFrontNeighbor(tile,visit); });
@@ -3406,7 +3416,34 @@ struct World {
         }
     }
 
-    void updateBotReviews(hoi5::BotSupplyState& bot) const {
+    void assessBotDependencies(hoi5::BotSupplyState& bot) {
+        const int owner = bot.owner;
+        bot.dependencies.clear();
+        if (owner < 0 || owner >= int(production.size()) || owner >= int(stockpiles.size())) return;
+        hoi5::Stockpile required;
+        for (const auto& stage : production[owner])
+            for (const auto& [key,amount] : stage.inputs) required[key] += amount;
+        const auto forecast = forecastResources(owner,botMarketTick);
+        for (const auto& [key,amount] : forecast.army) required[key] += amount;
+        for (const auto& unit : air.defense) {
+            if (unit.owner != owner) continue;
+            const auto& type = hoi5::defenseClasses[unit.type];
+            const auto key = type.key == "short_range_aa" ? std::string_view("light_aa_ammo") :
+                std::string_view("anti_air_ammo");
+            required[key] += std::max(0,std::max(unit.ammoCapacity,type.ammo)-unit.ammo)+
+                std::max(unit.ammoCapacity,type.ammo);
+        }
+        const auto [rates,elapsed] = botLedger.rates(owner,botHours);
+        for (const auto& [flow,amount] : rates) {
+            const auto [kind,resource,partner] = flow;
+            if (kind != hoi5::FlowKind::import || partner < 0 || amount <= 0) continue;
+            const double need = hoi5::value(required,resource);
+            bot.dependencies[{partner,resource}] = {amount/std::max(1.,need),
+                30.*hoi5::value(stockpiles[owner],resource)/std::max(1.,amount),botHours};
+        }
+    }
+
+    void updateBotReviews(hoi5::BotSupplyState& bot,hoi5::DebugProfiler* debug = nullptr) {
         const auto start = [&](bool monthly,double& next,double interval,double jitter) {
             if (botHours < next || std::ranges::any_of(bot.reviews,[&](const auto& review) {
                 return review.monthly == monthly;
@@ -3436,6 +3473,9 @@ struct World {
                 bot.regions = botGeography.profiles(tiles,bot.owner,capitals[bot.owner],
                     [&](int tile) { return airDefenseWater(tile); });
                 updateBotRegionalMilitary(bot);
+            } else if (review.stage == (review.monthly ? 2 : 3)) {
+                hoi5::DebugMeasure dependencies(debug,"ai_dependencies");
+                assessBotDependencies(bot);
             } else if (review.monthly && review.stage == 4) {
                 for (const auto course : {hoi5::BotCourse::development,hoi5::BotCourse::deterrence,hoi5::BotCourse::warPreparation})
                     bot.courseBias[std::size_t(course)] = -3.+6.*bot.rng.uniform();
@@ -4186,9 +4226,7 @@ struct World {
                 candidates.emplace_back(50+(opinion == relation.opinion.end() ? 0 : opinion->second),other);
             }
             if (const auto* target = hoi5::botChooseClose(bot.rng,candidates)) {
-                const bool depends = std::ranges::any_of(market.contracts,[&](const auto& order) {
-                    return order.country == owner && order.buy && order.amount > 0;
-                });
+                const bool depends = !bot.dependencies.empty();
                 const auto action = depends ? hoi5::ForeignAction::trade : hoi5::ForeignAction::mission;
                 const auto& info = *std::ranges::find(hoi5::foreignActions,action,&hoi5::ForeignActionInfo::action);
                 if (diplomacy.reason(owner,*target,info,profiles).empty()) addPolitics(*target,action);
@@ -4978,7 +5016,7 @@ struct World {
             if (std::ranges::none_of(tiles,[&](const auto& tile) { return tile.owner == bot.owner; })) continue;
             {
                 hoi5::DebugMeasure reviews(debug,"ai_reviews");
-                updateBotReviews(bot);
+                updateBotReviews(bot,debug);
             }
             if (botHours >= bot.nextDaily || bot.urgent) {
                 hoi5::DebugMeasure daily(debug,"ai_daily");
@@ -5145,9 +5183,20 @@ struct World {
                 "В казне снова появились средства");
             if (debug) debug->record("server_economy",economyStart);
             const auto productionStart = Clock::now();
+            botLedger.advance(int(country),hours);
+            const auto stocksBeforeProduction = stocks;
             const auto ratios = hoi5::runProduction(production[country], stocks, hours, [&](auto key, double amount) {
+                botLedger.record(int(country),hoi5::FlowKind::output,key,amount);
                 stocks[key] += std::min(amount, hoi5::freeStorage(capacities[country], stocks, key));
             });
+            const double fraction = hours/720.;
+            for (int stage = 0; stage < hoi5::productionStages; ++stage)
+                for (const auto& [key,amount] : production[country][stage].inputs) {
+                    const double used = stage == hoi5::upkeep
+                        ? std::min(hoi5::value(stocksBeforeProduction,key),amount*fraction)
+                        : amount*fraction*ratios[stage];
+                    botLedger.record(int(country),hoi5::FlowKind::consumption,key,used);
+                }
             if (debug) debug->record("server_production",productionStart);
             constexpr std::array<std::string_view,hoi5::productionStages> shortageKeys{
                 "production_shortage:raw","production_shortage:semi_finished","",
@@ -7177,11 +7226,19 @@ int main(int argc, char** argv) try {
         hoi5::DebugProfiler profiler;
         test.advancePolitics(test.diplomacy.day+1,{},&profiler);
         profiler.frame(.5);
-        if (relation.treaties.contains(hoi5::ForeignAction::alliance) || !test.diplomacy.offers.empty()) return 1;
+        if (relation.treaties.contains(hoi5::ForeignAction::alliance) || !test.diplomacy.offers.empty()) {
+            std::cerr << "bot offer rejection failed: treaty=" <<
+                relation.treaties.contains(hoi5::ForeignAction::alliance) << " pending=" <<
+                test.diplomacy.offers.size() << '\n';
+            return 1;
+        }
         const auto row = std::ranges::find_if(hoi5::debugRows,[](const auto& item) {
             return std::ranges::find(item.keys,"ai_offer_response") != item.keys.end();
         });
-        if (row == std::end(hoi5::debugRows) || profiler.average(*row) <= 0.) return 1;
+        if (row == std::end(hoi5::debugRows) || !profiler.hasAverage("ai_offer_response")) {
+            std::cerr << "bot offer profiler failed\n";
+            return 1;
+        }
 
         relation.war = true;
         relation.warStarted = test.diplomacy.day;
@@ -7190,7 +7247,56 @@ int main(int argc, char** argv) try {
         test.diplomacy.countries[target].warSupport = .8;
         test.diplomacy.offers.push_back({actor,target,test.diplomacy.day+1,hoi5::ForeignAction::peace});
         test.advancePolitics(test.diplomacy.day+1);
-        return !relation.war && test.diplomacy.offers.empty() ? 0 : 1;
+        if (relation.war || !test.diplomacy.offers.empty()) {
+            std::cerr << "bot peace response failed: war=" << relation.war << " pending=" <<
+                test.diplomacy.offers.size() << '\n';
+            return 1;
+        }
+        return 0;
+    }
+    if (mode == "--check-bot-dependencies") {
+        hoi5::FlowLedger ledger;
+        ledger.sample(1,0);
+        for (int day = 1; day < 40; ++day) {
+            ledger.advance(1,24);
+            ledger.record(1,hoi5::FlowKind::output,"oil",10);
+            ledger.record(1,hoi5::FlowKind::import,"food",3,2);
+            ledger.sample(1,day*24);
+        }
+        const auto [rates,hours] = ledger.rates(1,39*24);
+        if (rates.at({hoi5::FlowKind::output,"oil",-1}) != 300. ||
+            rates.at({hoi5::FlowKind::import,"food",2}) != 90. || hours != 168. ||
+            ledger.samples[1].size() > 10) return 1;
+
+        auto test = generateWorld(20,2,918273,1);
+        test.startBots(918273);
+        auto& bot = test.supplyBots.front();
+        const int owner = bot.owner, partner = owner == 0 ? 1 : 0;
+        test.production[owner] = {};
+        test.production[owner][hoi5::upkeep].inputs["food"] = 180.;
+        test.stockpiles[owner]["food"] = 90.;
+        test.botLedger.advance(owner,168.);
+        test.botLedger.record(owner,hoi5::FlowKind::import,"food",42.,partner);
+        test.botHours = 168;
+        bot.reviews.clear();
+        bot.reviews.push_back({true,0.,2});
+        hoi5::DebugProfiler profiler;
+        test.updateBotReviews(bot,&profiler);
+        profiler.frame(.5);
+        const auto dependency = bot.dependencies.find({partner,"food"});
+        const auto row = std::ranges::find_if(hoi5::debugRows,[](const auto& item) {
+            return std::ranges::find(item.keys,"ai_dependencies") != item.keys.end();
+        });
+        if (dependency == bot.dependencies.end() || std::abs(dependency->second.share-1.) > 1e-9 ||
+            std::abs(dependency->second.stockDays-15.) > 1e-9 || row == std::end(hoi5::debugRows) ||
+            !profiler.hasAverage("ai_dependencies")) return 1;
+        bot.tasks.clear();
+        bot.nextDiplomacy = 0.;
+        test.scheduleBotDiplomacy(bot);
+        return std::ranges::any_of(bot.tasks,[](const auto& task) {
+            return task.kind == hoi5::BotTask::Kind::politics &&
+                task.politicalAction == int(hoi5::ForeignAction::trade);
+        }) ? 0 : 1;
     }
     if (mode == "--check-bot-regions") {
         World test;
