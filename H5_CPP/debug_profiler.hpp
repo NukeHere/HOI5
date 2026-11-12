@@ -69,6 +69,7 @@ inline constexpr DebugRow debugRows[] = {
     {"    ИИ: набор дивизий",{"ai_recruitment_planning"}},
     {"    ИИ: авиация",{"ai_air_planning"}},
     {"    ИИ: экономика/торговля",{"ai_economy_planning"}},
+    {"    ИИ: мирная экспансия",{"ai_expansion_planning"}},
     {"    ИИ: дипломатия/политика",{"ai_diplomacy_planning"}},
     {"    ИИ: фронты/армии/атаки",{"ai_front_planning"}},
     {"    ИИ: микроцикл всего",{"ai_micro"}},

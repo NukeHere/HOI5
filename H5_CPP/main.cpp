@@ -3261,6 +3261,7 @@ struct World {
             bot.nextRecruitment = 24.+144.*rng.uniform();
             bot.nextAir = 24.+144.*rng.uniform();
             bot.nextEconomy = 12.+60.*rng.uniform();
+            bot.nextExpansion = 12.+60.*rng.uniform();
             bot.nextDiplomacy = 12.+60.*rng.uniform();
             bot.aggression = rng.uniform();
             std::vector<std::pair<double,int>> candidates;
@@ -3976,6 +3977,68 @@ struct World {
             specialize.sector = sector;
             addBotTask(bot,specialize);
         }
+    }
+
+    void scheduleBotExpansion(hoi5::BotSupplyState& bot) {
+        if (botHours < bot.nextExpansion) return;
+        bot.nextExpansion = botHours+168+int(bot.rng.uniform()*24)-12;
+        const int owner = bot.owner;
+        if (bot.course.first != hoi5::BotCourse::development || owner < 0 ||
+            owner >= int(production.size()) || owner >= int(stockpiles.size())) return;
+        if (std::ranges::any_of(bot.tasks,[](const auto& task) {
+            return task.kind == hoi5::BotTask::Kind::claim && task.active();
+        })) return;
+
+        hoi5::Stockpile required;
+        for (const auto& stage : production[owner])
+            for (const auto& [key,amount] : stage.inputs) required[key] += amount;
+        const auto forecast = forecastResources(owner,botMarketTick);
+        for (const auto& [key,amount] : forecast.army) required[key] += amount;
+        std::map<std::string_view,double> needs;
+        for (const auto& [key,amount] : required) {
+            const double half = amount*.5;
+            needs[key] = std::max(0.,half-hoi5::value(stockpiles[owner],key))/std::max(1.,half);
+        }
+
+        std::map<int,double> expansion;
+        for (int tile = 0; tile < int(tiles.size()); ++tile) {
+            if (tiles[tile].owner != owner) continue;
+            for (const int next : botGeography.adjacent(tile)) {
+                const auto& candidate = tiles[next];
+                if (candidate.owner >= 0 || candidate.water) continue;
+                double score = .5+1./std::max(1.,candidate.movementCost)+
+                    hoi5::agricultureScore(candidate.natural)*.3;
+                for (const auto& deposit : candidate.deposits) {
+                    const auto need = needs.find(deposit.resource);
+                    if (need == needs.end()) continue;
+                    score += std::min(1.,std::log1p(std::max(0.,deposit.mass))/std::log(1000001.))*need->second*4.;
+                }
+                if (bot.expansionTarget >= 0 && bot.expansionTarget < int(capitals.size()) &&
+                    capitals[bot.expansionTarget] >= 0)
+                    score += 8./(1+hoi5::supplyHexDistance(next,capitals[bot.expansionTarget],size));
+                expansion[next] = score;
+            }
+        }
+        std::vector<std::pair<double,int>> choices;
+        for (const auto& [tile,score] : expansion) choices.emplace_back(score,tile);
+        const auto* target = hoi5::botChooseClose(bot.rng,choices);
+        if (target) addBotTask(bot,{hoi5::BotTask::Kind::claim,botHours,*target});
+    }
+
+    bool applyBotClaim(hoi5::BotSupplyState& bot,const hoi5::BotTask& task) {
+        if (task.tile < 0 || task.tile >= int(tiles.size()) || tiles[task.tile].owner >= 0 || tiles[task.tile].water)
+            return false;
+        std::vector<std::pair<int,int>> choices;
+        for (int i = 0; i < int(divisions.size()); ++i) {
+            const auto& unit = divisions[i];
+            if (unit.owner != bot.owner || bot.resting.contains(i) || unit.battle >= 0 || unit.retreating ||
+                !unit.route.empty() || unit.organization < unit.maxOrganization*.5 || unit.combat.strength <= 0) continue;
+            choices.emplace_back(hoi5::supplyHexDistance(unit.r*size+unit.q,task.tile,size),i);
+        }
+        std::ranges::sort(choices);
+        for (const auto& [distance,index] : choices)
+            if (orderMove(divisions[index],task.tile)) return true;
+        return false;
     }
 
     bool applyBotConstruction(hoi5::BotSupplyState& bot,hoi5::BotTask& task) {
@@ -4931,6 +4994,10 @@ struct World {
                     scheduleBotEconomy(bot);
                 }
                 {
+                    hoi5::DebugMeasure expansion(debug,"ai_expansion_planning");
+                    scheduleBotExpansion(bot);
+                }
+                {
                     hoi5::DebugMeasure diplomacyTiming(debug,"ai_diplomacy_planning");
                     scheduleBotDiplomacy(bot);
                 }
@@ -4947,7 +5014,12 @@ struct World {
             }
             hoi5::DebugMeasure tasks(debug,"ai_tasks");
             for (auto& task : bot.tasks) {
-                if (task.status == Status::executing &&
+                if (task.status == Status::executing && task.kind == Task::Kind::claim) {
+                    if (task.tile < 0 || task.tile >= int(tiles.size())) task.status = Status::failed;
+                    else if (tiles[task.tile].owner == bot.owner) task.status = Status::succeeded;
+                    else if (tiles[task.tile].owner >= 0 || botHours-task.createdHour > 168)
+                        task.status = Status::failed;
+                } else if (task.status == Status::executing &&
                     (task.kind == Task::Kind::supply || task.kind == Task::Kind::fortify ||
                      task.kind == Task::Kind::build)) {
                     const auto& tile = tiles[task.tile];
@@ -5007,6 +5079,8 @@ struct World {
                 task->status = applyBotRecruitment(*bot,*task) ? Status::succeeded : Status::blocked;
             } else if (task->kind == Task::Kind::air) {
                 task->status = applyBotAir(*bot,*task) ? Status::succeeded : Status::blocked;
+            } else if (task->kind == Task::Kind::claim) {
+                task->status = applyBotClaim(*bot,*task) ? Status::executing : Status::blocked;
             } else if (task->kind == Task::Kind::build) {
                 task->status = applyBotConstruction(*bot,*task) ? Status::executing : Status::blocked;
             } else if (task->kind == Task::Kind::specialize) {
@@ -6965,18 +7039,56 @@ int main(int argc, char** argv) try {
         return test.tiles[region->tiles.front()].industries ==
             std::vector<std::string_view>{"machinery","consumer_goods"} ? 0 : 1;
     }
+    if (mode == "--check-bot-claim") {
+        auto test = generateWorld(20,2,918273,1);
+        test.startBots(918273);
+        auto& bot = test.supplyBots.front();
+        const int owner = bot.owner;
+        const auto unit = std::ranges::find_if(test.divisions,[&](const auto& division) {
+            return division.owner == owner && division.combat.strength > 0;
+        });
+        if (unit == test.divisions.end()) return 1;
+        const int origin = unit->r*test.size+unit->q;
+        const auto adjacent = test.botGeography.adjacent(origin);
+        if (adjacent.empty()) return 1;
+        const int target = adjacent.front();
+        for (auto& tile : test.tiles) {
+            tile.owner = owner;
+            tile.water = 0;
+            tile.movementCost = 1.;
+            tile.deposits.clear();
+        }
+        test.tiles[target].owner = -1;
+        test.tiles[target].deposits = {{"iron_ore",.1,1000000.}};
+        test.production[owner] = {};
+        test.production[owner][hoi5::semiFinished].inputs["iron_ore"] = 10000.;
+        test.stockpiles[owner]["iron_ore"] = 0.;
+        bot.course = {hoi5::BotCourse::development,-1};
+        bot.expansionTarget = -1;
+        bot.tasks.clear();
+        bot.nextExpansion = 0.;
+        test.scheduleBotExpansion(bot);
+        const auto claim = std::ranges::find_if(bot.tasks,[](const auto& task) {
+            return task.kind == hoi5::BotTask::Kind::claim;
+        });
+        if (claim == bot.tasks.end() || claim->tile != target || !test.applyBotClaim(bot,*claim)) return 1;
+        const auto ordered = std::ranges::find_if(test.divisions,[&](const auto& division) {
+            return division.owner == owner && !division.route.empty() && division.route.back() == target;
+        });
+        return ordered != test.divisions.end() ? 0 : 1;
+    }
     if (mode == "--check-ai-profiler") {
         auto test = generateWorld(20,2,918273,1);
         test.startBots(918273);
         auto& bot = test.supplyBots.front();
-        bot.nextDaily = bot.nextMicro = bot.nextAir = bot.nextRecruitment = bot.nextEconomy =
+        bot.nextDaily = bot.nextMicro = bot.nextAir = bot.nextRecruitment = bot.nextEconomy = bot.nextExpansion =
             bot.nextDiplomacy = 0.;
         hoi5::DebugProfiler profiler;
         test.updateBots(24,&profiler);
         profiler.frame(.5);
         constexpr std::array keys{"ai_total","ai_reviews","ai_daily","ai_regions","ai_supply_planning",
             "ai_defense_planning","ai_recruitment_planning","ai_air_planning","ai_economy_planning",
-            "ai_diplomacy_planning","ai_micro","ai_front_planning","ai_tasks"};
+            "ai_expansion_planning","ai_diplomacy_planning","ai_micro","ai_front_planning","ai_tasks"};
         for (const auto key : keys) {
             const auto row = std::ranges::find_if(hoi5::debugRows,[&](const auto& item) {
                 return std::ranges::find(item.keys,key) != item.keys.end();

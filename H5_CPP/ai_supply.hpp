@@ -22,7 +22,7 @@ struct BotSupplyChoice { double gain; int tile; };
 enum class BotTaskStatus { planned, blocked, executing, waitingMarket, waitingOffer, succeeded, failed, cancelled };
 
 struct BotTask {
-    enum class Kind { supply, buy, sell, build, specialize, fortify, rebuildDefense, recruit, air,
+    enum class Kind { supply, buy, sell, build, specialize, fortify, rebuildDefense, recruit, air, claim,
         politics, support, tax, intelligence };
     Kind kind;
     int createdHour;
@@ -83,6 +83,7 @@ struct BotSupplyState {
     double nextRecruitment{};
     double nextAir{};
     double nextEconomy{};
+    double nextExpansion{};
     double nextDiplomacy{};
     BotCourseChoice course{BotCourse::development,-1};
     int courseSince{};
