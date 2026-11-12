@@ -335,6 +335,18 @@ struct World {
     hoi5::Diplomacy diplomacy;
     hoi5::AirLayer air;
     std::vector<hoi5::AirSalvo> salvos;
+    struct AirVisual {
+        int owner, origin, target, type;
+        bool impact, loss;
+        std::chrono::steady_clock::time_point start;
+    };
+    std::deque<AirVisual> airVisuals;
+    void addAirVisual(int owner,int origin,int target,int type,bool impact = false,bool loss = false) {
+        const auto now = std::chrono::steady_clock::now();
+        while (!airVisuals.empty() && (airVisuals.size() >= 128 ||
+            now-airVisuals.front().start > std::chrono::seconds(3))) airVisuals.pop_front();
+        airVisuals.push_back({owner,origin,target,type,impact,loss,now});
+    }
     std::vector<hoi5::AircraftInterceptorSalvo> aircraftInterceptors;
     hoi5::Construction construction;
     std::map<int,hoi5::Battle> battles;
@@ -2690,6 +2702,7 @@ struct World {
         salvo.sourceAircraft = type;
         if (flight) salvos.push_back(salvo);
         else if (!resolveAirImpact(salvo,infrastructureChanged)) return 0;
+        addAirVisual(wing.owner,wing.base,flight ? origin : target,type);
         wing.lastMissionTarget[strategic] = target;
         auto& targetCooldown = wing.missionTargetCooldowns[strategic][target];
         targetCooldown = std::max(targetCooldown,strategic ? 18. : 6.);
@@ -2815,17 +2828,21 @@ struct World {
 
     bool resolveAirImpact(const hoi5::AirSalvo& salvo,bool& infrastructureChanged) {
         if (salvo.count <= 0 || !airTargetValid(salvo.owner,salvo.target,salvo.strategic)) return false;
+        const auto impact = [&] {
+            addAirVisual(salvo.owner,salvo.target,salvo.target,salvo.sourceAircraft,true);
+            return true;
+        };
         const auto type = salvo.weapon->type;
         const bool divisionTag = type == "unguided_rocket" || type == "guided_missile" || type == "guided_bomb";
         if (salvo.targetObject.empty() && (!salvo.strategic || divisionTag) &&
-            resolveAirDivisionImpact(salvo,infrastructureChanged)) return true;
+            resolveAirDivisionImpact(salvo,infrastructureChanged)) return impact();
         if (salvo.strategic || !salvo.targetObject.empty()) {
             if (resolveAirBuildingImpact(salvo,1.)) {
                 infrastructureChanged = true;
-                return true;
+                return impact();
             }
         }
-        return resolveAirDivisionImpact(salvo,infrastructureChanged);
+        return resolveAirDivisionImpact(salvo,infrastructureChanged) && impact();
     }
 
     int fighterEngagement(hoi5::AirWing& wing,int enemy,int tile,int targets) const {
@@ -2864,7 +2881,7 @@ struct World {
             if (!engaged) break;
             auto& fighter = air.wings[candidate.wing];
             fighter.interceptorAmmo -= engaged;
-            aircraftInterceptors.push_back({targetIndex,sorties,{fighter.owner,engaged,candidate.chance,1.},targetType});
+            aircraftInterceptors.push_back({targetIndex,sorties,{fighter.owner,engaged,candidate.chance,1.},targetType,exposure});
             sorties -= engaged;
             target.defensiveHours = std::max(target.defensiveHours,2.);
         }
@@ -2872,7 +2889,7 @@ struct World {
 
     struct AircraftLosses { int destroyed{}, damaged{}, evaded{}; };
 
-    AircraftLosses applyAircraftHits(hoi5::AirWing& wing,int hits,int aircraft) {
+    AircraftLosses applyAircraftHits(hoi5::AirWing& wing,int hits,int aircraft,int exposure) {
         const auto& type = hoi5::aircraftTypes[aircraft];
         const double survival = hoi5::aircraftSignatures[aircraft].survivability;
         const double destroy = .32*(type.helicopter ? 1.25 : 1.)*std::max(.55,1.15-survival*.55);
@@ -2886,6 +2903,8 @@ struct World {
         }
         const int destroyed = std::min({wing.readyCount(),wing.typeCount(aircraft),losses.destroyed});
         if (destroyed > 0) {
+            const int tile = exposure >= 0 ? exposure : wing.base;
+            addAirVisual(wing.owner,tile,tile,aircraft,true,true);
             wing.changeComposition(aircraft,-destroyed);
             news.batchNotice(diplomacy.day,wing.owner,"aircraft_losses","Потери авиации",
                 "Авиакрыло потеряло "+std::to_string(destroyed)+
@@ -3008,7 +3027,7 @@ struct World {
             else candidate.division->consume(candidate.ammoKey,spent);
             const int hits = std::binomial_distribution<int>(engaged,candidate.chance)(combatRandom);
             result.hits += hits;
-            const auto lost = applyAircraftHits(wing,hits,type);
+            const auto lost = applyAircraftHits(wing,hits,type,tile);
             losses.destroyed += lost.destroyed;
             losses.damaged += lost.damaged;
             losses.evaded += lost.evaded;
@@ -3141,7 +3160,7 @@ struct World {
                 const int engaged = std::min(salvo.attack.count,salvo.sorties);
                 const double chance = emergencyEvasion(salvo.targetWing,engaged,salvo.attack.chance,type);
                 const int hits = std::binomial_distribution<int>(engaged,chance)(combatRandom);
-                applyAircraftHits(target,hits,type);
+                applyAircraftHits(target,hits,type,salvo.exposure);
                 if (hits > 0) {
                     target.abortedHours = std::max(target.abortedHours,6.);
                     target.cooldown = std::max(target.cooldown,6.);
@@ -3597,6 +3616,12 @@ struct World {
             ++occupied[index];
         }
         for (const auto& [unit,tile] : bot.hexAssignments) ++occupied[tile];
+        for (const auto& unit : divisions) {
+            if (unit.owner != bot.owner || unit.combat.strength <= 0 || !unit.route.empty()) continue;
+            const int tile = unit.r*size+unit.q;
+            if (unit.organization < unit.maxOrganization*.35 && tiles[tile].supply < .3)
+                occupied[tile] += 6;
+        }
         std::set<int> queued;
         for (const auto& project : construction.queues[bot.owner]) {
             if (project.spec != spec) continue;
@@ -3800,7 +3825,7 @@ struct World {
             bot.nextRecruitment = botHours+168;
         }
         const int owner = bot.owner, site = botTrainingSite(owner);
-        if (site < 0 || std::ranges::any_of(bot.tasks,[](const auto& task) {
+        if (site < 0 || owner >= int(manpowerReserve.size()) || std::ranges::any_of(bot.tasks,[](const auto& task) {
             return task.kind == hoi5::BotTask::Kind::recruit && task.active();
         })) return;
         const double money = botAvailableMoney(bot);
@@ -5060,6 +5085,10 @@ struct World {
         auto used = planBotRecovery(bot,atWar,orders);
         const auto pinned = assignBotFront(bot,atWar,used);
         synchronizeBotArmies(bot,atWar);
+        std::set<int> coveredPosts;
+        for (const auto& unit : divisions)
+            if (unit.owner == bot.owner && unit.combat.strength > 0 && !unit.retreating)
+                coveredPosts.insert(unit.route.empty() ? unit.r*size+unit.q : unit.route.back());
         for (const auto& [index,tile] : bot.hexAssignments) {
             const auto& unit = divisions[index];
             if (pinned.contains(index) || tile == unit.r*size+unit.q ||
@@ -5067,6 +5096,13 @@ struct World {
                 (bot.resting.contains(index) && tiles[tile].supply < .25)) continue;
             const auto last = bot.lastOrders.find(index);
             if (last != bot.lastOrders.end() && botHours-last->second < 24) continue;
+            // Movement consumes 1.4 organization per hex. Keep a 25% planning margin
+            // for optional reinforcements, while still filling uncovered posts.
+            if (coveredPosts.contains(tile)) {
+                const auto route = divisionRoute(unit,unit.r*size+unit.q,tile);
+                if (route.empty() || unit.organization-1.4*1.25*route.size() < unit.maxOrganization*.65)
+                    continue;
+            }
             orders.push_back({index,tile});
             bot.lastOrders[index] = botHours;
             used.insert(index);
@@ -10705,10 +10741,77 @@ int main(int argc, char** argv) try {
                 window.setView(gui);
             }
             const auto aviationStart = DebugClock::now();
+            sf::VertexArray flights(sf::PrimitiveType::Triangles);
+            const auto now = DebugClock::now();
+            for (const auto& effect : world.airVisuals) {
+                const float age = std::chrono::duration<float>(now-effect.start).count();
+                const float duration = effect.impact ? 1.7f : 1.8f;
+                if (age >= duration) continue;
+                const auto pixel = [&](int tile) {
+                    return sf::Vector2f(window.mapCoordsToPixel(center(tile%world.size,tile/world.size),camera));
+                };
+                const auto from = pixel(effect.origin), to = pixel(effect.target);
+                const auto delta = to-from;
+                const float length = std::hypot(delta.x,delta.y);
+                const auto forward = length > 0 ? delta/length : sf::Vector2f{1,0};
+                const sf::Vector2f side{-forward.y,forward.x};
+                const float t = age/duration;
+                const auto point = effect.impact ? to : from+delta*(1-std::abs(2*t-1));
+                if (point.x < -30 || point.y < -30 || point.x > size.x+30 || point.y > size.y+30) continue;
+                const auto triangle = [&](sf::Vector2f a,sf::Vector2f b,sf::Vector2f c,sf::Color color) {
+                    for (auto p : {a,b,c}) flights.append({point+forward*p.x+side*p.y,color});
+                };
+                if (effect.impact) {
+                    const auto alpha = static_cast<unsigned char>(210*(1-t));
+                    const sf::Color glow = effect.loss ? sf::Color{255,94,48} : sf::Color{255,184,86};
+                    const float scale = std::clamp(zoom,.55f,1.6f);
+                    const float inner = (4+8*t)*scale, outer = (10+18*t)*scale;
+                    for (int i = 0; i < 20; ++i) {
+                        const float a = i*.31415927f, b = (i+1)*.31415927f;
+                        const sf::Vector2f u{std::cos(a),std::sin(a)}, v{std::cos(b),std::sin(b)};
+                        const auto rim = sf::Color(glow.r,glow.g,glow.b,alpha/2);
+                        triangle({},u*outer,v*outer,{glow.r,glow.g,glow.b,static_cast<unsigned char>(alpha/4)});
+                        triangle(u*outer,v*outer,u*(outer-2*scale),rim);
+                        triangle(v*outer,v*(outer-2*scale),u*(outer-2*scale),rim);
+                        triangle({},u*inner,v*inner,{255,235,164,static_cast<unsigned char>(alpha/2)});
+                    }
+                    for (int i = 0; i < 4; ++i) {
+                        const float angle = i*1.5707963f+t*.9f;
+                        const sf::Vector2f ray{std::cos(angle),std::sin(angle)};
+                        const sf::Vector2f tangent = sf::Vector2f{-ray.y,ray.x}*scale;
+                        const auto a = ray*(inner*.55f), b = ray*(outer*.92f);
+                        const auto spark = sf::Color(glow.r,glow.g,glow.b,alpha/2);
+                        triangle(a+tangent,a-tangent,b+tangent,spark);
+                        triangle(a-tangent,b-tangent,b+tangent,spark);
+                    }
+                    continue;
+                }
+                auto color = world.tiles[effect.origin].border;
+                color.a = 245;
+                const float d = t < .5f ? 1.f : -1.f;
+                const bool helicopter = effect.type >= 0 && hoi5::aircraftTypes[effect.type].helicopter;
+                if (helicopter) {
+                    triangle({6.6f*d,0},{0,-4.08f},{0,4.08f},color);
+                    triangle({0,-4.08f},{-8.88f*d,-2.88f},{0,4.08f},color);
+                    triangle({-8.88f*d,-2.88f},{-7.44f*d,2.88f},{0,4.08f},color);
+                    const sf::Color rotor{230,240,248,210};
+                    triangle({-1.6f,-11.4f},{.4f,-11.4f},{.4f,11.4f},rotor);
+                    triangle({-1.6f,-11.4f},{-1.6f,11.4f},{.4f,11.4f},rotor);
+                    triangle({-6*d,-1},{-16*d,0},{-6*d,1},color);
+                } else {
+                    triangle({11.4f*d,0},{1.44f*d,-2.16f},{1.44f*d,2.16f},color);
+                    triangle({1.44f*d,-2.16f},{-11.76f*d,0},{1.44f*d,2.16f},color);
+                    for (float sign : {-1.f,1.f}) {
+                        triangle({1.68f*d,sign*1.2f},{-3.6f*d,sign*10.56f},{-1.44f*d,sign*1.2f},color);
+                        triangle({-8.16f*d,sign*.96f},{-12.24f*d,sign*5.76f},{-10.32f*d,sign*.72f},color);
+                    }
+                }
+            }
+            window.draw(flights);
             for (const auto& salvo : world.salvos) {
                 const auto point = sf::Vector2f(window.mapCoordsToPixel(
                     center(salvo.current%world.size,salvo.current/world.size),camera));
-                box(window,point-sf::Vector2f(4,4),{8,8},{243,169,55});
+                box(window,point-sf::Vector2f(2,1),{4,2},{243,169,55});
             }
             window.setView(camera);
             for (const auto& base : world.air.bases) {

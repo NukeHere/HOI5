@@ -15,6 +15,7 @@ struct AircraftInterceptorSalvo {
     int targetWing,sorties;
     InboundInterceptor attack;
     int targetAircraft = -1;
+    int exposure = -1;
 };
 
 struct AirSalvo {
