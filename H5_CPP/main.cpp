@@ -789,7 +789,20 @@ struct World {
         }
     }
 
-    void advancePolitics(int day,std::span<const std::pair<int,int>> expired = {}) {
+    bool botOfferResponse(const hoi5::ForeignOffer& offer,bool fallback) const {
+        const auto bot = std::ranges::find(supplyBots,offer.target,&hoi5::BotSupplyState::owner);
+        if (bot == supplyBots.end()) return fallback;
+        if (offer.action == hoi5::ForeignAction::peace)
+            return profiles[offer.target].budget < 0 || diplomacy.countries[offer.target].warSupport < .45 || fallback;
+        if (bot->course == hoi5::BotCourseChoice{hoi5::BotCourse::warPreparation,offer.actor} &&
+            (offer.action == hoi5::ForeignAction::alliance ||
+             offer.action == hoi5::ForeignAction::nonaggression ||
+             offer.action == hoi5::ForeignAction::transit)) return false;
+        return fallback;
+    }
+
+    void advancePolitics(int day,std::span<const std::pair<int,int>> expired = {},
+                         hoi5::DebugProfiler* debug = nullptr) {
         for (int current = diplomacy.day+1; current <= day; ++current) {
             diplomacy.serviceLoans(current,profiles,[&](const auto& loan,bool arrears,bool repaid) {
                 const std::string lender(countryNames[loan.lender]), borrower(countryNames[loan.borrower]);
@@ -823,6 +836,9 @@ struct World {
             }
             diplomacy.advance(current,profiles,[&](const auto& offer,bool accepted) {
                 reportForeignResponse(offer,accepted);
+            },[&](const auto& offer,bool fallback) {
+                hoi5::DebugMeasure timing(debug,"ai_offer_response");
+                return botOfferResponse(offer,fallback);
             });
             if (current == day) expireSupportPrograms(expired);
             advanceWorldNews(current);
@@ -830,7 +846,7 @@ struct World {
         }
     }
 
-    void advancePoliticsHours(int hours) {
+    void advancePoliticsHours(int hours,hoi5::DebugProfiler* debug = nullptr) {
         if (profiles.empty() || diplomacy.countries.size() != profiles.size()) return;
         while (hours > 0) {
             const int step = std::min(hours,24-politicsHours);
@@ -842,7 +858,7 @@ struct World {
             politicsHours += step;
             if (midnight) {
                 politicsHours = 0;
-                advancePolitics(diplomacy.day+1,expired);
+                advancePolitics(diplomacy.day+1,expired,debug);
             } else expireSupportPrograms(expired);
         }
     }
@@ -5114,7 +5130,7 @@ struct World {
         using Clock = hoi5::DebugProfiler::Clock;
         {
             hoi5::DebugMeasure timing(debug,"server_politics");
-            advancePoliticsHours(hours);
+            advancePoliticsHours(hours,debug);
         }
         if (marketRotation && !stockpiles.empty()) {
             hoi5::DebugMeasure timing(debug,"server_market");
@@ -7145,6 +7161,36 @@ int main(int argc, char** argv) try {
             return task.kind == hoi5::BotTask::Kind::politics &&
                 task.politicalAction == int(hoi5::ForeignAction::peace);
         }) ? 0 : 1;
+    }
+    if (mode == "--check-bot-offers") {
+        auto test = generateWorld(20,2,918273,1);
+        test.startBots(918273);
+        auto& bot = test.supplyBots.front();
+        const int target = bot.owner, actor = target == 0 ? 1 : 0;
+        bot.course = {hoi5::BotCourse::warPreparation,actor};
+        auto& relation = test.diplomacy.relation(actor,target);
+        relation.opinion[target] = 100.;
+        relation.trust = 1.;
+        test.diplomacy.countries[actor].reliability = 1.;
+        test.diplomacy.countries[actor].reputation = 1.;
+        test.diplomacy.offers.push_back({actor,target,test.diplomacy.day+1,hoi5::ForeignAction::alliance});
+        hoi5::DebugProfiler profiler;
+        test.advancePolitics(test.diplomacy.day+1,{},&profiler);
+        profiler.frame(.5);
+        if (relation.treaties.contains(hoi5::ForeignAction::alliance) || !test.diplomacy.offers.empty()) return 1;
+        const auto row = std::ranges::find_if(hoi5::debugRows,[](const auto& item) {
+            return std::ranges::find(item.keys,"ai_offer_response") != item.keys.end();
+        });
+        if (row == std::end(hoi5::debugRows) || profiler.average(*row) <= 0.) return 1;
+
+        relation.war = true;
+        relation.warStarted = test.diplomacy.day;
+        relation.opinion[target] = -100.;
+        test.profiles[target].budget = -1.;
+        test.diplomacy.countries[target].warSupport = .8;
+        test.diplomacy.offers.push_back({actor,target,test.diplomacy.day+1,hoi5::ForeignAction::peace});
+        test.advancePolitics(test.diplomacy.day+1);
+        return !relation.war && test.diplomacy.offers.empty() ? 0 : 1;
     }
     if (mode == "--check-bot-regions") {
         World test;

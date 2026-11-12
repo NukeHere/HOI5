@@ -398,7 +398,8 @@ struct Diplomacy {
     }
 
     void advance(int currentDay,std::vector<StartingProfile>& profiles,
-                 const std::function<void(const ForeignOffer&,bool)>& onResponse = {}) {
+                 const std::function<void(const ForeignOffer&,bool)>& onResponse = {},
+                 const std::function<bool(const ForeignOffer&,bool)>& decide = {}) {
         using A = ForeignAction;
         if (currentDay <= day) return;
         day = currentDay;
@@ -458,7 +459,7 @@ struct Diplomacy {
                     ((offer.action != A::alliance && offer.action != A::nonaggression && offer.action != A::transit)
                      || (countries[offer.actor].reliability >= .25 && countries[offer.actor].reputation >= .2
                          && r.grievance[target] <= 40));
-            const bool accepted = resolve(offer,accept,profiles);
+            const bool accepted = resolve(offer,decide ? decide(offer,accept) : accept,profiles);
             if (onResponse) onResponse(offer,accepted);
             return true;
         });
