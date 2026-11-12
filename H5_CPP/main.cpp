@@ -3261,6 +3261,7 @@ struct World {
             bot.nextRecruitment = 24.+144.*rng.uniform();
             bot.nextAir = 24.+144.*rng.uniform();
             bot.nextEconomy = 12.+60.*rng.uniform();
+            bot.nextDiplomacy = 12.+60.*rng.uniform();
             bot.aggression = rng.uniform();
             std::vector<std::pair<double,int>> candidates;
             for (int other = 0; other < int(capitals.size()); ++other) {
@@ -3549,7 +3550,8 @@ struct World {
             return existing.active() && existing.kind == task.kind && existing.tile == task.tile &&
                 existing.resource == task.resource && existing.amount == task.amount &&
                 existing.defenseType == task.defenseType && existing.trainingType == task.trainingType &&
-                existing.buildingSpec == task.buildingSpec && existing.sector == task.sector;
+                existing.buildingSpec == task.buildingSpec && existing.sector == task.sector &&
+                existing.targetCountry == task.targetCountry && existing.politicalAction == task.politicalAction;
         };
         if (std::ranges::count_if(bot.tasks,&hoi5::BotTask::active) >= 12 ||
             std::ranges::any_of(bot.tasks,duplicate)) return false;
@@ -4027,6 +4029,119 @@ struct World {
             return true;
         }
         return false;
+    }
+
+    bool botWarPreparationReady(const hoi5::BotSupplyState& bot,int target) const {
+        const int owner = bot.owner;
+        std::vector<int> front;
+        for (int tile = 0; tile < int(tiles.size()); ++tile) {
+            if (tiles[tile].owner != owner || airDefenseWater(tile)) continue;
+            if (std::ranges::any_of(botGeography.adjacent(tile),[&](int next) {
+                return tiles[next].owner == target && !airDefenseWater(next);
+            })) front.push_back(tile);
+        }
+        if (front.empty()) return false;
+        std::set<int> near(front.begin(),front.end());
+        for (const int tile : front)
+            near.insert(botGeography.adjacent(tile).begin(),botGeography.adjacent(tile).end());
+        int total = 0;
+        std::vector<int> ready;
+        for (int index = 0; index < int(divisions.size()); ++index) {
+            const auto& unit = divisions[index];
+            if (unit.owner != owner || unit.combat.strength <= 0) continue;
+            ++total;
+            const int tile = unit.r*size+unit.q;
+            if (near.contains(tile) && unit.route.empty() && unit.battle < 0 &&
+                unit.organization >= unit.maxOrganization*.65 && supplyRatio(unit) >= .25) ready.push_back(tile);
+        }
+        if (int(ready.size()) < std::max(1,(total+2)/3)) return false;
+        const bool covered = std::ranges::any_of(air.defense,[&](const auto& unit) {
+            if (unit.owner != owner || unit.ammo <= 0 || !unit.operational()) return false;
+            const int range = hoi5::defenseClasses[unit.type].fireRange;
+            return range > 0 && std::ranges::any_of(ready,[&](int tile) {
+                return hoi5::supplyHexDistance(unit.tile,tile,size) <= range;
+            });
+        });
+        if (!covered) return false;
+        const auto reserve = botMilitaryReserve(owner,false);
+        return std::ranges::all_of(reserve,[&](const auto& item) {
+            return hoi5::value(stockpiles[owner],item.first) >= item.second;
+        });
+    }
+
+    void scheduleBotDiplomacy(hoi5::BotSupplyState& bot) {
+        const int owner = bot.owner;
+        const bool urgent = botAtWar(owner) || botPreparationTarget(owner) >= 0;
+        if (botHours < bot.nextDiplomacy) return;
+        bot.nextDiplomacy = botHours+(urgent ? 24 : 168);
+        if (owner < 0 || owner >= int(diplomacy.countries.size()) || owner >= int(profiles.size())) return;
+        const auto addPolitics = [&](int target,hoi5::ForeignAction action) {
+            hoi5::BotTask task{hoi5::BotTask::Kind::politics,botHours};
+            task.targetCountry = target;
+            task.politicalAction = int(action);
+            addBotTask(bot,task);
+        };
+        int enemy = -1;
+        for (int other = 0; other < int(profiles.size()); ++other)
+            if (diplomacy.hostile(owner,other)) { enemy = other; break; }
+        if (enemy >= 0) {
+            bot.course = {hoi5::BotCourse::defense,enemy};
+            const auto& policy = diplomacy.countries[owner];
+            if (profiles[owner].budget < 0 || policy.warSupport < .4) {
+                const auto& info = *std::ranges::find(hoi5::foreignActions,hoi5::ForeignAction::peace,
+                    &hoi5::ForeignActionInfo::action);
+                if (diplomacy.reason(owner,enemy,info,profiles).empty()) addPolitics(enemy,hoi5::ForeignAction::peace);
+            }
+        } else if (const int target = botPreparationTarget(owner); target >= 0) {
+            const auto action = diplomacy.goals.contains({owner,target}) ? hoi5::ForeignAction::war :
+                hoi5::ForeignAction::justify;
+            const auto& info = *std::ranges::find(hoi5::foreignActions,action,&hoi5::ForeignActionInfo::action);
+            if (diplomacy.reason(owner,target,info,profiles).empty() &&
+                (action != hoi5::ForeignAction::war || botWarPreparationReady(bot,target))) addPolitics(target,action);
+        } else {
+            std::vector<std::pair<double,int>> candidates;
+            for (int other = 0; other < int(profiles.size()); ++other) {
+                if (other == owner || !std::ranges::any_of(tiles,[&](const auto& tile) { return tile.owner == other; })) continue;
+                const auto& relation = diplomacy.relation(owner,other);
+                const auto opinion = relation.opinion.find(owner);
+                candidates.emplace_back(50+(opinion == relation.opinion.end() ? 0 : opinion->second),other);
+            }
+            if (const auto* target = hoi5::botChooseClose(bot.rng,candidates)) {
+                const bool depends = std::ranges::any_of(market.contracts,[&](const auto& order) {
+                    return order.country == owner && order.buy && order.amount > 0;
+                });
+                const auto action = depends ? hoi5::ForeignAction::trade : hoi5::ForeignAction::mission;
+                const auto& info = *std::ranges::find(hoi5::foreignActions,action,&hoi5::ForeignActionInfo::action);
+                if (diplomacy.reason(owner,*target,info,profiles).empty()) addPolitics(*target,action);
+            }
+        }
+        const auto& policy = diplomacy.countries[owner];
+        if (profiles[owner].budget > 10000000. && policy.support < .55 && policy.programHours[0] == 0)
+            addBotTask(bot,{hoi5::BotTask::Kind::support,botHours});
+        if (taxedTreasury(owner).balance()+bot.tradeBalance < 0 && policy.taxReady[2] <= diplomacy.day && policy.taxes[2] < 2)
+            addBotTask(bot,{hoi5::BotTask::Kind::tax,botHours});
+        if (profiles[owner].budget > 30000000. && bot.intelligence < .8)
+            addBotTask(bot,{hoi5::BotTask::Kind::intelligence,botHours});
+    }
+
+    bool applyBotPolitics(hoi5::BotSupplyState& bot,const hoi5::BotTask& task) {
+        const int owner = bot.owner;
+        if (task.kind == hoi5::BotTask::Kind::support)
+            return changeSupportProgram(owner,0,720).empty();
+        if (task.kind == hoi5::BotTask::Kind::tax)
+            return changeTax(owner,2,1).empty();
+        if (task.kind == hoi5::BotTask::Kind::intelligence) {
+            const double cost = 2000000.*(1+bot.intelligence*4);
+            if (cost > botAvailableMoney(bot) || bot.intelligence >= .8) return false;
+            profiles[owner].budget -= cost;
+            bot.intelligence = std::min(.8,bot.intelligence+.1);
+            return true;
+        }
+        if (task.targetCountry < 0 || task.targetCountry >= int(profiles.size())) return false;
+        const auto action = hoi5::ForeignAction(task.politicalAction);
+        const auto info = std::ranges::find(hoi5::foreignActions,action,&hoi5::ForeignActionInfo::action);
+        return info != std::end(hoi5::foreignActions) &&
+            performForeignAction(owner,task.targetCountry,*info).empty();
     }
 
     bool applyBotTrade(hoi5::BotSupplyState& bot,const hoi5::BotTask& task) {
@@ -4815,6 +4930,10 @@ struct World {
                     hoi5::DebugMeasure economy(debug,"ai_economy_planning");
                     scheduleBotEconomy(bot);
                 }
+                {
+                    hoi5::DebugMeasure diplomacyTiming(debug,"ai_diplomacy_planning");
+                    scheduleBotDiplomacy(bot);
+                }
                 bot.nextDaily = botHours+24;
             }
             if (botHours >= bot.nextMicro || bot.urgent) {
@@ -4850,6 +4969,18 @@ struct World {
                             return (task.kind == Task::Kind::buy ? fill.buyer : fill.seller) == bot.owner &&
                                 fill.resource == task.resource && fill.amount > 0;
                         }) ? Status::succeeded : Status::failed;
+                } else if (task.status == Status::waitingOffer) {
+                    const auto action = hoi5::ForeignAction(task.politicalAction);
+                    const bool waiting = std::ranges::any_of(diplomacy.offers,[&](const auto& offer) {
+                        return offer.actor == bot.owner && offer.target == task.targetCountry && offer.action == action;
+                    });
+                    if (!waiting) {
+                        const auto& relation = diplomacy.relation(bot.owner,task.targetCountry);
+                        const bool accepted = action == hoi5::ForeignAction::peace ? !relation.war :
+                            action == hoi5::ForeignAction::transit ? diplomacy.canTransit(bot.owner,task.targetCountry) :
+                            relation.treaties.contains(action);
+                        task.status = accepted ? Status::succeeded : Status::failed;
+                    }
                 } else if (task.pending() && botHours >= task.retryHour) {
                     if (botHours-task.createdHour > 336) task.status = Status::cancelled;
                     else {
@@ -4880,6 +5011,13 @@ struct World {
                 task->status = applyBotConstruction(*bot,*task) ? Status::executing : Status::blocked;
             } else if (task->kind == Task::Kind::specialize) {
                 task->status = applyBotSpecialization(*bot,*task) ? Status::succeeded : Status::blocked;
+            } else if (task->kind == Task::Kind::politics || task->kind == Task::Kind::support ||
+                       task->kind == Task::Kind::tax || task->kind == Task::Kind::intelligence) {
+                if (!applyBotPolitics(*bot,*task)) task->status = Status::blocked;
+                else if (task->kind == Task::Kind::politics &&
+                    !hoi5::offerNames(hoi5::ForeignAction(task->politicalAction)).first.empty())
+                    task->status = Status::waitingOffer;
+                else task->status = Status::succeeded;
             } else {
                 task->status = applyBotTrade(*bot,*task) ? Status::waitingMarket : Status::blocked;
                 if (task->status == Status::waitingMarket) task->marketTick = botMarketTick;
@@ -6831,13 +6969,14 @@ int main(int argc, char** argv) try {
         auto test = generateWorld(20,2,918273,1);
         test.startBots(918273);
         auto& bot = test.supplyBots.front();
-        bot.nextDaily = bot.nextMicro = bot.nextAir = bot.nextRecruitment = bot.nextEconomy = 0.;
+        bot.nextDaily = bot.nextMicro = bot.nextAir = bot.nextRecruitment = bot.nextEconomy =
+            bot.nextDiplomacy = 0.;
         hoi5::DebugProfiler profiler;
         test.updateBots(24,&profiler);
         profiler.frame(.5);
         constexpr std::array keys{"ai_total","ai_reviews","ai_daily","ai_regions","ai_supply_planning",
             "ai_defense_planning","ai_recruitment_planning","ai_air_planning","ai_economy_planning",
-            "ai_micro","ai_front_planning","ai_tasks"};
+            "ai_diplomacy_planning","ai_micro","ai_front_planning","ai_tasks"};
         for (const auto key : keys) {
             const auto row = std::ranges::find_if(hoi5::debugRows,[&](const auto& item) {
                 return std::ranges::find(item.keys,key) != item.keys.end();
@@ -6848,6 +6987,52 @@ int main(int argc, char** argv) try {
             }
         }
         return 0;
+    }
+    if (mode == "--check-bot-diplomacy") {
+        auto test = generateWorld(20,2,918273,1);
+        test.startBots(918273);
+        auto& bot = test.supplyBots.front();
+        const int owner = bot.owner, target = owner == 0 ? 1 : 0;
+        test.profiles[owner].budget = 50000000.;
+        auto& policy = test.diplomacy.countries[owner];
+        policy.support = .5;
+        bot.intelligence = .25;
+        bot.nextDiplomacy = 0;
+        test.scheduleBotDiplomacy(bot);
+        auto mission = std::ranges::find_if(bot.tasks,[](const auto& task) {
+            return task.kind == hoi5::BotTask::Kind::politics &&
+                task.politicalAction == int(hoi5::ForeignAction::mission);
+        });
+        auto support = std::ranges::find_if(bot.tasks,[](const auto& task) {
+            return task.kind == hoi5::BotTask::Kind::support;
+        });
+        auto intelligence = std::ranges::find_if(bot.tasks,[](const auto& task) {
+            return task.kind == hoi5::BotTask::Kind::intelligence;
+        });
+        if (mission == bot.tasks.end() || support == bot.tasks.end() || intelligence == bot.tasks.end() ||
+            !test.applyBotPolitics(bot,*mission) || !test.applyBotPolitics(bot,*support) ||
+            !test.applyBotPolitics(bot,*intelligence) || policy.programHours[0] != 720 || bot.intelligence != .35)
+            return 1;
+        bot.tasks.clear();
+        bot.course = {hoi5::BotCourse::warPreparation,target};
+        bot.nextDiplomacy = 0;
+        policy.support = policy.legitimacy = .7;
+        test.scheduleBotDiplomacy(bot);
+        const auto justify = std::ranges::find_if(bot.tasks,[](const auto& task) {
+            return task.kind == hoi5::BotTask::Kind::politics &&
+                task.politicalAction == int(hoi5::ForeignAction::justify);
+        });
+        if (justify == bot.tasks.end() || !test.applyBotPolitics(bot,*justify) ||
+            !test.diplomacy.goals.contains({owner,target})) return 1;
+        bot.tasks.clear();
+        test.diplomacy.relation(owner,target).war = true;
+        policy.warSupport = .3;
+        bot.nextDiplomacy = 0;
+        test.scheduleBotDiplomacy(bot);
+        return std::ranges::any_of(bot.tasks,[](const auto& task) {
+            return task.kind == hoi5::BotTask::Kind::politics &&
+                task.politicalAction == int(hoi5::ForeignAction::peace);
+        }) ? 0 : 1;
     }
     if (mode == "--check-bot-regions") {
         World test;
@@ -6935,6 +7120,7 @@ int main(int argc, char** argv) try {
             auto& division = bot.divisions.emplace_back();
             division.q = division.owner = 1;
             bot.startBots(7);
+            bot.supplyBots.front().nextDiplomacy = std::numeric_limits<double>::max();
             bot.profiles[1].budget = 5000000.;
             bot.updateBots(24,nullptr);
             auto& tasks = bot.supplyBots.front().tasks;
@@ -6983,6 +7169,7 @@ int main(int argc, char** argv) try {
             division.owner = 1;
             division.q = 2;
             bot.startBots(7);
+            bot.supplyBots.front().nextDiplomacy = std::numeric_limits<double>::max();
             bot.air.defense.clear();
             bot.diplomacy.goals[{1,0}] = 30;
             bot.updateBots(24,nullptr);

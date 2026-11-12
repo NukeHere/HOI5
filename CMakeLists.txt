@@ -78,6 +78,7 @@ add_test(NAME bot_recruitment_python_parity COMMAND HOI5 --check-bot-recruitment
 add_test(NAME bot_air_planning_python_parity COMMAND HOI5 --check-bot-air)
 add_test(NAME bot_economy_python_parity COMMAND HOI5 --check-bot-economy)
 add_test(NAME ai_profiler_rows COMMAND HOI5 --check-ai-profiler)
+add_test(NAME bot_diplomacy_python_parity COMMAND HOI5 --check-bot-diplomacy)
 add_test(NAME airbase_capture COMMAND HOI5 --check-airbase-capture)
 add_test(NAME defense_reload COMMAND HOI5 --check-defense-reload)
 add_test(NAME field_helipad COMMAND HOI5 --check-field-helipad)

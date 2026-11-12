@@ -19,10 +19,11 @@ struct BotSupplyPoint { int tile; double weight, passability, current; };
 struct BotSupplyCandidate { int tile; double strength, multiplier; };
 struct BotSupplyChoice { double gain; int tile; };
 
-enum class BotTaskStatus { planned, blocked, executing, waitingMarket, succeeded, failed, cancelled };
+enum class BotTaskStatus { planned, blocked, executing, waitingMarket, waitingOffer, succeeded, failed, cancelled };
 
 struct BotTask {
-    enum class Kind { supply, buy, sell, build, specialize, fortify, rebuildDefense, recruit, air };
+    enum class Kind { supply, buy, sell, build, specialize, fortify, rebuildDefense, recruit, air,
+        politics, support, tax, intelligence };
     Kind kind;
     int createdHour;
     int tile = -1;
@@ -35,9 +36,12 @@ struct BotTask {
     int trainingType = -1;
     int buildingSpec = -1;
     std::string_view sector;
+    int targetCountry = -1;
+    int politicalAction = -1;
 
     bool pending() const { return status == BotTaskStatus::planned || status == BotTaskStatus::blocked; }
-    bool active() const { return pending() || status == BotTaskStatus::executing || status == BotTaskStatus::waitingMarket; }
+    bool active() const { return pending() || status == BotTaskStatus::executing ||
+        status == BotTaskStatus::waitingMarket || status == BotTaskStatus::waitingOffer; }
 };
 
 enum class BotCourse { development, deterrence, warPreparation, defense, recovery };
@@ -79,6 +83,7 @@ struct BotSupplyState {
     double nextRecruitment{};
     double nextAir{};
     double nextEconomy{};
+    double nextDiplomacy{};
     BotCourseChoice course{BotCourse::development,-1};
     int courseSince{};
     std::array<double,5> courseBias{};
