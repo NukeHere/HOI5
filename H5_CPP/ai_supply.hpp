@@ -22,7 +22,7 @@ struct BotSupplyChoice { double gain; int tile; };
 enum class BotTaskStatus { planned, blocked, executing, waitingMarket, succeeded, failed, cancelled };
 
 struct BotTask {
-    enum class Kind { supply, buy, fortify, rebuildDefense, recruit };
+    enum class Kind { supply, buy, fortify, rebuildDefense, recruit, air };
     Kind kind;
     int createdHour;
     int tile = -1;
@@ -75,6 +75,7 @@ struct BotSupplyState {
     double intelligence = .25;
     double nextWeekly{}, nextMonthly{};
     double nextRecruitment{};
+    double nextAir{};
     BotCourseChoice course{BotCourse::development,-1};
     int courseSince{};
     std::array<double,5> courseBias{};
