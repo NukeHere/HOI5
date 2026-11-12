@@ -3252,6 +3252,7 @@ struct World {
             bot.nextMicro = nextMicro;
             bot.nextWeekly = 12.+60.*rng.uniform();
             bot.nextMonthly = 24.+144.*rng.uniform();
+            bot.nextRecruitment = 24.+144.*rng.uniform();
             bot.aggression = rng.uniform();
             std::vector<std::pair<double,int>> candidates;
             for (int other = 0; other < int(capitals.size()); ++other) {
@@ -3539,7 +3540,7 @@ struct World {
         const auto duplicate = [&](const hoi5::BotTask& existing) {
             return existing.active() && existing.kind == task.kind && existing.tile == task.tile &&
                 existing.resource == task.resource && existing.amount == task.amount &&
-                existing.defenseType == task.defenseType;
+                existing.defenseType == task.defenseType && existing.trainingType == task.trainingType;
         };
         if (std::ranges::count_if(bot.tasks,&hoi5::BotTask::active) >= 12 ||
             std::ranges::any_of(bot.tasks,duplicate)) return false;
@@ -3626,6 +3627,116 @@ struct World {
         for (const auto& project : construction.queues[owner])
             if (!project.paid) money -= project.money;
         return std::max(0.,money);
+    }
+
+    hoi5::Stockpile botAvailableResources(int owner) const {
+        auto resources = stockpiles[owner];
+        for (const auto& project : construction.queues[owner])
+            for (const auto& [key,amount] : project.resources)
+                resources[key] -= std::max(0.,amount-hoi5::value(project.resourcesSpent,key));
+        return resources;
+    }
+
+    hoi5::Stockpile botMilitaryReserve(int owner,bool preparing,int extraType = -1) const {
+        hoi5::Stockpile reserve;
+        const auto add = [&](const hoi5::DivisionTemplate& design) {
+            for (const auto& [key,amount] : design.capacity)
+                reserve[key] += amount*(preparing ? .5 : .15);
+            for (const auto& [key,amount] : design.use)
+                reserve[key] += amount*(preparing ? 48. : 12.);
+        };
+        for (const auto& unit : divisions)
+            if (unit.owner == owner && unit.combat.strength > 0 && unit.design) add(*unit.design);
+        for (const auto& project : training)
+            if (project.country == owner) add(trainingDesign(project.type));
+        if (extraType >= 0) add(trainingDesign(extraType));
+        if (preparing) for (const auto& unit : air.defense) {
+            if (unit.owner != owner) continue;
+            const auto& type = hoi5::defenseClasses[unit.type];
+            const auto key = type.key == "short_range_aa" ? std::string_view("light_aa_ammo") :
+                std::string_view("anti_air_ammo");
+            reserve[key] += std::max(0,unit.ammoCapacity*2-unit.ammo);
+        }
+        return reserve;
+    }
+
+    int botTrainingSite(int owner) const {
+        int best = -1;
+        for (int tile = 0; tile < int(tiles.size()); ++tile)
+            if (safeTrainingSite(owner,tile) && (best < 0 || tiles[tile].supply > tiles[best].supply)) best = tile;
+        return best;
+    }
+
+    void scheduleBotRecruitment(hoi5::BotSupplyState& bot) {
+        if (botHours < bot.nextRecruitment) return;
+        bot.nextRecruitment = botHours+168;
+        const int owner = bot.owner, site = botTrainingSite(owner);
+        if (site < 0 || std::ranges::any_of(bot.tasks,[](const auto& task) {
+            return task.kind == hoi5::BotTask::Kind::recruit && task.active();
+        })) return;
+        const double money = botAvailableMoney(bot);
+        const auto free = botAvailableResources(owner);
+        std::vector<std::pair<double,int>> options;
+        for (int type = 0; type < baseDivisionTypes; ++type) {
+            const auto& design = trainingDesign(type);
+            if (trainingCost(design) > money || design.manpower > manpowerReserve[owner]) continue;
+            const auto reserve = botMilitaryReserve(owner,botPreparationTarget(owner) >= 0,type);
+            double coverage = std::numeric_limits<double>::infinity();
+            std::set<std::string_view> keys;
+            for (const auto& [key,amount] : reserve) keys.insert(key);
+            for (const auto& [key,amount] : design.capacity) keys.insert(key);
+            for (auto key : keys)
+                coverage = std::min(coverage,hoi5::value(free,key)/
+                    std::max(1.,hoi5::value(reserve,key)+hoi5::value(design.capacity,key)));
+            options.emplace_back(std::isfinite(coverage) ? coverage : 0.,type);
+        }
+        if (options.empty()) return;
+        std::vector<std::pair<double,int>> covered;
+        for (const auto& option : options) if (option.first >= 1.) covered.push_back(option);
+        const auto* type = hoi5::botChooseClose(bot.rng,covered.empty() ? options : covered);
+        if (!type) return;
+        const auto reserve = botMilitaryReserve(owner,botPreparationTarget(owner) >= 0,*type);
+        std::vector<std::pair<double,std::string_view>> shortages;
+        std::set<std::string_view> keys;
+        for (const auto& [key,amount] : reserve) keys.insert(key);
+        for (const auto& [key,amount] : trainingDesign(*type).capacity) keys.insert(key);
+        for (auto key : keys) {
+            const double missing = hoi5::value(reserve,key)+hoi5::value(trainingDesign(*type).capacity,key)-
+                hoi5::value(free,key);
+            if (missing > 0) shortages.emplace_back(missing,key);
+        }
+        std::ranges::sort(shortages,[](const auto& a,const auto& b) { return a.first > b.first; });
+        for (std::size_t i = 0; i < std::min<std::size_t>(4,shortages.size()); ++i)
+            addBotTask(bot,{hoi5::BotTask::Kind::buy,botHours,-1,shortages[i].second,shortages[i].first});
+        if (!shortages.empty()) return;
+        hoi5::BotTask task{hoi5::BotTask::Kind::recruit,botHours};
+        task.tile = site;
+        task.trainingType = *type;
+        addBotTask(bot,task);
+    }
+
+    bool applyBotRecruitment(const hoi5::BotSupplyState& bot,const hoi5::BotTask& task) {
+        const int owner = bot.owner, type = task.trainingType;
+        if (type < 0 || type >= baseDivisionTypes || !safeTrainingSite(owner,task.tile)) return false;
+        const auto& design = trainingDesign(type);
+        const auto existing = botMilitaryReserve(owner,false);
+        const auto reserve = botMilitaryReserve(owner,false,type);
+        const auto free = botAvailableResources(owner);
+        int count = std::min(int(botAvailableMoney(bot)/std::max(1.,trainingCost(design))),
+            int(manpowerReserve[owner]/std::max(1,design.manpower)));
+        std::set<std::string_view> keys;
+        for (const auto& [key,amount] : reserve) keys.insert(key);
+        for (const auto& [key,amount] : design.capacity) keys.insert(key);
+        for (auto key : keys) {
+            const double current = hoi5::value(existing,key);
+            const double perDivision = hoi5::value(reserve,key)-current+hoi5::value(design.capacity,key);
+            const double available = hoi5::value(free,key)-current;
+            if (available < 0) count = 0;
+            else if (perDivision > 0) count = std::min(count,int((available+1e-8)/perDivision));
+        }
+        int started = 0;
+        while (started < count && train(owner,task.tile,type) == "Подготовка начата") ++started;
+        return started > 0;
     }
 
     bool applyBotPurchase(hoi5::BotSupplyState& bot,const hoi5::BotTask& task) {
@@ -4387,6 +4498,7 @@ struct World {
                 sampleBotMilitary(bot,bot.owner);
                 scheduleBotSupply(bot,spec);
                 scheduleBotDefense(bot,fortSpec);
+                scheduleBotRecruitment(bot);
                 bot.nextDaily = botHours+24;
             }
             if (botHours >= bot.nextMicro || bot.urgent) {
@@ -4434,6 +4546,8 @@ struct World {
                     air.enqueueDefense(owner,task->defenseType,profiles[owner].budget,stockpiles[owner]);
                     task->status = air.defenseReplacements.contains(owner) ? Status::succeeded : Status::blocked;
                 }
+            } else if (task->kind == Task::Kind::recruit) {
+                task->status = applyBotRecruitment(*bot,*task) ? Status::succeeded : Status::blocked;
             } else {
                 task->status = applyBotPurchase(*bot,*task) ? Status::waitingMarket : Status::blocked;
                 if (task->status == Status::waitingMarket) task->marketTick = botMarketTick;
@@ -6267,6 +6381,36 @@ int main(int argc, char** argv) try {
         return offensive.divisions[0].route == std::deque<int>{2} && offensive.divisions[0].attackRoute &&
             offensive.divisions[2].route == std::deque<int>{2} && offensive.divisions[2].attackRoute &&
             offensive.divisions[1].route.empty() && offensive.divisions[3].route.empty() ? 0 : 1;
+    }
+    if (mode == "--check-bot-recruitment") {
+        auto test = generateWorld(20,2,918273,1);
+        test.startBots(918273);
+        auto& bot = test.supplyBots.front();
+        const int owner = bot.owner;
+        test.profiles[owner].budget = 1000000000.;
+        test.manpowerReserve[owner] = 20000.;
+        for (const auto& [key,price] : hoi5::TRADE_BASE_PRICES) test.stockpiles[owner][key] = 1000000000.;
+        bot.nextRecruitment = 0;
+        test.scheduleBotRecruitment(bot);
+        const auto recruit = std::ranges::find_if(bot.tasks,[](const auto& task) {
+            return task.kind == hoi5::BotTask::Kind::recruit;
+        });
+        if (recruit == bot.tasks.end() || recruit->trainingType < 0 || recruit->tile < 0) return 1;
+        const double people = test.manpowerReserve[owner], money = test.profiles[owner].budget;
+        if (!test.applyBotRecruitment(bot,*recruit) || test.training.empty() ||
+            std::ranges::any_of(test.training,[&](const auto& project) { return project.country != owner; }) ||
+            test.manpowerReserve[owner] >= people || test.profiles[owner].budget >= money) return 1;
+        test.training.clear();
+        bot.tasks.clear();
+        for (auto& [key,amount] : test.stockpiles[owner]) amount = 0.;
+        test.manpowerReserve[owner] = 20000.;
+        bot.nextRecruitment = 0;
+        test.scheduleBotRecruitment(bot);
+        return std::ranges::any_of(bot.tasks,[](const auto& task) {
+            return task.kind == hoi5::BotTask::Kind::buy && task.amount > 0;
+        }) && std::ranges::none_of(bot.tasks,[](const auto& task) {
+            return task.kind == hoi5::BotTask::Kind::recruit;
+        }) ? 0 : 1;
     }
     if (mode == "--check-bot-regions") {
         World test;
