@@ -74,6 +74,10 @@ add_test(NAME news_file_log COMMAND HOI5 --check-news-log "${CMAKE_CURRENT_BINAR
 add_test(NAME supply_python_parity COMMAND HOI5 --check-supply-parity)
 add_test(NAME bot_regions_python_parity COMMAND HOI5 --check-bot-regions)
 add_test(NAME bot_front_posts_python_parity COMMAND HOI5 --check-bot-front-posts)
+add_test(NAME bot_border_campaign COMMAND HOI5 --check-border-campaign)
+add_test(NAME bot_generated_campaign COMMAND HOI5 --check-campaign 146591 365)
+set_tests_properties(bot_generated_campaign PROPERTIES
+    FAIL_REGULAR_EXPRESSION "first bot battle hour: -1")
 add_test(NAME bot_course_python_parity COMMAND HOI5 --check-bot-course)
 add_test(NAME bot_recruitment_python_parity COMMAND HOI5 --check-bot-recruitment)
 add_test(NAME bot_mobilization_stock COMMAND HOI5 --check-bot-mobilization)

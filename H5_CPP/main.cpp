@@ -4487,11 +4487,39 @@ struct World {
         if (botHours < bot.nextExpansion) return;
         bot.nextExpansion = botHours+72+int(bot.rng.uniform()*24)-12;
         const int owner = bot.owner;
-        if (botAtWar(owner) || botPreparationTarget(owner) >= 0 || owner < 0 ||
+        if (owner < 0 ||
             owner >= int(production.size()) || owner >= int(stockpiles.size())) return;
         if (std::ranges::any_of(bot.tasks,[](const auto& task) {
             return task.kind == hoi5::BotTask::Kind::claim && task.active();
         })) return;
+
+        const int preparation = botPreparationTarget(owner);
+        std::vector<int> approach(tiles.size(),-1);
+        if (botAtWar(owner) || preparation >= 0) {
+            std::deque<int> frontier;
+            for (int tile = 0; tile < int(tiles.size()); ++tile) {
+                const int other = tiles[tile].owner;
+                if (other < 0 || other == owner || airDefenseWater(tile) ||
+                    (other != preparation && !diplomacy.hostile(owner,other))) continue;
+                approach[tile] = 0;
+                frontier.push_back(tile);
+            }
+            while (!frontier.empty()) {
+                const int tile = frontier.front();
+                frontier.pop_front();
+                for (int next : botGeography.adjacent(tile)) {
+                    if (approach[next] >= 0 || airDefenseWater(next)) continue;
+                    if (tiles[next].owner == owner) {
+                        if (approach[tile] == 0) return;
+                        continue;
+                    }
+                    if (tiles[next].owner >= 0) continue;
+                    approach[next] = approach[tile]+1;
+                    frontier.push_back(next);
+                }
+            }
+        }
+        const bool seekingContact = botAtWar(owner) || preparation >= 0;
 
         hoi5::Stockpile required;
         for (const auto& stage : production[owner])
@@ -4509,7 +4537,7 @@ struct World {
             if (tiles[tile].owner != owner) continue;
             for (const int next : botGeography.adjacent(tile)) {
                 const auto& candidate = tiles[next];
-                if (candidate.owner >= 0 || candidate.water) continue;
+                if (candidate.owner >= 0 || airDefenseWater(next) || (seekingContact && approach[next] < 0)) continue;
                 double score = .5+1./std::max(1.,candidate.movementCost)+
                     hoi5::agricultureScore(candidate.natural)*.3;
                 for (const auto& deposit : candidate.deposits) {
@@ -4524,7 +4552,11 @@ struct World {
             }
         }
         std::vector<std::pair<double,int>> choices;
-        for (const auto& [tile,score] : expansion) choices.emplace_back(score,tile);
+        int nearest = std::numeric_limits<int>::max();
+        if (seekingContact)
+            for (const auto& [tile,score] : expansion) nearest = std::min(nearest,approach[tile]);
+        for (const auto& [tile,score] : expansion)
+            if (!seekingContact || approach[tile] == nearest) choices.emplace_back(score,tile);
         const auto* target = hoi5::botChooseClose(bot.rng,choices);
         if (target) addBotTask(bot,{hoi5::BotTask::Kind::claim,botHours,*target});
     }
@@ -5457,10 +5489,11 @@ struct World {
                 if (tiles[tile].owner == owner && !airDefenseWater(tile)) friendly.insert(tile);
                 if (enemyLand(tile)) ++hostile;
             }
-            if (hostile >= 2 && friendly.size() < 2) continue;
             double defense = 0.;
             for (const int unit : unitsByTile[target])
                 if (diplomacy.hostile(owner,divisions[unit].owner)) defense += military[unit][hoi5::defense];
+            // An unoccupied border hex can open a second approach for a later assault.
+            if (defense > 0. && hostile >= 2 && friendly.size() < 2) continue;
             std::vector<int> pool;
             std::map<int,int> ranksBySource;
             for (const int index : ready)
@@ -5493,8 +5526,8 @@ struct World {
                             if (divisions[ally].owner == owner && stationary(ally) && !selected.contains(ally))
                                 support.push_back(ally);
                     }
-                    if (source == capitals[owner] || (hostile > 0 && friendly.size() < 2) ||
-                        (defense == 0. && exposed) || (defense > 0. && support.size() < 2)) continue;
+                    if (source == capitals[owner] || (defense == 0. && exposed) ||
+                        (defense > 0. && ((hostile > 0 && friendly.size() < 2) || support.size() < 2))) continue;
                     if (!support.empty()) protectedUnits.insert(support.front());
                 }
                 package.push_back({index,target,false,true});
@@ -7411,7 +7444,18 @@ int main(int argc, char** argv) try {
             division.combat.strength < strength && city.health < health ? 0 : 1;
     }
     if (mode == "--check-campaign" || mode == "--check-border-campaign") {
-        auto campaign = generateWorld(50,2,146591,1);
+        unsigned seed = 146591;
+        if (argc >= 3) {
+            std::istringstream input(argv[2]);
+            if (!(input >> seed) || !input.eof()) return 2;
+        }
+        int days = 90;
+        if (argc > 4) return 2;
+        if (argc == 4) {
+            std::istringstream input(argv[3]);
+            if (!(input >> days) || !input.eof() || days < 1 || days > 3650) return 2;
+        }
+        auto campaign = generateWorld(50,2,seed,1);
         const bool borderScenario = mode == "--check-border-campaign";
         if (borderScenario) {
             const int start = campaign.capitals[0], end = campaign.capitals[1];
@@ -7438,12 +7482,20 @@ int main(int argc, char** argv) try {
             hoi5::recalculateSupply(std::span(campaign.tiles),campaign.size,campaign.capitals);
             campaign.diplomacy.relation(0,1).war = true;
         }
-        campaign.startBots(146591);
-        int peakBattles = 0, contactHours = 0, readyContactHours = 0;
-        for (int hour = 1; hour <= 90*24; ++hour) {
+        campaign.startBots(seed);
+        const auto botTerritory = [&] {
+            return std::ranges::count(campaign.tiles,1,&Tile::owner);
+        };
+        const auto initialBotTerritory = botTerritory();
+        int peakBattles = 0, contactHours = 0, readyContactHours = 0, firstBotBattleHour = -1;
+        int firstLandContact = -1;
+        for (int hour = 1; hour <= days*24; ++hour) {
             if (hour == 31*24) campaign.diplomacy.relation(0,1).war = true;
             campaign.advance(1,nullptr,hour%168 == 0 ? std::optional{hour/168} : std::nullopt);
             peakBattles = std::max(peakBattles,int(campaign.battles.size()));
+            if (firstBotBattleHour < 0 && std::ranges::any_of(campaign.battles,[](const auto& entry) {
+                return entry.second.attacker == 1;
+            })) firstBotBattleHour = hour;
             if (campaign.diplomacy.hostile(0,1)) {
                 const auto enemyNeighbor = [&](int tile,int owner) {
                     return std::ranges::any_of(campaign.botGeography.adjacent(tile),[&](int next) {
@@ -7461,6 +7513,7 @@ int main(int argc, char** argv) try {
                         unit.lastSupplyRatio < .12) continue;
                     if (enemyNeighbor(unit.r*campaign.size+unit.q,unit.owner)) { ready = true; break; }
                 }
+                if (contact && firstLandContact < 0) firstLandContact = hour;
                 contactHours += contact;
                 readyContactHours += ready;
             }
@@ -7469,12 +7522,16 @@ int main(int argc, char** argv) try {
             for (const auto& unit : campaign.divisions)
                 if (!campaign.contains(unit.q,unit.r) || !std::isfinite(unit.organization)) return 1;
         }
-        std::cout << "90 days, peak concurrent battles: " << peakBattles
+        std::cout << "Seed " << seed << ", " << days << " days, peak concurrent battles: " << peakBattles
+                  << ", battles started: " << campaign.nextBattleOrder
+                  << ", first bot battle hour: " << firstBotBattleHour
+                  << ", first wartime land contact hour: " << firstLandContact
                   << ", land border hours: " << contactHours
+                  << ", bot territory change: " << botTerritory()-initialBotTerritory
                   << ", ready adjacent bot hours: " << readyContactHours
                   << ", divisions: " << campaign.divisions.size()
                   << ", wings: " << campaign.air.wings.size() << '\n';
-        return campaign.diplomacy.day == 90 && (!borderScenario || peakBattles > 0) ? 0 : 1;
+        return campaign.diplomacy.day == days && (!borderScenario || firstBotBattleHour >= 0) ? 0 : 1;
     }
     if (mode == "--check-bot-course") {
         using Course = hoi5::BotCourse;
