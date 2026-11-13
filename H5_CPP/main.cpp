@@ -4135,17 +4135,25 @@ struct World {
     double botAvailableMoney(const hoi5::BotSupplyState& bot) const {
         const int owner = bot.owner;
         const double balance = taxedTreasury(owner).balance()+bot.tradeBalance;
-        double money = std::max(0.,profiles[owner].budget-std::max(5000000.,std::abs(balance)));
-        for (const auto& project : construction.queues[owner])
-            if (!project.paid) money -= project.money;
+        double money = std::max(0.,profiles[owner].budget-std::max(5000000.,-balance));
+        int active = 0;
+        for (const auto& project : construction.queues[owner]) {
+            if (project.paused) continue;
+            ++active;
+            if (!project.paid && (!project.repair || active <= 3)) money -= project.money;
+        }
         return std::max(0.,money);
     }
 
     hoi5::Stockpile botAvailableResources(int owner) const {
         auto resources = stockpiles[owner];
-        for (const auto& project : construction.queues[owner])
+        int active = 0;
+        for (const auto& project : construction.queues[owner]) {
+            if (project.paused) continue;
+            if (++active > 3 && project.repair) continue;
             for (const auto& [key,amount] : project.resources)
                 resources[key] -= std::max(0.,amount-hoi5::value(project.resourcesSpent,key));
+        }
         return resources;
     }
 
@@ -4817,7 +4825,8 @@ struct World {
         for (std::size_t i = 0; i < std::min<std::size_t>(6,trades.size()); ++i)
             addBotTask(bot,{trades[i].buy ? hoi5::BotTask::Kind::buy : hoi5::BotTask::Kind::sell,
                 botHours,-1,trades[i].key,trades[i].amount});
-        if (construction.queues[owner].size() >= 4 || botAvailableMoney(bot) <= 0 || bot.regions.empty()) return;
+        if (std::ranges::count(construction.queues[owner],false,&hoi5::ConstructionProject::repair) >= 4 ||
+            botAvailableMoney(bot) <= 0 || bot.regions.empty()) return;
 
         const std::string_view food = "food";
         const auto* shortage = austerity && hoi5::value(capacity,food) < .8*hoi5::value(required,food)
@@ -5070,6 +5079,18 @@ struct World {
         }
         task.tile = *site;
         task.targetCoverage = project.target;
+        if (!airbase) {
+            // Let one development project run alongside repairs, keeping earlier builds in order.
+            int repairs = 0;
+            for (auto position = queue.begin(); position != std::prev(queue.end()); ++position) {
+                if (position->paused) continue;
+                if (!position->repair) break;
+                if (++repairs == 3) {
+                    std::rotate(position,std::prev(queue.end()),queue.end());
+                    break;
+                }
+            }
+        }
         return true;
     }
 
