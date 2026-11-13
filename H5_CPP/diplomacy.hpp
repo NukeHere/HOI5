@@ -70,8 +70,9 @@ struct CountryPolitics {
     }
     std::map<std::pair<ForeignAction,int>,int> cooldowns;
 
-    bool warReadiness() const {
-        return support >= .45 && legitimacy >= .45 && warSupport >= .35 && capital >= 20;
+    bool warReadiness(bool bot = false) const {
+        return support >= (bot ? .35 : .45) && legitimacy >= (bot ? .35 : .45) &&
+            warSupport >= (bot ? .25 : .35) && capital >= 20;
     }
 
     double programSupportEffect(int group,double population,double monthlyCost,double funding = 1.) const {
@@ -277,7 +278,7 @@ struct Diplomacy {
     }
 
     std::string reason(int actor,int target,const ForeignActionInfo& info,
-                       const std::vector<StartingProfile>& profiles,double amount = 0.) const {
+                       const std::vector<StartingProfile>& profiles,double amount = 0.,bool bot = false) const {
         using A = ForeignAction;
         if (actor == target || actor < 0 || target < 0 ||
             actor >= int(countries.size()) || target >= int(countries.size())) return "Недоступная страна";
@@ -320,8 +321,9 @@ struct Diplomacy {
             if (goal == goals.end()) return "Сначала подготовьте цель войны";
             if (day < goal->second) return "Цель войны будет готова "+politicalDate(goal->second);
             if (day > goal->second+180) return "Срок подготовленной цели войны истёк";
-            if (!state.warReadiness())
-                return "Нужно 45% поддержки, 45% легитимности, 35% поддержки войны и 20 политического капитала";
+            if (!state.warReadiness(bot))
+                return bot ? "Нужно 35% поддержки, 35% легитимности, 25% поддержки войны и 20 политического капитала" :
+                    "Нужно 45% поддержки, 45% легитимности, 35% поддержки войны и 20 политического капитала";
         }
         if (action == A::revokeTransit && !r.transitGrantors.contains(actor))
             return "Вы не выдавали этой стране разрешение на проход";
@@ -330,8 +332,8 @@ struct Diplomacy {
     }
 
     std::string act(int actor,int target,const ForeignActionInfo& info,std::vector<StartingProfile>& profiles,
-                    double amount = 0.) {
-        if (const auto error = reason(actor,target,info,profiles,amount); !error.empty()) return error;
+                    double amount = 0.,bool bot = false) {
+        if (const auto error = reason(actor,target,info,profiles,amount,bot); !error.empty()) return error;
         using A = ForeignAction;
         const auto action = info.action;
         auto& state = countries[actor];

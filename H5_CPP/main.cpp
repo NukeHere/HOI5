@@ -339,13 +339,22 @@ struct World {
         int owner, origin, target, type;
         bool impact, loss;
         std::chrono::steady_clock::time_point start;
+        sf::Vector2f offset;
     };
     std::deque<AirVisual> airVisuals;
+    std::mt19937 airVisualRandom{8131};
     void addAirVisual(int owner,int origin,int target,int type,bool impact = false,bool loss = false) {
         const auto now = std::chrono::steady_clock::now();
         while (!airVisuals.empty() && (airVisuals.size() >= 128 ||
-            now-airVisuals.front().start > std::chrono::seconds(3))) airVisuals.pop_front();
-        airVisuals.push_back({owner,origin,target,type,impact,loss,now});
+            now-airVisuals.front().start > std::chrono::seconds(9))) airVisuals.pop_front();
+        sf::Vector2f offset;
+        if (impact) {
+            std::uniform_real_distribution<float> random(0.f,1.f);
+            const float angle = random(airVisualRandom)*6.2831853f;
+            const float distance = .75f*std::sqrt(random(airVisualRandom));
+            offset = sf::Vector2f{std::cos(angle),std::sin(angle)}*distance;
+        }
+        airVisuals.push_back({owner,origin,target,type,impact,loss,now,offset});
     }
     std::vector<hoi5::AircraftInterceptorSalvo> aircraftInterceptors;
     hoi5::Construction construction;
@@ -725,12 +734,13 @@ struct World {
         news.advance(day,context);
     }
 
-    std::string performForeignAction(int actor,int target,const hoi5::ForeignActionInfo& action,double amount = 0.) {
+    std::string performForeignAction(int actor,int target,const hoi5::ForeignActionInfo& action,double amount = 0.,
+                                     bool bot = false) {
         if ((action.action == hoi5::ForeignAction::aid || action.action == hoi5::ForeignAction::loan) &&
             (!std::ranges::any_of(tiles,[&](const auto& tile) { return tile.owner == actor; }) ||
              !std::ranges::any_of(tiles,[&](const auto& tile) { return tile.owner == target; })))
             return "Государство не контролирует территорию";
-        const auto error = diplomacy.act(actor,target,action,profiles,amount);
+        const auto error = diplomacy.act(actor,target,action,profiles,amount,bot);
         if (!error.empty()) return error;
         using A = hoi5::ForeignAction;
         using P = hoi5::NewsPriority;
@@ -832,6 +842,64 @@ struct World {
         }
     }
 
+    bool strategicThreat(int observer,int other) const {
+        if (observer == other || diplomacy.allied(observer,other)) return false;
+        if (diplomacy.hostile(observer,other) || diplomacy.goals.contains({other,observer})) return true;
+        const auto& relation = diplomacy.relation(observer,other);
+        const auto opinion = relation.opinion.find(observer);
+        return relation.crisis >= 65 && opinion != relation.opinion.end() && opinion->second <= -30;
+    }
+
+    bool sharedStrategicThreat(int first,int second) const {
+        for (int other = 0; other < int(profiles.size()); ++other)
+            if (other != first && other != second && strategicThreat(first,other) && strategicThreat(second,other))
+                return true;
+        return false;
+    }
+
+    struct OfferAssessment { double margin, uncertainty; std::string_view reason; };
+
+    OfferAssessment assessOffer(const hoi5::ForeignOffer& offer,int observer) const {
+        using A = hoi5::ForeignAction;
+        const auto& relation = diplomacy.relation(offer.actor,offer.target);
+        const bool receiver = observer == offer.target;
+        // An observer knows its own diplomatic position, not the receiver's private opinion.
+        const auto opinion = relation.opinion.find(observer);
+        const double attitude = opinion == relation.opinion.end() ? 0. : opinion->second;
+        const auto read = [&](const auto& values) {
+            const auto item = values.find(observer);
+            return item == values.end() ? 0. : item->second;
+        };
+        const auto controller = std::ranges::find(supplyBots,observer,&hoi5::BotSupplyState::owner);
+        const double uncertainty = receiver ? 0. : controller == supplyBots.end() ? 25. :
+            25.*(1.-controller->intelligence);
+        if (offer.action == A::peace) {
+            if (receiver && (profiles[observer].budget < 0 || diplomacy.countries[observer].warSupport < .45))
+                return {20.,uncertainty,"Дефицит бюджета или слабая поддержка войны"};
+            return {attitude+20.,uncertainty,receiver ? "Отношение к стране, предлагающей мир" :
+                "Известное состояние двусторонних отношений"};
+        }
+        const double grievance = read(relation.grievance);
+        bool commonThreat = false;
+        if (offer.action == A::alliance) {
+            if (receiver) commonThreat = sharedStrategicThreat(offer.actor,offer.target);
+            else for (int other = 0; other < int(profiles.size()); ++other)
+                if (diplomacy.hostile(offer.actor,other) && diplomacy.hostile(offer.target,other))
+                    commonThreat = true;
+        }
+        const double threshold = (offer.action == A::alliance ? 30 : offer.action == A::transit ? 0 : -10)
+            + grievance*.3-read(relation.respect)*.2+relation.crisis*.2;
+        const double trustMargin = (relation.trust-.35)*100;
+        double margin = attitude-threshold+(commonThreat ? 25. : 0.);
+        std::string_view reason = margin < 0 ? "Холодные отношения или напряжённость" : "Отношения благоприятствуют соглашению";
+        if (trustMargin < margin) {
+            margin = trustMargin;
+            reason = margin < 0 ? "Низкое взаимное доверие" : "Взаимное доверие";
+        }
+        if (commonThreat && margin >= 0) reason = "Общий противник сближает страны";
+        return {margin,uncertainty,reason};
+    }
+
     bool botOfferResponse(const hoi5::ForeignOffer& offer,bool fallback) const {
         const auto bot = std::ranges::find(supplyBots,offer.target,&hoi5::BotSupplyState::owner);
         if (bot == supplyBots.end()) return fallback;
@@ -841,6 +909,21 @@ struct World {
             (offer.action == hoi5::ForeignAction::alliance ||
              offer.action == hoi5::ForeignAction::nonaggression ||
              offer.action == hoi5::ForeignAction::transit)) return false;
+        using A = hoi5::ForeignAction;
+        if (!fallback && (offer.action == A::alliance || offer.action == A::trade)) {
+            const auto assessment = assessOffer(offer,offer.target);
+            double benefit = 0.;
+            for (const auto& [key,dependency] : bot->dependencies)
+                if (key.first == offer.actor && botHours-dependency.observedHour <= 720)
+                    benefit = std::max(benefit,dependency.share*15.);
+            const auto& relation = diplomacy.relation(offer.actor,offer.target);
+            const auto grievance = relation.grievance.find(offer.target);
+            const auto& partner = diplomacy.countries[offer.actor];
+            const bool reliable = offer.action == A::trade || (partner.reliability >= .25 &&
+                partner.reputation >= .2 && (grievance == relation.grievance.end() || grievance->second <= 40));
+            const bool commonThreat = offer.action == A::alliance && sharedStrategicThreat(offer.actor,offer.target);
+            return (benefit > 0 || commonThreat) && reliable && relation.trust >= .35 && assessment.margin+benefit >= 0;
+        }
         return fallback;
     }
 
@@ -2491,13 +2574,17 @@ struct World {
         return range;
     }
 
-    bool airWingCanReach(const hoi5::AirWing& wing,int target,int type = -1) const {
-        if (target < 0 || target >= int(tiles.size()) || wing.base < 0 || wing.base >= int(tiles.size()))
+    bool airRangeContains(int base,int target,double range) const {
+        if (target < 0 || target >= int(tiles.size()) || base < 0 || base >= int(tiles.size()))
             return false;
-        const auto x = [&](int tile) { return (tile%size+.5*((tile/size)%2))*std::sqrt(3.); };
+        const double dx = base%size-target%size+.5*((base/size)%2-(target/size)%2);
+        const double dy = (base/size-target/size)*std::sqrt(3.)/2;
+        return std::hypot(dx,dy) <= range;
+    }
+
+    bool airWingCanReach(const hoi5::AirWing& wing,int target,int type = -1) const {
         const double range = type >= 0 ? hoi5::aircraftTypes[type].range : airWingDisplayRange(wing);
-        return std::hypot(x(wing.base)-x(target),1.5*(wing.base/size-target/size))
-            <= range*std::sqrt(3.);
+        return airRangeContains(wing.base,target,range);
     }
 
     enum class AirAreaEdit { replace, add, remove };
@@ -3784,6 +3871,95 @@ struct World {
         return reserve;
     }
 
+    bool repositionBotAirDefense(hoi5::BotSupplyState& bot,int center,bool shortRange = false) {
+        const auto distance = [&](int a,int b) { return hoi5::supplyHexDistance(a,b,size); };
+        const auto isShortRange = [](const auto& unit) {
+            const auto key = hoi5::defenseClasses[unit.type].key;
+            return key == "manpads_team" || key == "short_range_aa";
+        };
+        std::vector<hoi5::AirDefense*> batteries;
+        for (auto& unit : air.defense)
+            if (unit.owner == bot.owner && unit.health > 0) batteries.push_back(&unit);
+        if (shortRange && std::ranges::any_of(batteries,[&](auto unit) {
+            return isShortRange(*unit) && unit->ammo > 0 && unit->route.empty() &&
+                distance(unit->tile,center) <= hoi5::defenseClasses[unit->type].fireRange;
+        })) return false;
+        if (std::ranges::count_if(batteries,[](auto unit) { return !unit->route.empty(); }) >=
+            std::max(1,int(batteries.size()/3))) return false;
+        const auto move = [&](hoi5::AirDefense& unit,int tile,int cooldown) {
+            bool accepted = false;
+            orderAirDefenseMove(unit,tile,&accepted);
+            if (accepted) bot.nextAirDefenseMove = botHours+cooldown;
+            return accepted;
+        };
+        for (auto* unit : batteries) {
+            if (shortRange && !isShortRange(*unit)) continue;
+            const auto& type = hoi5::defenseClasses[unit->type];
+            if (!unit->route.empty() || type.fireRange <= 0 || unit->ammo > 0 || tiles[unit->tile].supply >= .35)
+                continue;
+            std::vector<int> sites;
+            for (int tile = 0; tile < int(tiles.size()); ++tile) {
+                if (tiles[tile].owner != bot.owner || airDefenseWater(tile) || tiles[tile].supply < .35 ||
+                    battles.contains(tile)) continue;
+                if (std::ranges::none_of(botGeography.adjacent(tile),[&](int neighbor) {
+                    return diplomacy.hostile(bot.owner,tiles[neighbor].owner);
+                })) sites.push_back(tile);
+            }
+            std::stable_sort(sites.begin(),sites.end(),[&](int a,int b) {
+                return distance(unit->tile,a)-tiles[a].supply < distance(unit->tile,b)-tiles[b].supply;
+            });
+            for (int site : sites) if (move(*unit,site,24)) return true;
+        }
+        if (botHours < bot.nextAirDefenseMove) return false;
+        std::stable_sort(batteries.begin(),batteries.end(),[&](auto a,auto b) {
+            return shortRange ? distance(a->tile,center) < distance(b->tile,center) :
+                distance(a->tile,center) > distance(b->tile,center);
+        });
+        for (auto* unit : batteries) {
+            if (shortRange && !isShortRange(*unit)) continue;
+            const auto& type = hoi5::defenseClasses[unit->type];
+            const int coverage = std::max(type.fireRange,type.radarActive ? type.radarRange : 0);
+            if (!unit->route.empty() || (type.fireRange > 0 && unit->ammo <= 0) ||
+                distance(unit->tile,center) <= (shortRange ? coverage : std::max(2,coverage-1))) continue;
+            if (!shortRange && isShortRange(*unit)) {
+                bool protectsIndustry = false;
+                for (int tile = 0; tile < int(tiles.size()); ++tile) {
+                    const auto& factory = tiles[tile].buildings[hoi5::industry];
+                    if (tiles[tile].owner == bot.owner && factory.area > 0 && factory.health < .85 &&
+                        distance(unit->tile,tile) <= type.fireRange) { protectsIndustry = true; break; }
+                }
+                if (protectsIndustry) continue;
+            }
+            if (std::ranges::any_of(battles,[&](const auto& entry) {
+                const auto& [tile,battle] = entry;
+                return (battle.attacker == bot.owner || battle.defender == bot.owner) &&
+                    distance(unit->tile,tile) <= type.fireRange;
+            })) continue;
+            if (move(*unit,center,48)) return true;
+        }
+        return false;
+    }
+
+    void repositionMobilizationDefense(hoi5::BotSupplyState& bot,int target) {
+        int front = -1;
+        const auto rank = [&](int tile) {
+            return std::pair{tiles[tile].supply,capitals[target] < 0 ? 0 :
+                -hoi5::supplyHexDistance(tile,capitals[target],size)};
+        };
+        for (int tile = 0; tile < int(tiles.size()); ++tile) {
+            if (tiles[tile].owner != bot.owner || airDefenseWater(tile)) continue;
+            if (std::ranges::any_of(botGeography.adjacent(tile),[&](int neighbor) {
+                return tiles[neighbor].owner == target && !airDefenseWater(neighbor);
+            }) && (front < 0 || rank(tile) > rank(front))) front = tile;
+        }
+        if (front < 0) return;
+        int site = tiles[front].supply >= .25 ? front : -1;
+        for (int tile : botGeography.adjacent(front))
+            if (tiles[tile].owner == bot.owner && !airDefenseWater(tile) && tiles[tile].supply >= .25 &&
+                (site < 0 || tiles[tile].supply > tiles[site].supply)) site = tile;
+        if (site >= 0) repositionBotAirDefense(bot,site);
+    }
+
     void scheduleBotMobilizationStock(hoi5::BotSupplyState& bot) {
         using Task = hoi5::BotTask;
         const int owner = bot.owner;
@@ -3892,7 +4068,7 @@ struct World {
 
     bool botAirReach(int base,int tile,int type) const {
         return type >= 0 && type < int(std::size(hoi5::aircraftTypes)) &&
-            hoi5::supplyHexDistance(base,tile,size) <= hoi5::aircraftTypes[type].range;
+            airRangeContains(base,tile,hoi5::aircraftTypes[type].range);
     }
 
     bool botRearAirbase(int owner,int tile) const {
@@ -3905,12 +4081,99 @@ struct World {
         return true;
     }
 
-    void scheduleBotAir(hoi5::BotSupplyState& bot) {
-        if (botHours < bot.nextAir || bot.regions.empty()) return;
-        bot.nextAir = botHours+168;
-        if (std::ranges::any_of(bot.tasks,[](const auto& task) {
-            return task.kind == hoi5::BotTask::Kind::air && task.active();
-        })) return;
+    void planBotAirbase(hoi5::BotSupplyState& bot,int opponent) {
+        const int owner = bot.owner;
+        if (opponent < 0 || owner >= int(air.reserves.size())) return;
+        const auto entry = std::ranges::find(hoi5::constructionSpecs,hoi5::airbase,&hoi5::ConstructionSpec::building);
+        if (entry == std::end(hoi5::constructionSpecs)) return;
+        const int spec = int(entry-std::begin(hoi5::constructionSpecs));
+        if (std::ranges::any_of(construction.queues[owner],[&](const auto& project) { return project.spec == spec; }) ||
+            std::ranges::any_of(bot.tasks,[&](const auto& task) {
+                return task.kind == hoi5::BotTask::Kind::build && task.buildingSpec == spec && task.active();
+            })) return;
+        std::set<int> types;
+        for (int type = 0; type < int(std::size(hoi5::aircraftTypes)); ++type) {
+            if (hoi5::aircraftTypes[type].helicopter) continue;
+            if (air.reserves[owner][type] > 0 || std::ranges::any_of(air.wings,[&](const auto& wing) {
+                return wing.owner == owner && wing.typeCount(type) > 0;
+            })) types.insert(type);
+        }
+        if (types.empty()) return;
+        std::vector<int> front;
+        for (int tile = 0; tile < int(tiles.size()); ++tile)
+            if (tiles[tile].owner == owner && !airDefenseWater(tile) &&
+                std::ranges::any_of(botGeography.adjacent(tile),[&](int next) {
+                    return tiles[next].owner == opponent && !airDefenseWater(next);
+                })) front.push_back(tile);
+        if (front.empty()) return;
+        std::set<int> enemyTargets;
+        for (int tile : front) for (int neighbor : botGeography.adjacent(tile)) {
+            if (tiles[neighbor].owner != opponent || airDefenseWater(neighbor)) continue;
+            enemyTargets.insert(neighbor);
+            for (int deeper : botGeography.adjacent(neighbor))
+                if (tiles[deeper].owner == opponent && !airDefenseWater(deeper)) enemyTargets.insert(deeper);
+        }
+        const auto coverage = [&](int base) {
+            return std::ranges::count_if(enemyTargets,[&](int tile) {
+                return std::ranges::any_of(types,[&](int type) { return botAirReach(base,tile,type); });
+            });
+        };
+        const auto covered = std::ranges::count_if(enemyTargets,[&](int tile) {
+            return std::ranges::any_of(air.bases,[&](const auto& base) {
+                return base.owner == owner && tiles[base.tile].owner == owner &&
+                    std::ranges::any_of(types,[&](int type) {
+                        return botAirReach(base.tile,tile,type) &&
+                            (air.freeCapacity(tiles,owner,base.tile,type) > 0 ||
+                             std::ranges::any_of(air.wings,[&](const auto& wing) {
+                                return wing.owner == owner && wing.base == base.tile && wing.typeCount(type) > 0;
+                             }));
+                    });
+            });
+        });
+        if (covered*2 >= int(enemyTargets.size())) return;
+        int site = -1;
+        double best = 0.;
+        for (int tile = 0; tile < int(tiles.size()); ++tile) {
+            const auto& cell = tiles[tile];
+            if (cell.owner != owner || cell.supply < .25 || battles.contains(tile) ||
+                !botRearAirbase(owner,tile) ||
+                !hoi5::Construction::placementBlock(tiles,size,owner,tile,spec,cell.buildings[hoi5::airbase].area).empty())
+                continue;
+            if (std::ranges::any_of(botGeography.adjacent(tile),[&](int next) {
+                return tiles[next].owner == opponent || std::ranges::any_of(botGeography.adjacent(next),
+                    [&](int near) { return tiles[near].owner == opponent; });
+            })) continue;
+            const auto reachable = coverage(tile);
+            if (!reachable) continue;
+            double settlement = cell.buildings[hoi5::city].area+cell.buildings[hoi5::village].area;
+            for (int neighbor : botGeography.adjacent(tile))
+                if (tiles[neighbor].owner == owner)
+                    settlement += .5*(tiles[neighbor].buildings[hoi5::city].area+
+                        tiles[neighbor].buildings[hoi5::village].area);
+            const bool protectedByDefense = std::ranges::any_of(air.defense,[&](const auto& unit) {
+                return unit.owner == owner && unit.operational() && unit.ammo > 0 &&
+                    hoi5::supplyHexDistance(tile,unit.tile,size) <= hoi5::defenseClasses[unit.type].fireRange;
+            });
+            const double score = double(reachable)/enemyTargets.size()*4.+cell.supply+
+                std::min(1.,settlement)*2.+(protectedByDefense ? 1. : 0.);
+            if (score > best) { best = score; site = tile; }
+        }
+        if (site >= 0) {
+            hoi5::BotTask build{hoi5::BotTask::Kind::build,botHours,site};
+            build.buildingSpec = spec;
+            addBotTask(bot,build);
+        }
+    }
+
+    void scheduleBotAir(hoi5::BotSupplyState& bot,bool wartimeRefresh = false) {
+        if (bot.regions.empty()) return;
+        if (wartimeRefresh) {
+            if (botHours < bot.nextWartimeAirRefresh) return;
+            bot.nextWartimeAirRefresh = botHours+24;
+        } else {
+            if (botHours < bot.nextAir) return;
+            bot.nextAir = botHours+168;
+        }
         const auto hostile = [&](const hoi5::BotRegion& region) {
             return std::ranges::any_of(region.borders,[&](int tile) {
                 return std::ranges::any_of(botGeography.adjacent(tile),[&](int next) {
@@ -3931,11 +4194,12 @@ struct World {
         std::vector<int> rearBases;
         for (const auto& base : air.bases)
             if (base.owner == owner && botRearAirbase(owner,base.tile)) rearBases.push_back(base.tile);
-        if (rearBases.empty()) for (const auto& base : air.bases)
-            if (base.owner == owner) rearBases.push_back(base.tile);
-        if (rearBases.empty()) return false;
-
-        const auto reserve = botMilitaryReserve(owner,botPreparationTarget(owner) >= 0);
+        auto helicopterBases = rearBases;
+        for (int tile = 0; tile < int(tiles.size()); ++tile)
+            if (tiles[tile].owner == owner && tiles[tile].buildings[hoi5::fieldHelipad].area > 0 &&
+                !battles.contains(tile) && !airDefenseWater(tile) &&
+                std::ranges::find(helicopterBases,tile) == helicopterBases.end()) helicopterBases.push_back(tile);
+        const auto reserve = botMilitaryReserve(owner,false);
         const int fuelSlots = std::max(0,int((hoi5::value(stockpiles[owner],"refined_fuel")-
             hoi5::value(reserve,"refined_fuel"))/100.));
         int based = 0;
@@ -3943,10 +4207,11 @@ struct World {
         int slots = std::max(0,fuelSlots-based);
         constexpr std::array order{0,1,3,2,4,5};
         for (const int type : order) {
-            int count = air.reserves[owner][type];
+            const auto& bases = hoi5::aircraftTypes[type].helicopter ? helicopterBases : rearBases;
+            int count = owner < int(air.reserves.size()) ? air.reserves[owner][type] : 0;
             while (count > 0 && slots > 0) {
                 int base = -1, load = std::numeric_limits<int>::max();
-                for (const int candidate : rearBases) {
+                for (const int candidate : bases) {
                     if (air.freeCapacity(tiles,owner,candidate,type) <= 0) continue;
                     int current = 0;
                     for (const auto& wing : air.wings)
@@ -3970,7 +4235,13 @@ struct World {
             });
         })) fronts.push_back(&region);
         std::map<int,int> assignments;
+        struct HelicopterDetachment { int wing, base, count; };
+        std::vector<HelicopterDetachment> detachments;
         const bool combat = botAtWar(owner);
+        std::vector<int> enemyDivisions(tiles.size());
+        for (const auto& unit : divisions)
+            if (unit.combat.strength > 0 && diplomacy.hostile(owner,unit.owner))
+                ++enemyDivisions[unit.r*size+unit.q];
         for (int wingIndex = 0; wingIndex < int(air.wings.size()); ++wingIndex) {
             auto& wing = air.wings[wingIndex];
             if (wing.owner != owner || wing.count <= 0) continue;
@@ -3992,49 +4263,134 @@ struct World {
             }
             if (!assigned) continue;
             ++assignments[assigned->base];
-            int center = assigned->tiles[assigned->tiles.size()/2];
+            const auto tileKey = [&](int tile) { return std::pair{tile%size,tile/size}; };
+            const int center = assigned->tiles[assigned->tiles.size()/2];
             int bestBase = wing.base;
-            for (const int base : rearBases)
+            const bool helicopter = hoi5::aircraftTypes[wing.type].helicopter;
+            const auto& bases = helicopter ? helicopterBases : rearBases;
+            const int missionType = wing.missionType(0) >= 0 ? wing.missionType(0) : wing.type;
+            std::set<int> nearbyTargets;
+            for (int tile : assigned->borders) for (int next : botGeography.adjacent(tile))
+                if (diplomacy.hostile(owner,tiles[next].owner) && !airDefenseWater(next))
+                    nearbyTargets.insert(next);
+            const auto reachRank = [&](int base) {
+                const auto targets = std::ranges::count_if(nearbyTargets,[&](int tile) {
+                    return botAirReach(base,tile,missionType);
+                });
+                return std::tuple{targets,botAirReach(base,center,missionType),
+                    -hoi5::supplyHexDistance(base,center,size)};
+            };
+            for (const int base : bases)
                 if (air.freeCapacity(tiles,owner,base,wing.type,wingIndex) >= wing.count &&
-                    hoi5::supplyHexDistance(base,center,size) < hoi5::supplyHexDistance(bestBase,center,size)) bestBase = base;
-            if (hoi5::supplyHexDistance(bestBase,center,size)+2 < hoi5::supplyHexDistance(wing.base,center,size))
+                    reachRank(base) > reachRank(bestBase)) bestBase = base;
+            if (combat && helicopter && wing.roleCount(true) == wing.count &&
+                std::get<0>(reachRank(bestBase)) == 0 && wing.readyCount() > 1) {
+                int pad = -1, capacity = 0;
+                for (int base : helicopterBases) {
+                    if (base == wing.base || tiles[base].buildings[hoi5::fieldHelipad].area <= 0 ||
+                        std::get<0>(reachRank(base)) == 0) continue;
+                    const int free = air.freeCapacity(tiles,owner,base,wing.type);
+                    if (free <= 0 || free >= wing.count) continue;
+                    if (pad < 0 || reachRank(base) > reachRank(pad)) { pad = base; capacity = free; }
+                }
+                if (pad >= 0) detachments.push_back({wingIndex,pad,std::min(capacity,wing.readyCount()-1)});
+            }
+            if (bestBase != wing.base && (std::get<0>(reachRank(bestBase)) > std::get<0>(reachRank(wing.base)) ||
+                (!std::get<1>(reachRank(wing.base)) && std::get<1>(reachRank(bestBase))) ||
+                hoi5::supplyHexDistance(bestBase,center,size)+2 < hoi5::supplyHexDistance(wing.base,center,size)))
                 air.rebaseWing(tiles,wingIndex,bestBase);
 
-            wing.airSuperiority = wing.missionType(2) >= 0;
-            wing.intercept = wing.missionType(2) >= 0;
-            wing.patrol = wing.missionType(2) >= 0;
-            wing.enabledMissions[0] = combat && wing.missionAllowed(false);
-            wing.enabledMissions[1] = combat && wing.missionAllowed(true);
+            const int fighterType = wing.missionType(2);
+            const int casType = wing.missionType(0);
+            const int strikeType = wing.missionType(1);
+            if (fighterType < 0 && (!combat || (casType < 0 && strikeType < 0))) continue;
+            wing.airSuperiority = wing.intercept = wing.patrol = fighterType >= 0;
+            wing.enabledMissions[0] = combat && casType >= 0;
+            wing.enabledMissions[1] = combat && strikeType >= 0;
             wing.sortieIntensity = .65+bot.aggression*.25;
             wing.risk = hoi5::AirRisk::normal;
             wing.targetPriorities = {"depot","factory","airbase","infrastructure"};
             std::set<int> area(assigned->tiles.begin(),assigned->tiles.end());
-            for (const int tile : assigned->borders) for (const int next : botGeography.adjacent(tile))
+            for (const int tile : assigned->tiles) for (const int next : botGeography.adjacent(tile))
                 if (tiles[next].owner >= 0 && diplomacy.hostile(owner,tiles[next].owner)) area.insert(next);
-            const int casType = wing.missionType(0);
+            std::set<int> support;
             const auto addSupport = [&](int tile) {
-                if (hoi5::supplyHexDistance(center,tile,size) <= 6 && botAirReach(wing.base,tile,casType))
-                    area.insert(tile);
+                if (hoi5::supplyHexDistance(center,tile,size) <= 6) support.insert(tile);
             };
             for (const auto& [tile,battle] : battles)
                 if (battle.attacker == owner || battle.defender == owner) addSupport(tile);
             for (const auto& unit : divisions)
                 if (unit.owner == owner && unit.attackRoute && !unit.route.empty()) addSupport(unit.route.back());
-            std::vector<std::pair<double,int>> strategic;
+            area.insert(support.begin(),support.end());
+            std::vector<std::pair<double,int>> strategic, concentrations;
+            constexpr std::array weights{std::pair{hoi5::supplyDepot,9},std::pair{hoi5::warehouse,7},
+                std::pair{hoi5::fuelStorage,7},std::pair{hoi5::refinery,7},std::pair{hoi5::industry,6},
+                std::pair{hoi5::airbase,6},std::pair{hoi5::port,5},std::pair{hoi5::oilGasRig,4},std::pair{hoi5::mine,3}};
             for (int tile = 0; tile < int(tiles.size()); ++tile) {
                 if (tiles[tile].owner < 0 || !diplomacy.hostile(owner,tiles[tile].owner)) continue;
+                const double proximity = 1.+hoi5::supplyHexDistance(center,tile,size)/6.;
+                if (enemyDivisions[tile] > 0 && botAirReach(wing.base,tile,casType))
+                    concentrations.emplace_back((2*enemyDivisions[tile]+(support.contains(tile) ? 10 : 0))/proximity,tile);
                 const auto& b = tiles[tile].buildings;
-                const double value = 9*b[hoi5::supplyDepot].area+7*b[hoi5::warehouse].area+
-                    7*b[hoi5::fuelStorage].area+7*b[hoi5::refinery].area+6*b[hoi5::industry].area+
-                    6*b[hoi5::airbase].area+5*b[hoi5::port].area+4*b[hoi5::oilGasRig].area+3*b[hoi5::mine].area;
-                if (value > 0 && botAirReach(wing.base,tile,wing.missionType(1)))
-                    strategic.emplace_back(value/(1.+hoi5::supplyHexDistance(center,tile,size)/6.),tile);
+                double value = 0.;
+                for (const auto [building,weight] : weights)
+                    value += std::max(0.,b[building].area)*b[building].health*weight;
+                if (value > 0 && botAirReach(wing.base,tile,strikeType))
+                    strategic.emplace_back(value/proximity,tile);
             }
-            std::ranges::sort(strategic,std::greater{});
-            for (std::size_t i = 0; i < std::min<std::size_t>(8,strategic.size()); ++i) area.insert(strategic[i].second);
+            const auto addRanked = [&](auto& targets,std::size_t limit) {
+                std::ranges::sort(targets,[&](const auto& a,const auto& b) {
+                    return std::tuple{a.first,a.second%size,a.second/size} >
+                        std::tuple{b.first,b.second%size,b.second/size};
+                });
+                for (std::size_t i = 0; i < std::min(limit,targets.size()); ++i) area.insert(targets[i].second);
+            };
+            addRanked(concentrations,12);
+            addRanked(strategic,8);
             wing.operationArea.assign(area.begin(),area.end());
+            std::ranges::sort(wing.operationArea,{},tileKey);
             wing.target = wing.operationArea.empty() ? -1 : wing.operationArea.back();
         }
+        for (const auto& detachment : detachments) {
+            auto& source = air.wings[detachment.wing];
+            const int type = source.type;
+            const int count = std::min(detachment.count,air.freeCapacity(tiles,owner,detachment.base,type));
+            if (count <= 0) continue;
+            hoi5::AirWing forward{owner,detachment.base,type,count};
+            forward.enabledMissions = source.enabledMissions;
+            forward.operationArea = source.operationArea;
+            // The original base's range can exclude targets reachable from the field pad.
+            for (int tile = 0; tile < int(tiles.size()); ++tile) {
+                if (tiles[tile].owner < 0 || !diplomacy.hostile(owner,tiles[tile].owner) ||
+                    !botAirReach(detachment.base,tile,type)) continue;
+                if (enemyDivisions[tile] > 0 && std::ranges::find(forward.operationArea,tile) == forward.operationArea.end())
+                    forward.operationArea.push_back(tile);
+            }
+            forward.target = source.target;
+            forward.targetPriorities = source.targetPriorities;
+            forward.risk = source.risk;
+            forward.sortieIntensity = source.sortieIntensity;
+            forward.cooldown = std::max(1.,source.cooldown);
+            forward.abortedHours = source.abortedHours;
+            source.changeComposition(type,-count);
+            air.wings.push_back(std::move(forward));
+        }
+        int damagedSite = -1;
+        double damage = 0.;
+        for (int q = 0; q < size; ++q) for (int r = 0; r < size; ++r) {
+            const int tile = r*size+q;
+            const auto& cell = tiles[tile];
+            const auto& factory = cell.buildings[hoi5::industry];
+            if (cell.owner != owner || factory.area <= 0 || factory.health >= .85 ||
+                cell.supply < .25 || battles.contains(tile)) continue;
+            if (std::ranges::any_of(botGeography.adjacent(tile),[&](int neighbor) {
+                return diplomacy.hostile(owner,tiles[neighbor].owner);
+            })) continue;
+            const double score = factory.area*(1-factory.health);
+            if (score > damage) { damagedSite = tile; damage = score; }
+        }
+        if (damagedSite >= 0) repositionBotAirDefense(bot,damagedSite,true);
+        repositionBotAirDefense(bot,task.tile);
         return true;
     }
 
@@ -4129,9 +4485,9 @@ struct World {
 
     void scheduleBotExpansion(hoi5::BotSupplyState& bot) {
         if (botHours < bot.nextExpansion) return;
-        bot.nextExpansion = botHours+168+int(bot.rng.uniform()*24)-12;
+        bot.nextExpansion = botHours+72+int(bot.rng.uniform()*24)-12;
         const int owner = bot.owner;
-        if (bot.course.first != hoi5::BotCourse::development || owner < 0 ||
+        if (botAtWar(owner) || botPreparationTarget(owner) >= 0 || owner < 0 ||
             owner >= int(production.size()) || owner >= int(stockpiles.size())) return;
         if (std::ranges::any_of(bot.tasks,[](const auto& task) {
             return task.kind == hoi5::BotTask::Kind::claim && task.active();
@@ -4186,18 +4542,30 @@ struct World {
         std::ranges::sort(choices);
         for (const auto& [distance,index] : choices)
             if (orderMove(divisions[index],task.tile)) return true;
+        // Peacetime border redeployments must not starve a pending expansion order.
+        if (!botAtWar(bot.owner) && botPreparationTarget(bot.owner) < 0) {
+            for (int i = 0; i < int(divisions.size()); ++i) {
+                auto& unit = divisions[i];
+                if (unit.owner != bot.owner || bot.resting.contains(i) || unit.battle >= 0 || unit.retreating ||
+                    unit.route.empty() || unit.attackRoute || tiles[unit.route.back()].owner != bot.owner ||
+                    unit.organization < unit.maxOrganization*.65 || unit.combat.strength <= 0) continue;
+                if (orderMove(unit,task.tile)) return true;
+            }
+        }
         return false;
     }
 
     bool applyBotConstruction(hoi5::BotSupplyState& bot,hoi5::BotTask& task) {
         const int owner = bot.owner, anchor = task.tile, spec = task.buildingSpec;
         if (spec < 0 || spec >= int(std::size(hoi5::constructionSpecs))) return false;
+        const bool airbase = hoi5::constructionSpecs[spec].building == hoi5::airbase;
         const auto region = std::ranges::find_if(bot.regions,[&](const auto& item) {
             return std::ranges::find(item.tiles,anchor) != item.tiles.end();
         });
-        if (region == bot.regions.end()) return false;
+        if (!airbase && region == bot.regions.end()) return false;
         std::vector<std::pair<double,int>> choices;
-        for (const int tile : region->tiles) {
+        const auto candidates = airbase ? std::vector<int>{anchor} : region->tiles;
+        for (const int tile : candidates) {
             if (!hoi5::Construction::placementBlock(tiles,size,owner,tile,spec,
                 tiles[tile].buildings[hoi5::constructionSpecs[spec].building].area).empty()) continue;
             if (std::ranges::any_of(construction.queues[owner],[&](const auto& project) {
@@ -4211,14 +4579,14 @@ struct World {
         const auto* site = hoi5::botChooseClose(bot.rng,choices);
         if (!site) return false;
         auto& queue = construction.queues[owner];
+        const double availableMoney = botAvailableMoney(bot);
+        const auto resources = botAvailableResources(owner);
         if (!construction.enqueue(tiles,size,owner,*site,spec,profiles[owner].buildEfficiency).empty()) return false;
         const auto& project = queue.back();
-        const auto resources = botAvailableResources(owner);
-        const double availableMoney = botAvailableMoney(bot);
         const auto missing = std::ranges::find_if(project.resources,[&](const auto& item) {
             return hoi5::value(resources,item.first) < item.second;
         });
-        if (project.money > availableMoney || missing != project.resources.end()) {
+        if (project.money > availableMoney || (!airbase && missing != project.resources.end())) {
             queue.pop_back();
             return false;
         }
@@ -4310,11 +4678,22 @@ struct World {
                     &hoi5::ForeignActionInfo::action);
                 if (diplomacy.reason(owner,enemy,info,profiles).empty()) addPolitics(enemy,hoi5::ForeignAction::peace);
             }
+            const auto& alliance = *std::ranges::find(hoi5::foreignActions,hoi5::ForeignAction::alliance,
+                &hoi5::ForeignActionInfo::action);
+            for (int other = 0; other < int(profiles.size()); ++other) {
+                if (other == owner || diplomacy.allied(owner,other) ||
+                    !sharedStrategicThreat(owner,other) || incomingOffer(owner,other,alliance.action)) continue;
+                if (assessOffer({owner,other,diplomacy.day+3,alliance.action},owner).margin >= -10 &&
+                    diplomacy.reason(owner,other,alliance,profiles).empty()) {
+                    addPolitics(other,alliance.action);
+                    break;
+                }
+            }
         } else if (const int target = botPreparationTarget(owner); target >= 0) {
             const auto action = diplomacy.goals.contains({owner,target}) ? hoi5::ForeignAction::war :
                 hoi5::ForeignAction::justify;
             const auto& info = *std::ranges::find(hoi5::foreignActions,action,&hoi5::ForeignActionInfo::action);
-            if (diplomacy.reason(owner,target,info,profiles).empty() &&
+            if (diplomacy.reason(owner,target,info,profiles,0.,true).empty() &&
                 (action != hoi5::ForeignAction::war || botWarPreparationReady(bot,target))) addPolitics(target,action);
         } else {
             std::vector<std::pair<double,int>> candidates;
@@ -4329,6 +4708,71 @@ struct World {
                 const auto action = depends ? hoi5::ForeignAction::trade : hoi5::ForeignAction::mission;
                 const auto& info = *std::ranges::find(hoi5::foreignActions,action,&hoi5::ForeignActionInfo::action);
                 if (diplomacy.reason(owner,*target,info,profiles).empty()) addPolitics(*target,action);
+            }
+            int partner = -1;
+            double bestBenefit = 0.;
+            hoi5::ForeignAction agreement = hoi5::ForeignAction::trade;
+            for (const auto& [score,other] : candidates) {
+                if (other == 0) continue;
+                const auto& relation = diplomacy.relation(owner,other);
+                if (relation.trust < .35 || !relation.embargoes.empty()) continue;
+                double imports = 0., exports = 0.;
+                for (const auto& [key,dependency] : bot.dependencies)
+                    if (key.first == other && botHours-dependency.observedHour <= 720)
+                        imports = std::max(imports,dependency.share);
+                for (const auto& fill : market.last.fills) {
+                    if (fill.seller != owner || fill.buyer != other) continue;
+                    const double demand = hoi5::value(market.demand,fill.resource);
+                    if (demand > 0) exports = std::max(exports,fill.amount/demand);
+                }
+                const bool commonThreat = sharedStrategicThreat(owner,other);
+                const double benefit = imports+exports+(commonThreat ? 2. : 0.);
+                if (benefit <= bestBenefit) continue;
+                const bool trade = relation.treaties.contains(hoi5::ForeignAction::trade);
+                const auto action = trade || commonThreat ? hoi5::ForeignAction::alliance : hoi5::ForeignAction::trade;
+                if (relation.treaties.contains(action) || (trade && !commonThreat && (imports < .2 || exports <= 0.))) continue;
+                const auto& info = *std::ranges::find(hoi5::foreignActions,action,&hoi5::ForeignActionInfo::action);
+                if (!incomingOffer(owner,other,action) && diplomacy.reason(owner,other,info,profiles).empty()) {
+                    partner = other;
+                    bestBenefit = benefit;
+                    agreement = action;
+                }
+            }
+            if (partner >= 0) addPolitics(partner,agreement);
+            if (owner != 0 && !diplomacy.countries.empty() &&
+                std::ranges::any_of(tiles,[](const auto& tile) { return tile.owner == 0; })) {
+                using Action = hoi5::ForeignAction;
+                const auto& relation = diplomacy.relation(owner,0);
+                const auto opinion = relation.opinion.find(owner);
+                const double trust = opinion == relation.opinion.end() ? 0. : opinion->second;
+                const auto propose = [&](Action action) {
+                    const auto& info = *std::ranges::find(hoi5::foreignActions,action,&hoi5::ForeignActionInfo::action);
+                    if (incomingOffer(owner,0,action) || !diplomacy.reason(owner,0,info,profiles).empty()) return false;
+                    addPolitics(0,action);
+                    return true;
+                };
+                if (trust >= 45 && !relation.treaties.contains(Action::alliance)) propose(Action::alliance);
+                else if (trust >= 20 && !relation.treaties.contains(Action::nonaggression)) propose(Action::nonaggression);
+                else if (trust >= 10 && !relation.treaties.contains(Action::trade)) propose(Action::trade);
+                else if (trust >= 15 && !diplomacy.canTransit(owner,0) &&
+                    std::ranges::any_of(bot.regions,[&](const auto& region) {
+                        return std::ranges::any_of(region.borders,[&](int tile) {
+                            return std::ranges::any_of(botGeography.adjacent(tile),
+                                [&](int neighbor) { return tiles[neighbor].owner == 0; });
+                        });
+                    })) propose(Action::transit);
+                const double available = botAvailableMoney(bot);
+                if (trust >= 10 && profiles[0].budget < 5000000. && available >= 20000000. &&
+                    !incomingOffer(owner,0,Action::loan)) {
+                    const double amount = std::min(5000000.-profiles[0].budget,available*.1);
+                    if (diplomacy.reason(owner,0,hoi5::foreignLoan,profiles,amount).empty()) {
+                        hoi5::BotTask loan{hoi5::BotTask::Kind::politics,botHours};
+                        loan.targetCountry = 0;
+                        loan.politicalAction = int(Action::loan);
+                        loan.amount = amount;
+                        addBotTask(bot,loan);
+                    }
+                }
             }
         }
         const auto& policy = diplomacy.countries[owner];
@@ -4355,9 +4799,11 @@ struct World {
         }
         if (task.targetCountry < 0 || task.targetCountry >= int(profiles.size())) return false;
         const auto action = hoi5::ForeignAction(task.politicalAction);
+        if (action == hoi5::ForeignAction::loan)
+            return performForeignAction(owner,task.targetCountry,hoi5::foreignLoan,task.amount).empty();
         const auto info = std::ranges::find(hoi5::foreignActions,action,&hoi5::ForeignActionInfo::action);
         return info != std::end(hoi5::foreignActions) &&
-            performForeignAction(owner,task.targetCountry,*info).empty();
+            performForeignAction(owner,task.targetCountry,*info,0.,true).empty();
     }
 
     bool applyBotTrade(hoi5::BotSupplyState& bot,const hoi5::BotTask& task) {
@@ -5083,15 +5529,25 @@ struct World {
             }
         }
         auto used = planBotRecovery(bot,atWar,orders);
+        for (int i = 0; i < int(divisions.size()); ++i) {
+            const auto& unit = divisions[i];
+            if (unit.owner == bot.owner && !unit.route.empty() && tiles[unit.route.back()].owner < 0)
+                used.insert(i);
+        }
         const auto pinned = assignBotFront(bot,atWar,used);
         synchronizeBotArmies(bot,atWar);
+        if (atWar) {
+            const auto firstAttack = orders.size();
+            planBotAttacks(bot,used,orders);
+            for (std::size_t i = firstAttack; i < orders.size(); ++i) used.insert(orders[i].unit);
+        }
         std::set<int> coveredPosts;
         for (const auto& unit : divisions)
             if (unit.owner == bot.owner && unit.combat.strength > 0 && !unit.retreating)
                 coveredPosts.insert(unit.route.empty() ? unit.r*size+unit.q : unit.route.back());
         for (const auto& [index,tile] : bot.hexAssignments) {
             const auto& unit = divisions[index];
-            if (pinned.contains(index) || tile == unit.r*size+unit.q ||
+            if (used.contains(index) || pinned.contains(index) || tile == unit.r*size+unit.q ||
                 unit.organization < unit.maxOrganization*.65 ||
                 (bot.resting.contains(index) && tiles[tile].supply < .25)) continue;
             const auto last = bot.lastOrders.find(index);
@@ -5107,7 +5563,6 @@ struct World {
             bot.lastOrders[index] = botHours;
             used.insert(index);
         }
-        if (atWar) planBotAttacks(bot,used,orders);
     }
 
     void updateBots(int hours,hoi5::DebugProfiler* debug) {
@@ -5147,12 +5602,25 @@ struct World {
                 }
                 {
                     hoi5::DebugMeasure recruitment(debug,"ai_recruitment_planning");
-                    const bool mobilizing = botPreparationTarget(bot.owner) >= 0;
+                    const int target = botPreparationTarget(bot.owner);
+                    const bool mobilizing = target >= 0;
                     if (mobilizing) scheduleBotMobilizationStock(bot);
                     scheduleBotRecruitment(bot,mobilizing);
+                    if (mobilizing) repositionMobilizationDefense(bot,target);
                 }
                 {
                     hoi5::DebugMeasure aviation(debug,"ai_air_planning");
+                    int threat = botPreparationTarget(bot.owner);
+                    for (int other = 0; other < int(profiles.size()); ++other) {
+                        if (diplomacy.hostile(bot.owner,other) || diplomacy.goals.contains({other,bot.owner})) {
+                            threat = other;
+                            break;
+                        }
+                    }
+                    if (threat >= 0) {
+                        repositionMobilizationDefense(bot,threat);
+                        planBotAirbase(bot,threat);
+                    }
                     scheduleBotAir(bot);
                 }
                 {
@@ -5171,6 +5639,10 @@ struct World {
             }
             if (botHours >= bot.nextMicro || bot.urgent) {
                 hoi5::DebugMeasure micro(debug,"ai_micro");
+                if (botAtWar(bot.owner)) {
+                    hoi5::DebugMeasure aviation(debug,"ai_air_planning");
+                    scheduleBotAir(bot,true);
+                }
                 {
                     hoi5::DebugMeasure fronts(debug,"ai_front_planning");
                     planBotFrontMoves(bot,movements);
@@ -6938,6 +7410,72 @@ int main(int argc, char** argv) try {
         return test.resolveAirImpact(ordered,infrastructureChanged) && infrastructureChanged &&
             division.combat.strength < strength && city.health < health ? 0 : 1;
     }
+    if (mode == "--check-campaign" || mode == "--check-border-campaign") {
+        auto campaign = generateWorld(50,2,146591,1);
+        const bool borderScenario = mode == "--check-border-campaign";
+        if (borderScenario) {
+            const int start = campaign.capitals[0], end = campaign.capitals[1];
+            const auto corridor = campaign.landRoute(start,end,[&](int tile) {
+                return !campaign.airDefenseWater(tile);
+            });
+            if (corridor.size() < 4) return 1;
+            const auto middle = corridor.size()/2;
+            for (std::size_t i = 0; i < corridor.size(); ++i)
+                campaign.tiles[corridor[i]].owner = i < middle ? 0 : 1;
+            const std::array posts{corridor[middle-1],corridor[middle]};
+            std::array<int,2> deployed{};
+            for (auto& unit : campaign.divisions) {
+                if (deployed[unit.owner]++ >= (unit.owner == 1 ? 5 : 3)) continue;
+                const int tile = posts[unit.owner];
+                unit.q = tile%campaign.size;
+                unit.r = tile/campaign.size;
+            }
+            for (int tile : posts) {
+                campaign.tiles[tile].buildings[hoi5::supplyDepot].area = 1.;
+                campaign.tiles[tile].buildings[hoi5::warehouse].area = .6;
+            }
+            campaign.rebuildEconomy();
+            hoi5::recalculateSupply(std::span(campaign.tiles),campaign.size,campaign.capitals);
+            campaign.diplomacy.relation(0,1).war = true;
+        }
+        campaign.startBots(146591);
+        int peakBattles = 0, contactHours = 0, readyContactHours = 0;
+        for (int hour = 1; hour <= 90*24; ++hour) {
+            if (hour == 31*24) campaign.diplomacy.relation(0,1).war = true;
+            campaign.advance(1,nullptr,hour%168 == 0 ? std::optional{hour/168} : std::nullopt);
+            peakBattles = std::max(peakBattles,int(campaign.battles.size()));
+            if (campaign.diplomacy.hostile(0,1)) {
+                const auto enemyNeighbor = [&](int tile,int owner) {
+                    return std::ranges::any_of(campaign.botGeography.adjacent(tile),[&](int next) {
+                        return !campaign.airDefenseWater(next) && campaign.tiles[next].owner >= 0 &&
+                            campaign.diplomacy.hostile(owner,campaign.tiles[next].owner);
+                    });
+                };
+                bool contact = false, ready = false;
+                for (int tile = 0; tile < int(campaign.tiles.size()) && !contact; ++tile)
+                    if (campaign.tiles[tile].owner >= 0 && !campaign.airDefenseWater(tile))
+                        contact = enemyNeighbor(tile,campaign.tiles[tile].owner);
+                if (contact) for (const auto& unit : campaign.divisions) {
+                    if (unit.owner == 0 || unit.combat.strength <= 0 || unit.retreating || unit.battle >= 0 ||
+                        !unit.route.empty() || unit.organization < unit.maxOrganization*.65 ||
+                        unit.lastSupplyRatio < .12) continue;
+                    if (enemyNeighbor(unit.r*campaign.size+unit.q,unit.owner)) { ready = true; break; }
+                }
+                contactHours += contact;
+                readyContactHours += ready;
+            }
+            for (const auto& profile : campaign.profiles)
+                if (!std::isfinite(profile.budget) || !std::isfinite(profile.population)) return 1;
+            for (const auto& unit : campaign.divisions)
+                if (!campaign.contains(unit.q,unit.r) || !std::isfinite(unit.organization)) return 1;
+        }
+        std::cout << "90 days, peak concurrent battles: " << peakBattles
+                  << ", land border hours: " << contactHours
+                  << ", ready adjacent bot hours: " << readyContactHours
+                  << ", divisions: " << campaign.divisions.size()
+                  << ", wings: " << campaign.air.wings.size() << '\n';
+        return campaign.diplomacy.day == 90 && (!borderScenario || peakBattles > 0) ? 0 : 1;
+    }
     if (mode == "--check-bot-course") {
         using Course = hoi5::BotCourse;
         World test;
@@ -7184,6 +7722,33 @@ int main(int argc, char** argv) try {
         }) ? 0 : 1;
     }
     if (mode == "--check-bot-air") {
+        {
+            World range;
+            range.size = 10;
+            range.tiles.resize(100);
+            if (!range.botAirReach(0,24,3) || range.botAirReach(0,45,3) ||
+                !range.botAirReach(0,5,3) || range.botAirReach(0,6,3)) return 1;
+        }
+        {
+            World defense;
+            defense.size = 7;
+            defense.tiles.resize(49);
+            for (auto& tile : defense.tiles) { tile.owner = 1; tile.supply = .7; }
+            defense.air.defense = {{1,0,0,10},{1,2,0,10},{1,5,2,10}};
+            hoi5::BotSupplyState controller{1,0};
+            const int factory = 6;
+            defense.tiles[factory].buildings[hoi5::industry] = {.4,.5};
+            if (!defense.repositionBotAirDefense(controller,factory,true) ||
+                !defense.air.defense[0].route.empty() || !defense.air.defense[2].route.empty() ||
+                defense.air.defense[1].route != std::deque<int>{3,4,5,6} ||
+                controller.nextAirDefenseMove != 48 ||
+                defense.repositionBotAirDefense(controller,factory,true)) return 1;
+            defense.air.defense[1].tile = factory;
+            defense.air.defense[1].route.clear();
+            defense.botHours = 48;
+            if (defense.repositionBotAirDefense(controller,factory,true) ||
+                !defense.air.defense[0].route.empty()) return 1;
+        }
         auto test = generateWorld(20,2,918273,1);
         test.startBots(918273);
         auto& bot = test.supplyBots.front();
@@ -7192,8 +7757,9 @@ int main(int argc, char** argv) try {
         test.stockpiles[owner]["refined_fuel"] = 1000000.;
         bot.regions = test.botGeography.profiles(test.tiles,owner,test.capitals[owner],
             [&](int tile) { return test.airDefenseWater(tile); });
-        bot.nextAir = 0;
-        test.scheduleBotAir(bot);
+        bot.nextAir = 168;
+        test.scheduleBotAir(bot,true);
+        if (bot.nextWartimeAirRefresh != 24 || bot.nextAir != 168) return 1;
         const auto task = std::ranges::find_if(bot.tasks,[](const auto& item) {
             return item.kind == hoi5::BotTask::Kind::air;
         });
@@ -7206,7 +7772,27 @@ int main(int argc, char** argv) try {
                 return 1;
             if (wing.missionType(2) >= 0 && (!wing.airSuperiority || !wing.intercept || !wing.patrol)) return 1;
         }
-        return wings > 0 ? 0 : 1;
+        if (!wings) return 1;
+        const auto existing = std::ranges::find_if(test.air.wings,[&](const auto& wing) {
+            return wing.owner == owner && wing.missionType(2) >= 0;
+        });
+        if (existing == test.air.wings.end()) return 1;
+        const int base = existing->base;
+        const auto neighbors = test.botGeography.adjacent(base);
+        const auto enemySite = std::ranges::find_if(neighbors,[&](int tile) { return tile != task->tile; });
+        if (enemySite == neighbors.end()) return 1;
+        test.tiles[*enemySite].owner = 0;
+        std::erase_if(test.air.bases,[&](const auto& airbase) {
+            return airbase.owner == owner && airbase.tile != base;
+        });
+        if (test.botRearAirbase(owner,base)) return 1;
+        test.air.reserves[owner][0] = 8;
+        const auto before = test.air.wings.size();
+        existing->operationArea.clear();
+        existing->patrol = false;
+        if (!test.applyBotAir(bot,*task) || test.air.wings.size() != before ||
+            test.air.reserves[owner][0] != 8) return 1;
+        return existing->patrol && !existing->operationArea.empty() && existing->base == base ? 0 : 1;
     }
     if (mode == "--check-bot-economy") {
         auto test = generateWorld(20,2,918273,1);
@@ -7376,7 +7962,16 @@ int main(int argc, char** argv) try {
         const int target = bot.owner, actor = target == 0 ? 1 : 0;
         bot.course = {hoi5::BotCourse::warPreparation,actor};
         auto& relation = test.diplomacy.relation(actor,target);
+        const hoi5::ForeignOffer proposal{actor,target,test.diplomacy.day+1,hoi5::ForeignAction::alliance};
+        relation.opinion[actor] = 15.;
+        relation.opinion[target] = -100.;
+        const auto estimate = test.assessOffer(proposal,actor);
+        const auto initialResponse = test.assessOffer(proposal,target);
         relation.opinion[target] = 100.;
+        const auto updatedEstimate = test.assessOffer(proposal,actor);
+        if (updatedEstimate.margin != estimate.margin || updatedEstimate.uncertainty != estimate.uncertainty ||
+            updatedEstimate.reason != estimate.reason ||
+            test.assessOffer(proposal,target).margin <= initialResponse.margin) return 1;
         relation.trust = 1.;
         test.diplomacy.countries[actor].reliability = 1.;
         test.diplomacy.countries[actor].reputation = 1.;
@@ -8842,7 +9437,7 @@ int main(int argc, char** argv) try {
     int pendingExport = -1;
     bool draggingExport = false;
     std::string militaryMessage;
-    enum class ArmyTab { overview, designer, recruit };
+    enum class ArmyTab { overview, designer, recruit, defense };
     ArmyTab armyTab = ArmyTab::overview;
     hoi5::DivisionComposition armyDraft{10};
     sf::String armyDesignName = U"Новая дивизия";
@@ -9131,6 +9726,20 @@ int main(int argc, char** argv) try {
     int armySmokeFrame = 0;
     int warningSmokeFrame = 0;
     std::optional<sf::Event> countrySmokeClick;
+    const auto playerOffer = [&]() -> const hoi5::ForeignOffer* {
+        if (!playing || pauseMenu) return nullptr;
+        const auto found = std::ranges::find(world.diplomacy.offers,0,&hoi5::ForeignOffer::target);
+        return found == world.diplomacy.offers.end() ? nullptr : &*found;
+    };
+    const auto offerDialog = [&] {
+        const auto screen = sf::Vector2i(window.getSize());
+        const sf::Vector2i dimensions{std::min(840,screen.x-40),std::min(620,screen.y-40)};
+        return sf::IntRect{(screen-dimensions)/2,dimensions};
+    };
+    const auto offerButton = [](sf::IntRect dialog,bool accept) {
+        return sf::IntRect{{dialog.position.x+dialog.size.x/2+(accept ? -190 : 10),
+            dialog.position.y+dialog.size.y-86},{180,48}};
+    };
     while (window.isOpen()) {
         const auto updateStart = DebugClock::now();
         const float frameSeconds = clock.restart().asSeconds();
@@ -9145,6 +9754,16 @@ int main(int argc, char** argv) try {
             if (event->is<sf::Event::FocusLost>()) { dragging = draggingExport = false; activeSlider = -1; }
             if (const auto* resize = event->getIf<sf::Event::Resized>())
                 camera.setSize(sf::Vector2f(resize->size) / zoom);
+            if (const auto* offer = playerOffer()) {
+                if (const auto* click = event->getIf<sf::Event::MouseButtonPressed>();
+                    click && click->button == sf::Mouse::Button::Left) {
+                    const auto dialog = offerDialog();
+                    const bool accept = offerButton(dialog,true).contains(click->position);
+                    if (accept || offerButton(dialog,false).contains(click->position))
+                        world.answerForeignOffer(offer->actor,offer->target,accept,offer->action);
+                }
+                continue;
+            }
             if (const auto* typed = event->getIf<sf::Event::TextEntered>();
                 typed && militaryPanel && armyNameFocus && !pauseMenu && !countryModalOpen()) {
                 if (typed->unicode >= U' ' && typed->unicode != 127 && armyDesignName.getSize() < 48)
@@ -10745,7 +11364,8 @@ int main(int argc, char** argv) try {
             const auto now = DebugClock::now();
             for (const auto& effect : world.airVisuals) {
                 const float age = std::chrono::duration<float>(now-effect.start).count();
-                const float duration = effect.impact ? 1.7f : 1.8f;
+                const bool helicopter = effect.type >= 0 && hoi5::aircraftTypes[effect.type].helicopter;
+                const float duration = effect.impact ? 1.7f : helicopter ? 9.f : 4.5f;
                 if (age >= duration) continue;
                 const auto pixel = [&](int tile) {
                     return sf::Vector2f(window.mapCoordsToPixel(center(tile%world.size,tile/world.size),camera));
@@ -10756,15 +11376,15 @@ int main(int argc, char** argv) try {
                 const auto forward = length > 0 ? delta/length : sf::Vector2f{1,0};
                 const sf::Vector2f side{-forward.y,forward.x};
                 const float t = age/duration;
-                const auto point = effect.impact ? to : from+delta*(1-std::abs(2*t-1));
+                const auto point = effect.impact ? to+effect.offset*(radius*zoom) : from+delta*(1-std::abs(2*t-1));
                 if (point.x < -30 || point.y < -30 || point.x > size.x+30 || point.y > size.y+30) continue;
                 const auto triangle = [&](sf::Vector2f a,sf::Vector2f b,sf::Vector2f c,sf::Color color) {
                     for (auto p : {a,b,c}) flights.append({point+forward*p.x+side*p.y,color});
                 };
                 if (effect.impact) {
-                    const auto alpha = static_cast<unsigned char>(210*(1-t));
+                    const auto alpha = static_cast<unsigned char>(231*(1-t));
                     const sf::Color glow = effect.loss ? sf::Color{255,94,48} : sf::Color{255,184,86};
-                    const float scale = std::clamp(zoom,.55f,1.6f);
+                    const float scale = 1.1f*std::clamp(zoom,.55f,1.6f);
                     const float inner = (4+8*t)*scale, outer = (10+18*t)*scale;
                     for (int i = 0; i < 20; ++i) {
                         const float a = i*.31415927f, b = (i+1)*.31415927f;
@@ -10789,7 +11409,6 @@ int main(int argc, char** argv) try {
                 auto color = world.tiles[effect.origin].border;
                 color.a = 245;
                 const float d = t < .5f ? 1.f : -1.f;
-                const bool helicopter = effect.type >= 0 && hoi5::aircraftTypes[effect.type].helicopter;
                 if (helicopter) {
                     triangle({6.6f*d,0},{0,-4.08f},{0,4.08f},color);
                     triangle({0,-4.08f},{-8.88f*d,-2.88f},{0,4.08f},color);
@@ -12138,20 +12757,43 @@ int main(int argc, char** argv) try {
                     militaryPanel = armyPickingSite = armyNameFocus = false;
                     armyHits.clear();
                 },28);
-                constexpr std::array tabs{"Сводка","Конструктор","Набор"};
+                constexpr std::array tabs{"Сводка","Конструктор","Набор","ПВО"};
                 for (int i = 0; i < int(tabs.size()); ++i)
-                    button(tabs[i],18+128*i,int(top)+62,126,[&,i] {
+                    button(tabs[i],18+98*i,int(top)+62,96,[&,i] {
                         armyTab = ArmyTab(i);
                         armyPickingSite = false;
                         armyHits.clear();
-                    },28,armyTab == ArmyTab(i),16);
+                    },28,armyTab == ArmyTab(i),14);
                 float y = top+108;
                     const auto line = [&](std::string caption,sf::Color color = {210,224,236},unsigned points = 16) {
                     if (y+12 < bottom) battleLabel(window,cardFont,caption,{left,y},points,color);
                     y += 20;
                 };
                 const auto& stock = world.stockpiles[0];
-                if (armyTab == ArmyTab::overview) {
+                if (armyTab == ArmyTab::defense) {
+                    constexpr std::array names{"Расчёт ПЗРК","ПВО ближнего действия","ПВО среднего действия",
+                        "ПВО дальнего действия","Мобильный радар"};
+                    const auto pending = world.air.defenseReplacements.find(0);
+                    line(pending == world.air.defenseReplacements.end() ? "Производство ПВО занимает 48 часов" :
+                        "Производится: "+std::string(names[pending->second.type]),gold);
+                    for (int type = 0; type < int(names.size()); ++type) {
+                        const auto quote = hoi5::AirLayer::defenseQuote(type);
+                        const auto missing = std::ranges::find_if(quote.resources,[&](const auto& material) {
+                            return hoi5::value(stock,material.first) < material.second;
+                        });
+                        button(std::string(names[type])+"  "+formatMoney(quote.money),18,int(y),384,[&,type] {
+                            militaryMessage = world.air.enqueueDefense(0,type,world.profiles[0].budget,world.stockpiles[0]);
+                            tradeForecast.reset();
+                            resourceForecast.reset();
+                        },26,false,15);
+                        y += 39;
+                        if (missing != quote.resources.end())
+                            line("Не хватает: "+std::string(resourceDisplayName(missing->first)),red,13);
+                        else if (world.profiles[0].budget < quote.money) line("Не хватает денег",red,13);
+                        else line("Материалы в наличии",green,13);
+                    }
+                    if (!militaryMessage.empty()) line(militaryMessage,gold,14);
+                } else if (armyTab == ArmyTab::overview) {
                     int divisions = 0;
                     double org = 0., strength = 0.;
                     hoi5::Stockpile equipment, capacity;
@@ -12702,6 +13344,20 @@ int main(int argc, char** argv) try {
                             if (!events.empty()) add(name(other)+" — "+events);
                         }
                         if (rows.size() == firstAgreement) add("Нет действующих войн и договорённостей");
+                        add("");
+                        add("Стратегические отношения",{}, {151,186,214});
+                        for (int other = 0; other < int(world.profiles.size()); ++other) {
+                            if (other == country) continue;
+                            const auto& ties = diplomacy.relation(country,other);
+                            const auto opinion = ties.opinion.find(country);
+                            const bool friendly = ties.trust >= .35 &&
+                                ((opinion != ties.opinion.end() && opinion->second >= 30) ||
+                                 world.sharedStrategicThreat(country,other));
+                            const char* status = ties.war ? "противник" : diplomacy.allied(country,other) ? "союзник" :
+                                world.strategicThreat(country,other) ? "потенциальный противник" :
+                                friendly ? "потенциальный союзник" : "нейтральная страна";
+                            add(name(other)+" — "+status);
+                        }
                     } else if (countryTab == CountryTab::society) {
                         if (own) {
                             add("Поддержка правительства: "+percent(policy.support));
@@ -13837,8 +14493,14 @@ int main(int argc, char** argv) try {
                     textRow(effects.str());
                 }
                 if (action.action == Action::loan) textRow("Срок: 12 мес.; ставка: 5.0% годовых");
-                if (!hoi5::offerNames(action.action).first.empty())
+                if (!hoi5::offerNames(action.action).first.empty()) {
                     textRow("Ожидаемый ответ: "+date(diplomacy.day+3));
+                    const auto estimate = world.assessOffer({0,foreignTarget,diplomacy.day+3,action.action,amount},0);
+                    textRow(estimate.margin > estimate.uncertainty ? "По нашим сведениям, скорее согласятся" :
+                        estimate.margin < -estimate.uncertainty ? "По нашим сведениям, скорее откажут" :
+                        "По нашим сведениям, исход неясен");
+                    textRow(std::string(estimate.reason));
+                }
                 if (action.action == Action::peace) textRow("Перемирие: 30 дн.");
                 if (action.action == Action::justify) textRow("Завершение подготовки: "+date(diplomacy.day+30));
                 if (action.action == Action::war) textRow("Война ухудшит репутацию и отношение другой страны.");
@@ -14004,6 +14666,38 @@ int main(int argc, char** argv) try {
                     battleLabel(window,font,value.str(),{364,y},11,sf::Color::White,1.f);
                 }
                 debug.record("profiler_overlay",overlayStart);
+            }
+        }
+        if (const auto* offer = playerOffer()) {
+            window.setView(gui);
+            const auto dialog = offerDialog();
+            const auto p = sf::Vector2f(dialog.position);
+            const auto center = p.x+dialog.size.x/2.f;
+            box(window,{0,0},size,{0,0,0,170});
+            box(window,p,sf::Vector2f(dialog.size),{20,28,36},{116,144,163});
+            battleLabel(window,cardFont,"Дипломатическое предложение",{center,p.y+55},28,{224,234,244},.5f);
+            battleLabel(window,cardFont,std::string(world.countryNames[offer->actor]),{center,p.y+110},
+                24,{150,204,241},.5f);
+            using Action = hoi5::ForeignAction;
+            std::string title, detail;
+            switch (offer->action) {
+                case Action::trade: title = "Предлагает торговый договор"; detail = "Приоритет при сопоставлении торговых заявок."; break;
+                case Action::alliance: title = "Предлагает заключить союз"; detail = "Запрет взаимных атак и приоритет торговли."; break;
+                case Action::nonaggression: title = "Предлагает пакт о ненападении"; detail = "Взаимное обязательство не объявлять войну."; break;
+                case Action::transit: title = "Запрашивает проход войск"; detail = "Её войска смогут проходить по вашей территории."; break;
+                case Action::peace: title = "Предлагает заключить мир"; detail = "Война прекращается по текущим границам."; break;
+                case Action::loan: title = "Предлагает кредит на "+formatMoney(offer->amount);
+                    detail = "Срок 12 месяцев, ставка 5% годовых."; break;
+                default: title = "Предлагает соглашение"; break;
+            }
+            battleLabel(window,cardFont,title,{center,p.y+172},22,{224,234,244},.5f);
+            battleLabel(window,cardFont,detail,{center,p.y+212},16,{170,190,208},.5f);
+            for (bool accept : {true,false}) {
+                const auto rect = offerButton(dialog,accept);
+                const auto color = accept ? sf::Color{45,79,64} : sf::Color{91,51,54};
+                box(window,sf::Vector2f(rect.position),sf::Vector2f(rect.size),color,{116,144,163});
+                battleLabel(window,cardFont,accept ? "Принять" : "Отклонить",
+                    sf::Vector2f(rect.position)+sf::Vector2f(rect.size)*.5f,20,{224,234,244},.5f);
             }
         }
         debug.record("draw_total",drawStart);

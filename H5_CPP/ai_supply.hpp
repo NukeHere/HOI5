@@ -83,6 +83,8 @@ struct BotSupplyState {
     double nextWeekly{}, nextMonthly{};
     double nextRecruitment{};
     double nextAir{};
+    int nextWartimeAirRefresh{};
+    int nextAirDefenseMove{};
     double nextEconomy{};
     double nextExpansion{};
     double nextDiplomacy{};
