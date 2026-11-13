@@ -39,6 +39,7 @@ struct BotTask {
     std::string_view sector;
     int targetCountry = -1;
     int politicalAction = -1;
+    bool exactSite = false;
 
     bool pending() const { return status == BotTaskStatus::planned || status == BotTaskStatus::blocked; }
     bool active() const { return pending() || status == BotTaskStatus::executing ||
@@ -80,6 +81,8 @@ struct BotSupplyState {
     PythonRandom rng{0};
     double aggression{};
     double intelligence = .25;
+    int nextEmergencyDay = 0;
+    double emergencyDebt = 0.;
     double nextWeekly{}, nextMonthly{};
     double nextRecruitment{};
     double nextAir{};

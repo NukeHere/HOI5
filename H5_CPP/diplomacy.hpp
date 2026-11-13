@@ -18,7 +18,7 @@ inline std::string politicalDate(int day) {
 }
 
 enum class ForeignAction { mission, embargo, trade, alliance, nonaggression, transit,
-    revokeTransit, justify, cancelJustification, peace, war, breakTreaties, aid, loan };
+    revokeTransit, justify, cancelJustification, peace, war, breakTreaties, aid, loan, requestLoan };
 
 struct ForeignActionInfo {
     ForeignAction action;
@@ -46,6 +46,8 @@ inline constexpr ForeignActionInfo foreignAid{ForeignAction::aid,"Безвозм
     "Выбранная сумма перечисляется сразу, без возврата."};
 inline constexpr ForeignActionInfo foreignLoan{ForeignAction::loan,"Предложить кредит",0,0,0,0,30,
     "Деньги перечисляются после согласия; условия фиксируются при отправке предложения."};
+inline constexpr ForeignActionInfo foreignLoanRequest{ForeignAction::requestLoan,"Запросить кредит",0,0,0,0,60,
+    "Запрос займа на 12 месяцев под 5% годовых."};
 
 struct CountryPolitics {
     static constexpr std::array baselineSocialShares{.45,.25,.28,.02};
@@ -116,11 +118,19 @@ struct CountryPolitics {
     }
 };
 
+struct WarLosses {
+    int people{}, divisions{}, aircraft{}, helicopters{}, damagedAircraft{};
+    Stockpile equipment;
+    double equipmentValue{};
+};
+
 struct Relation {
     std::map<int,double> opinion, grievance, respect, fear;
     double trust = .5, crisis{};
     bool war{};
     int truceUntil{}, warStarted{};
+    std::array<WarLosses,2> warLosses{};
+    std::array<int,2> initialLand{};
     std::set<ForeignAction> treaties;
     std::set<int> embargoes, transitGrantors;
 };
@@ -144,6 +154,7 @@ inline std::pair<std::string_view,std::string_view> offerNames(ForeignAction act
         case A::transit: return {"transit","разрешение на проход войск"};
         case A::peace: return {"peace","мирный договор"};
         case A::loan: return {"loan","кредит"};
+        case A::requestLoan: return {"loan_request","запрос кредита"};
         default: return {};
     }
 }
@@ -287,7 +298,7 @@ struct Diplomacy {
         const auto& r = relation(actor,target);
         const auto key = std::pair{actor,target};
         const bool financial = action == A::aid || action == A::loan;
-        if (financial && (!std::isfinite(amount) || amount < 1000. || amount > 1e12))
+        if ((financial || action == A::requestLoan) && (!std::isfinite(amount) || amount < 1000. || amount > 1e12))
             return "Введите сумму от 1 тыс. до 1 трлн";
         if (financial && profiles[actor].budget < amount) return "Недостаточно средств для выбранной суммы";
         const bool offer = !offerNames(action).first.empty();
@@ -374,6 +385,8 @@ struct Diplomacy {
                 goals.erase(opposite);
                 r.war = true;
                 r.warStarted = day;
+                r.warLosses = {};
+                r.initialLand = {};
                 r.crisis = 100;
                 r.trust = 0;
                 r.treaties.clear();
@@ -470,17 +483,20 @@ struct Diplomacy {
         using A = ForeignAction;
         auto& r = relation(offer.actor,offer.target);
         const auto action = offer.action;
-        accepted = accepted && (action == A::peace ? r.war : !r.war && (action == A::loan || r.embargoes.empty()));
-        if (action == A::loan)
-            accepted = accepted && offer.amount > 0 && profiles[offer.actor].budget >= offer.amount;
+        const bool loan = action == A::loan || action == A::requestLoan;
+        const int lender = action == A::requestLoan ? offer.target : offer.actor;
+        const int borrower = action == A::requestLoan ? offer.actor : offer.target;
+        accepted = accepted && (action == A::peace ? r.war : !r.war && (loan || r.embargoes.empty()));
+        if (loan)
+            accepted = accepted && offer.amount > 0 && profiles[lender].budget >= offer.amount;
         if (!accepted) {
             record("Предложение отклонено",offer.actor,offer.target);
             return false;
         }
-        if (action == A::loan) {
-            profiles[offer.actor].budget -= offer.amount;
-            profiles[offer.target].budget += offer.amount;
-            loans.push_back({offer.actor,offer.target,offer.amount,offer.amount,day+30});
+        if (loan) {
+            profiles[lender].budget -= offer.amount;
+            profiles[borrower].budget += offer.amount;
+            loans.push_back({lender,borrower,offer.amount,offer.amount,day+30});
         } else if (action == A::transit) r.transitGrantors.insert(offer.target);
         else r.treaties.insert(action);
         if (action == A::trade || action == A::alliance || action == A::nonaggression || action == A::transit)

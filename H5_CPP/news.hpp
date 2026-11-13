@@ -92,7 +92,6 @@ class News {
     void publish(NewsItem item) {
         item.id = nextId++;
         items.push_front(std::move(item));
-        if (items.size() > 300) items.pop_back();
         logItem(items.front());
     }
 

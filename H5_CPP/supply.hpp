@@ -18,6 +18,14 @@ struct BuildingCoverage {
 inline constexpr std::array<double,buildingCount> supplySourceWeights{1.,.48,.50,.92,.46,.22,.30,.18,.18};
 
 template<class Tile>
+double supplySourceStrength(const Tile& tile,bool capital) {
+    double strength = capital ? .85 : 0.;
+    for (int b = 0; b < buildingCount; ++b)
+        strength += tile.buildings[b].area*tile.buildings[b].health*supplySourceWeights[b];
+    return std::clamp(strength,0.,1.);
+}
+
+template<class Tile>
 void recalculateSupply(std::span<Tile> tiles, int size, const std::vector<int>& capitals) {
     constexpr std::array<double,buildingCount> relayWeights{0., 0., .28, .72, .22, 0., 0., 0., 0., 0., 0., 0.};
     struct SupplyOffset { int q, r; double factor; };
@@ -50,8 +58,7 @@ void recalculateSupply(std::span<Tile> tiles, int size, const std::vector<int>& 
     for (int index = 0; index < static_cast<int>(tiles.size()); ++index) {
         const auto& source = tiles[index];
         if (source.water || source.owner < 0) continue;
-        double strength = index == capitals[source.owner] ? .85 : 0.;
-        for (int b = 0; b < buildingCount; ++b) strength += effective(source.buildings[b]) * supplySourceWeights[b];
+        const double strength = supplySourceStrength(source,index == capitals[source.owner]);
         if (strength <= 0) continue;
         hasSource[source.owner] = true;
         spread(index,source.owner,std::clamp(strength,0.,1.));

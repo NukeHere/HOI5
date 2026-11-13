@@ -85,7 +85,7 @@ inline auto countryIdentities(unsigned seed) {
     auto names = shuffle(countryNames);
     auto rulers = shuffle(rulerNames);
     names[0] = "Player";
-    rulers[0] = "��";
+    rulers[0] = "";
     return std::pair{names,rulers};
 }
 

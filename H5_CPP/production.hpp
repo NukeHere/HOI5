@@ -128,11 +128,37 @@ void accumulateTileProduction(Production& result,const Tile& tile,
 }
 
 template<class Tile>
-Production buildProduction(const std::vector<Tile>& tiles, int country, double population,
+Production buildProduction(const std::vector<Tile>& tiles, int size, int country, double population,
                            const std::set<std::string_view>& technologies) {
     Production result;
     for (const auto& tile : tiles)
         if (tile.owner == country) accumulateTileProduction(result,tile,technologies);
+    for (int index = 0; index < int(tiles.size()); ++index) {
+        const auto& sea = tiles[index];
+        if (!sea.water && sea.natural.water <= .55) continue;
+        if (sea.owner >= 0 && sea.owner != country) continue;
+        const int q = index%size, r = index/size, shift = r%2;
+        double coverage = 0.;
+        int beneficiary = -1;
+        for (const auto [dq,dr] : std::array<std::pair<int,int>,6>{{
+            {shift,1},{shift-1,1},{-1,0},{shift-1,-1},{shift,-1},{1,0}
+        }}) {
+            if (q+dq < 0 || q+dq >= size || r+dr < 0 || r+dr >= size) continue;
+            const auto& coast = tiles[(r+dr)*size+q+dq];
+            if (coast.water || coast.natural.water > .55 || coast.owner < 0 ||
+                (sea.owner >= 0 && coast.owner != sea.owner)) continue;
+            const auto& dock = coast.buildings[port];
+            if (dock.area*dock.health > coverage) {
+                coverage = dock.area*dock.health;
+                beneficiary = coast.owner;
+            }
+        }
+        if (beneficiary != country) continue;
+        for (const auto& deposit : sea.deposits)
+            if (deposit.resource == "phosphorite")
+                result[raw].outputs[deposit.resource] += coverage*.95*5200*
+                    std::min(1.,std::log10(deposit.mass+1)/std::log10(1500001.));
+    }
     for (const auto& [name,amount] : lifeSupport) result[upkeep].inputs[name] += population/1e6*amount;
     return result;
 }

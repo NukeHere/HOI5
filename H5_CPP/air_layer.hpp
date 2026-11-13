@@ -31,6 +31,7 @@ struct AirWing {
     double defensiveHours = 0, abortedHours = 0;
     std::vector<std::pair<int,int>> composition;
     std::vector<std::string_view> targetPriorities;
+    std::vector<int> strategicOperationArea;
 
     int readyCount() const { return std::max(0,count-damaged); }
     int typeCount(int aircraft) const {
@@ -130,8 +131,8 @@ struct AirLayer {
             .8+effective*1.4,effective>=.30});
     }
 
-    struct DefenseReplacement { int type,remaining; };
-    std::map<int,DefenseReplacement> defenseReplacements;
+    struct DefenseReplacement { int type,remaining,site = -1; };
+    std::multimap<int,DefenseReplacement> defenseReplacements;
 
     struct DefenseQuote {
         double money;
@@ -150,8 +151,8 @@ struct AirLayer {
     }
 
     template<class Stockpile>
-    std::string_view enqueueDefense(int owner,int type,double& budget,Stockpile& stock) {
-        if (defenseReplacements.contains(owner)) return "ПВО уже производится";
+    std::string_view enqueueDefense(int owner,int type,double& budget,Stockpile& stock,int site = -1) {
+        if (site < 0 && defenseReplacements.contains(owner)) return "ПВО уже производится";
         if (type < 0 || type >= int(std::size(defenseClasses)))
             return "Недостаточно средств или неизвестный тип ПВО";
         const auto quote = defenseQuote(type);
@@ -161,7 +162,7 @@ struct AirLayer {
             if (available == stock.end() || available->second < amount)
                 return "Не хватает материалов и оснащения для ПВО";
         }
-        defenseReplacements.emplace(owner,DefenseReplacement{type,48});
+        defenseReplacements.emplace(owner,DefenseReplacement{type,48,site});
         budget -= quote.money;
         for (const auto& [key,amount] : quote.resources) stock.at(key) -= amount;
         return "Оплачено производство ПВО: 48 часов";
@@ -170,9 +171,22 @@ struct AirLayer {
     template<class Tile,class InBattle,class ForwardSites,class Completed>
     void advanceDefenseReplacements(const std::vector<Tile>& tiles,const std::vector<int>& capitals,int hours,
                                     InBattle inBattle,ForwardSites forwardSites,Completed completed) {
+        std::map<int,double> capacity;
+        constexpr std::array points{1.,1.5,2.,4.,1.};
         for (auto it = defenseReplacements.begin(); it != defenseReplacements.end();) {
             const int owner = it->first;
             auto& project = it->second;
+            if (project.site >= 0) {
+                auto [limit,inserted] = capacity.try_emplace(owner,5.);
+                if (inserted) for (const auto& tile : tiles)
+                    if (tile.owner == owner) limit->second += tile.buildings[industry].area*tile.buildings[industry].health;
+                if (limit->second < points[project.type]) {
+                    limit->second = 0.;
+                    ++it;
+                    continue;
+                }
+                limit->second -= points[project.type];
+            }
             project.remaining = std::max(0,project.remaining-hours);
             if (project.remaining > 0) {
                 ++it;
@@ -183,7 +197,8 @@ struct AirLayer {
             std::tuple<bool,double,int> best{};
             for (int i = 0; i < int(tiles.size()); ++i) {
                 const auto& tile = tiles[i];
-                if (tile.owner != owner || tile.water || tile.natural.water > .55 || tile.supply < .25 || inBattle(i)) continue;
+                if ((project.site >= 0 && i != project.site) ||
+                    tile.owner != owner || tile.water || tile.natural.water > .55 || tile.supply < .25 || inBattle(i)) continue;
                 const auto preferred = rear.find(i);
                 const bool forward = preferred != rear.end();
                 const double supply = tile.supply+(!forward && owner < int(capitals.size()) && capitals[owner] == i);
@@ -380,7 +395,8 @@ struct AirLayer {
     }
 
     template<class Tile>
-    bool rebaseWing(const std::vector<Tile>& tiles,int index,int target,std::string* message = nullptr) {
+    bool rebaseWing(const std::vector<Tile>& tiles,int index,int target,std::string* message = nullptr,
+                    bool transitGranted = false) {
         const auto fail = [&](std::string reason) {
             if (message) *message = std::move(reason);
             return false;
@@ -388,13 +404,14 @@ struct AirLayer {
         if (index < 0 || index >= int(wings.size()) || target < 0 || target >= int(tiles.size()))
             return fail("Нет цели перебазирования");
         auto& wing = wings[index];
-        if (tiles[target].owner != wing.owner) return fail("Нужна своя клетка");
+        const int host = tiles[target].owner;
+        if (host < 0 || (host != wing.owner && !transitGranted)) return fail("Нужна своя клетка");
         if (tiles[target].water) return fail("Нельзя базироваться на воде");
         if (wing.count <= 0) return fail("Крыло пустое");
         int fixed = -1;
         for (int type = 0; type < int(std::size(aircraftTypes)); ++type) {
             if (aircraftTypes[type].helicopter || !wing.typeCount(type)) continue;
-            if (baseCapacity(tiles,wing.owner,target,type) <= 0)
+            if (baseCapacity(tiles,host,target,type) <= 0)
                 return fail("База не принимает "+std::string(aircraftNames[type]));
             fixed = type;
         }
@@ -402,7 +419,7 @@ struct AirLayer {
             if (type < 0) continue;
             const bool helicopter = aircraftTypes[type].helicopter;
             const int count = wing.roleCount(helicopter);
-            const int free = freeCapacity(tiles,wing.owner,target,type,index);
+            const int free = freeCapacity(tiles,host,target,type,index);
             if (free < count)
                 return fail(std::string(helicopter ? "Не хватает вертолетных мест: " : "Не хватает самолетных мест: ")+
                     std::to_string(free)+"/"+std::to_string(count));

@@ -209,7 +209,7 @@ struct Construction {
             ownedNeighbors(tiles,size,index,&coastal);
             if (water || !coastal) return "Порт только рядом с водой";
         }
-        if (water) return "Нужна суша";
+        if (water && data.building != oilGasRig) return "Нужна суша";
         constexpr ResourceWeight solid[] = {{"coal",1},{"peat",.55},{"iron_ore",1},{"copper_ore",.82},
             {"bauxite",.64},{"sulfur",.42},{"phosphorite",.40},{"apatite",.36}};
         constexpr ResourceWeight oil[] = {{"oil",1},{"natural_gas",.95}};
