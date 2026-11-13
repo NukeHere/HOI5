@@ -176,10 +176,20 @@ struct Construction {
     }
 
     template<class Tile>
+    void enqueueTileRepairs(const Tile& tile,int index) {
+        if (tile.owner < 0 || tile.owner >= int(queues.size())) return;
+        for (int spec = 0; spec < int(std::size(constructionSpecs)); ++spec)
+            if (tile.buildings[constructionSpecs[spec].building].health < .999)
+                enqueueRepair(tile,index,spec);
+    }
+
+    template<class Tile>
     bool damageBuilding(Tile& tile,int index,Building building,double damage) {
-        auto& health = tile.buildings[building].health;
-        if (damage <= 0 || health <= 0) return false;
-        health = std::max(0.,health-damage);
+        auto& state = tile.buildings[building];
+        if (state.area <= 0. || damage <= 0. || state.health <= 0.) return false;
+        const double next = std::max(0.,state.health-damage);
+        if (state.health-next < .0005) return false;
+        state.health = next >= .999 ? 1. : next;
         const auto spec = std::ranges::find(constructionSpecs,building,&ConstructionSpec::building);
         if (spec != std::end(constructionSpecs)) enqueueRepair(tile,index,int(spec-std::begin(constructionSpecs)));
         return true;
@@ -236,9 +246,7 @@ struct Construction {
         {
             DebugMeasure timing(debug,"construction_auto_repairs");
             for (int index = 0; index < int(tiles.size()); ++index)
-                for (int spec = 0; spec < int(std::size(constructionSpecs)); ++spec)
-                    if (tiles[index].buildings[constructionSpecs[spec].building].health < .999)
-                        enqueueRepair(tiles[index],index,spec);
+                enqueueTileRepairs(tiles[index],index);
         }
         DebugMeasure projects(debug,"construction_projects");
         for (std::size_t country = 0; country < queues.size(); ++country) {

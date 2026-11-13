@@ -23,6 +23,7 @@ struct NewsItem {
     int id{};
     std::string key;
     int otherViewer = -1;
+    int actor = -1, target = -1;
 
     bool important() const { return priority >= NewsPriority::important; }
     bool visibleTo(int country) const { return viewer < 0 || viewer == country || otherViewer == country; }
@@ -124,8 +125,9 @@ public:
     }
 
     int report(int day,std::string_view key,std::string title,std::string body,
-                NewsPriority priority = NewsPriority::regular,int viewer = -1,int otherViewer = -1) {
-        publish({day,viewer,priority,std::move(title),std::move(body),0,std::string(key),otherViewer});
+                NewsPriority priority = NewsPriority::regular,int viewer = -1,int otherViewer = -1,
+                int actor = -1,int target = -1) {
+        publish({day,viewer,priority,std::move(title),std::move(body),0,std::string(key),otherViewer,actor,target});
         return items.front().id;
     }
 

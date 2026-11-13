@@ -51,7 +51,8 @@ struct AirWing {
         return total;
     }
 
-    void changeComposition(int aircraft,int delta) {
+    void changeComposition(int aircraft,int delta,bool refillNewCapacity = false) {
+        const int oldCapacity = interceptorCapacity();
         if (composition.empty() && count > 0) composition.emplace_back(type,count);
         auto item = std::ranges::find(composition,aircraft,&std::pair<int,int>::first);
         if (item == composition.end()) composition.emplace_back(aircraft,delta);
@@ -61,10 +62,23 @@ struct AirWing {
         for (bool strategic : {false,true})
             if (!missionAllowed(strategic)) enabledMissions[strategic] = false;
         if (missionType(2) < 0) intercept = airSuperiority = patrol = false;
+        if (interceptorAmmo >= 0) {
+            const int capacity = interceptorCapacity();
+            const int addedAmmo = refillNewCapacity ? std::max(0,capacity-oldCapacity) : 0;
+            interceptorAmmo = std::min(capacity,interceptorAmmo+addedAmmo);
+        }
     }
 
     bool missionAllowed(bool strategic) const {
         return missionType(strategic ? 1 : 0) >= 0;
+    }
+
+    int applyLosses(int aircraft,int destroyed,int newlyDamaged) {
+        destroyed = std::clamp(destroyed,0,typeCount(aircraft));
+        if (destroyed > 0) changeComposition(aircraft,-destroyed);
+        damaged = std::min(damaged,count);
+        damaged += std::clamp(newlyDamaged,0,readyCount());
+        return destroyed;
     }
 
     int missionType(int mission) const {
@@ -81,7 +95,9 @@ struct AirWing {
     }
 
     int readyForType(int aircraft) const {
-        return aircraft < 0 || count <= 0 ? 0 : int(std::nearbyint(typeCount(aircraft)*double(readyCount())/count));
+        if (aircraft < 0 || count <= 0) return 0;
+        const double readyRatio = std::clamp(double(readyCount())/count,0.,1.);
+        return int(std::nearbyint(typeCount(aircraft)*readyRatio));
     }
 };
 struct AirDefense {
@@ -357,14 +373,9 @@ struct AirLayer {
             -std::min({-delta,wing.typeCount(type),wing.count-1});
         if (!changed) return 0;
         const int ready = wing.readyCount();
-        const int oldAmmoCapacity = wing.interceptorCapacity();
-        wing.changeComposition(type,changed);
+        wing.changeComposition(type,changed,true);
         wing.damaged = wing.count-std::clamp(ready+changed,0,wing.count);
         reserve -= changed;
-        if (wing.interceptorAmmo >= 0) {
-            const int capacity = wing.interceptorCapacity();
-            wing.interceptorAmmo = std::min(capacity,wing.interceptorAmmo+std::max(0,capacity-oldAmmoCapacity));
-        }
         return changed;
     }
 
@@ -398,7 +409,7 @@ struct AirLayer {
         }
         wing.base = target;
         wing.target = -1;
-        if (std::ranges::max(wing.missionCooldowns) < 1.) wing.cooldown = std::max(1.,wing.cooldown);
+        if (1. > std::ranges::max(wing.missionCooldowns)+.01) wing.cooldown = std::max(1.,wing.cooldown);
         if (message) message->clear();
         return true;
     }
@@ -425,6 +436,7 @@ struct AirLayer {
         if (tile < 0) return -1;
         const int count = std::min({std::max(1,requested),reserve,freeCapacity(tiles,country,tile,type)});
         wings.push_back({country,tile,type,count});
+        wings.back().interceptorAmmo = wings.back().interceptorCapacity();
         reserve -= count;
         return int(wings.size())-1;
     }

@@ -37,7 +37,7 @@ Stockpile tileStorageCapacity(const Tile& tile) {
     return result;
 }
 
-inline void enforceStorageCapacity(Stockpile& stocks,const Stockpile& capacity) {
+inline Stockpile enforceStorageCapacity(Stockpile& stocks,const Stockpile& capacity) {
     Stockpile used;
     for (const auto& [resource,amount] : stocks) used[storageBucket(resource)] += std::max(0.,amount);
     Stockpile retention;
@@ -45,8 +45,15 @@ inline void enforceStorageCapacity(Stockpile& stocks,const Stockpile& capacity) 
         const double total = value(used,bucket);
         retention[bucket] = total > 0. ? std::clamp(value(capacity,bucket)/total,0.,1.) : 1.;
     }
-    for (auto& [resource,amount] : stocks)
-        if (amount > 0.) amount *= retention.at(storageBucket(resource));
+    Stockpile discarded;
+    for (auto& [resource,amount] : stocks) {
+        const auto bucket = storageBucket(resource);
+        if (amount <= 0. || retention.at(bucket) == 1.) continue;
+        const double retained = amount * retention.at(bucket);
+        discarded[bucket] += amount-retained;
+        amount = retained;
+    }
+    return discarded;
 }
 
 inline Stockpile distributeTileStockpile(const Stockpile& stocks,const Stockpile& nationalCapacity,

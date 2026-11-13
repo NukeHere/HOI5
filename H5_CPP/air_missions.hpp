@@ -92,9 +92,11 @@ inline std::span<const Building> buildingsForAirTarget(std::string_view tag) {
     static constexpr Building industrial[]{industry,refinery,mine,oilGasRig};
     static constexpr Building bases[]{airbase,supplyDepot,warehouse,fuelStorage};
     static constexpr Building aviation[]{airbase,fieldHelipad};
-    static constexpr Building all[]{city,village,warehouse,supplyDepot,port,fuelStorage,refinery,
-        oilGasRig,industry,farms,mine,airbase,fortification,fieldHelipad};
+    static constexpr Building helipads[]{fieldHelipad};
+    static constexpr Building all[]{city,village,farms,mine,oilGasRig,industry,port,
+        warehouse,supplyDepot,fortification,fuelStorage,refinery,airbase,fieldHelipad};
     if (tag == "airbase" || tag == "radar" || tag == "hardened_shelter") return airfields;
+    if (tag == "field_helipad") return helipads;
     if (tag == "bunker") return bunker;
     if (tag == "sam") return sam;
     if (tag == "factory") return factories;

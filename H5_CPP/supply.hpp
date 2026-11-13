@@ -20,20 +20,30 @@ inline constexpr std::array<double,buildingCount> supplySourceWeights{1.,.48,.50
 template<class Tile>
 void recalculateSupply(std::span<Tile> tiles, int size, const std::vector<int>& capitals) {
     constexpr std::array<double,buildingCount> relayWeights{0., 0., .28, .72, .22, 0., 0., 0., 0., 0., 0., 0.};
-    std::array<double, 8> decay{};
-    for (int d = 0; d <= 7; ++d) decay[d] = std::pow(.78, d);
+    struct SupplyOffset { int q, r; double factor; };
+    static const auto offsets = [] {
+        std::array<double,8> decay{};
+        for (int d = 0; d <= 7; ++d) decay[d] = std::pow(.78,d);
+        std::array<SupplyOffset,169> result{};
+        std::size_t i = 0;
+        for (int dq = -7; dq <= 7; ++dq)
+            for (int dr = -7; dr <= 7; ++dr) {
+                const int distance = std::max({std::abs(dq),std::abs(dr),std::abs(dq+dr)});
+                if (distance <= 7) result[i++] = {dq,dr,decay[distance]};
+            }
+        return result;
+    }();
     for (auto& tile : tiles) tile.supply = 0;
     const auto effective = [](const BuildingCoverage& building) {
         return building.area * building.health;
     };
     const auto spread = [&](int index,int country,double strength) {
         const int q = index % size, r = index / size;
-        for (int dr = -7; dr <= 7; ++dr) for (int dq = -7; dq <= 7; ++dq) {
-            const int distance = std::max({std::abs(dq), std::abs(dr), std::abs(dq + dr)});
-            if (distance > 7 || q + dq < 0 || q + dq >= size || r + dr < 0 || r + dr >= size) continue;
+        for (const auto [dq,dr,factor] : offsets) {
+            if (q + dq < 0 || q + dq >= size || r + dr < 0 || r + dr >= size) continue;
             auto& tile = tiles[(r + dr) * size + q + dq];
             if (tile.owner == country && !tile.water)
-                tile.supply = std::max(tile.supply, strength * decay[distance]);
+                tile.supply = std::max(tile.supply, strength * factor);
         }
     };
     std::vector<bool> hasSource(capitals.size());
