@@ -4776,18 +4776,23 @@ struct World {
             for (const auto& [key,amount] : project.resources)
                 constructionDemand[key] += std::max(0.,amount-hoi5::value(project.resourcesSpent,key));
         }
-        if (austerity) {
-            const double limit = hoi5::Market::monthlyCapacity(tiles,profiles)[owner];
-            const auto orders = market.contracts;
-            for (const auto& order : orders)
-                if (order.country == owner && order.buy &&
-                    (reserveMetal(order.resource) || order.resource == "consumer_goods" ||
-                     (order.resource == "food" && hoi5::value(capacity,"food") < .8*hoi5::value(required,"food"))))
-                    market.changeContract(owner,order.resource,true,-order.amount,limit);
-            botBalanceRefresh.insert(owner);
+        const double limit = hoi5::Market::monthlyCapacity(tiles,profiles)[owner];
+        const auto orders = market.contracts;
+        for (const auto& order : orders) {
+            if (order.country != owner || !order.buy) continue;
+            const auto key = order.resource;
+            const double need = hoi5::value(required,key);
+            const double stock = hoi5::value(stockpiles[owner],key);
+            const double buildingNeed = hoi5::value(constructionDemand,key);
+            const bool strategicReserve = wealthy && reserveMetal(key) && stock < 5000.;
+            const bool covered = stock >= need+buildingNeed &&
+                (need == 0. || hoi5::value(capacity,key) >= need || stock >= 2.*need+buildingNeed);
+            const bool unaffordable = austerity && (reserveMetal(key) || key == "consumer_goods" ||
+                (key == "food" && hoi5::value(capacity,key) < .8*need));
+            if ((unaffordable || (covered && !strategicReserve)) &&
+                market.changeContract(owner,key,true,-order.amount,limit)) botBalanceRefresh.insert(owner);
         }
         if (!constructionDemand.empty()) {
-            const double limit = hoi5::Market::monthlyCapacity(tiles,profiles)[owner];
             for (const auto& [key,amount] : constructionDemand) {
                 const double stock = hoi5::value(stockpiles[owner],key);
                 const double reserve = hoi5::value(required,key)*.25;
@@ -8790,12 +8795,14 @@ int main(int argc, char** argv) try {
         project.resourcesSpent = {{"steel",25.}};
         test.stockpiles[owner]["steel"] = 20.;
         test.market.contracts.push_back({owner,"steel",false,50.});
+        test.market.contracts.push_back({owner,"coal",true,120.});
         test.divisions.clear();
         test.production[owner] = {};
         bot.tasks.clear();
         bot.nextEconomy = test.botHours;
         test.scheduleBotEconomy(bot);
         if (test.market.contractAmount(owner,"steel",false) != 0. ||
+            test.market.contractAmount(owner,"coal",true) != 0. ||
             std::ranges::none_of(bot.tasks,[](const auto& task) {
                 return task.kind == hoi5::BotTask::Kind::buy && task.resource == "steel" &&
                     std::abs(task.amount-55.) < 1e-9;
