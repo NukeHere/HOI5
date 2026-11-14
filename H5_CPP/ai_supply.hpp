@@ -48,6 +48,7 @@ struct BotTask {
 };
 
 enum class BotCourse { development, deterrence, warPreparation, defense, recovery };
+enum class BotPersonality { cautious, merchant, opportunist };
 using BotCourseChoice = std::pair<BotCourse,int>;
 using BotCourseOptions = std::vector<std::pair<double,BotCourseChoice>>;
 
@@ -81,6 +82,7 @@ struct BotSupplyState {
     std::set<int> resting;
     PythonRandom rng{0};
     double aggression{};
+    BotPersonality personality = BotPersonality::cautious;
     double intelligence = .25;
     int nextEmergencyDay = 0;
     double emergencyDebt = 0.;

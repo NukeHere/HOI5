@@ -3725,6 +3725,7 @@ struct World {
             bot.nextExpansion = 12.+60.*rng.uniform();
             bot.nextDiplomacy = 12.+60.*rng.uniform();
             bot.aggression = rng.uniform();
+            bot.personality = hoi5::BotPersonality((seed+unsigned(owner))%3);
             const int level = botDifficulty(owner);
             if (level >= 2) bot.intelligence = level == 3 ? .8 : .5;
             std::vector<std::pair<double,int>> candidates;
@@ -3843,6 +3844,12 @@ struct World {
         for (auto& [score,choice] : options) {
             const auto course = choice.first;
             score += bot.courseBias[std::size_t(course)];
+            if (botDifficulty(bot.owner) >= 2) {
+                using Personality = hoi5::BotPersonality;
+                if (bot.personality == Personality::cautious && course == Course::deterrence) score += 8.;
+                if (bot.personality == Personality::merchant && course == Course::development) score += 8.;
+                if (bot.personality == Personality::opportunist && course == Course::warPreparation) score += 8.;
+            }
             if (course == bot.course.first) score += 10.;
             else if (botHours-bot.courseSince < 1440 && course != Course::defense && course != Course::recovery)
                 score -= 20.;
@@ -5211,9 +5218,10 @@ struct World {
                 !diplomacy.reason(owner,other,alliance,profiles).empty()) continue;
             double score = margin + (commonThreat ? 35. : 0.) +
                 (ties.treaties.contains(hoi5::ForeignAction::trade) ? 8. : 0.);
+            const bool merchant = botDifficulty(owner) >= 2 && bot.personality == hoi5::BotPersonality::merchant;
             for (const auto& [key,dependency] : bot.dependencies)
                 if (key.first == other && botHours-dependency.observedHour <= 720)
-                    score += std::clamp(dependency.share,0.,1.)*5.;
+                    score += std::clamp(dependency.share,0.,1.)*(merchant ? 12. : 5.);
             partners.emplace_back(score,other);
         }
         if (!partners.empty()) addPolitics(std::ranges::max_element(partners,{},&std::pair<double,int>::first)->second,
@@ -8491,6 +8499,24 @@ int main(int argc, char** argv) try {
         test.diplomacy.relation(0,1).war = true;
         test.selectBotCourse(bot,proposal);
         if (bot.course != hoi5::BotCourseChoice{Course::defense,0} || test.botPreparationTarget(1) != -1) return 1;
+
+        {
+            auto peaceful = test;
+            peaceful.diplomacy.relation(0,1).war = false;
+            peaceful.profiles[1].budget = 10000000.;
+            peaceful.lobbyDifficulty[1] = 2;
+            auto first = bot;
+            first.course = {Course::recovery,-1};
+            first.courseSince = 0;
+            first.courseBias = {};
+            auto second = first;
+            first.personality = hoi5::BotPersonality::merchant;
+            second.personality = hoi5::BotPersonality::opportunist;
+            const hoi5::BotCourseOptions equal{{50.,{Course::development,-1}},{50.,{Course::warPreparation,0}}};
+            peaceful.selectBotCourse(first,equal);
+            peaceful.selectBotCourse(second,equal);
+            if (first.course.first != Course::development || second.course.first != Course::warPreparation) return 1;
+        }
 
         bot.nextWeekly = bot.nextMonthly = 2000.;
         bot.militaryReports.clear();
