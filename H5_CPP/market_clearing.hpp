@@ -30,6 +30,7 @@ struct MarketRules {
     std::function<double(std::string_view,int,int)> price;
     std::function<double(std::string_view,bool,int)> externalPrice;
     std::function<double(int)> budget;
+    std::function<double(int,std::string_view)> credit;
     std::function<double(int,std::string_view)> stock, freeStorage;
     std::function<std::string_view(std::string_view)> bucket;
     std::function<bool(int)> externalAccess;
@@ -66,7 +67,8 @@ inline MarketPlan clearMarket(std::span<const MarketOrder> orders, const MarketR
         std::optional<int> buyer, seller;
         if (buy) {
             buyer = orders[*buy].country;
-            amount = std::min({amount, plan.remaining[*buy], wallets[*buyer] / price, storage[{*buyer,bucket}]});
+            const double credit = rules.credit ? rules.credit(*buyer,resource) : 0.;
+            amount = std::min({amount, plan.remaining[*buy], (wallets[*buyer]+credit) / price, storage[{*buyer,bucket}]});
         }
         if (sell) {
             seller = orders[*sell].country;

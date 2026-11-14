@@ -1,11 +1,17 @@
 #pragma once
 
+#include <span>
+
 #include "market_data.hpp"
 #include <deque>
 
 namespace hoi5 {
 
 struct Market {
+    static bool recoveryResource(std::string_view key) {
+        return key == "food" || key == "construction_goods" || key == "steel" ||
+            key == "machinery" || key == "refined_fuel";
+    }
     static constexpr double weeklyFraction = 7./30.;
     static constexpr double buyMarkup = 1.08, sellMarkdown = .92;
     static constexpr double sellCapacityMultiplier = 2.;
@@ -187,7 +193,7 @@ struct Market {
     void execute(const std::vector<Tile>& tiles,std::vector<StartingProfile>& countries,
                  std::vector<Stockpile>& stocks,const std::vector<Stockpile>& capacities,
                  int rotation,TradeAllowed allowed,TradePriority priority,ExternalAccess externalAccess,ExportLimit exportLimit,
-                 double fraction = weeklyFraction,bool reprice = true) {
+                 double fraction = weeklyFraction,bool reprice = true,std::span<const double> recoveryCredit = {}) {
         const auto monthly = monthlyCapacity(tiles,countries);
         double externalCapacity = 0;
         std::vector<std::array<double,2>> limits(countries.size());
@@ -205,6 +211,7 @@ struct Market {
             for (auto& [bucket,amount] : availableStorage[i]) amount = std::max(0.,amount);
         }
         std::vector<MarketOrder> orders;
+        std::vector<double> creditUsed(countries.size());
         for (const auto& contract : normalizedContracts()) {
             const int i = contract.country;
             if (i >= int(countries.size())) continue;
@@ -212,14 +219,20 @@ struct Market {
             auto& capacity = limits[i][contract.buy];
             auto& space = availableStorage[i][storageBucket(key)];
             const double purchasePrice = unitPrice(i,key,true);
+            const double credit = recoveryResource(key) && i < int(recoveryCredit.size()) ?
+                std::max(0.,recoveryCredit[i]-creditUsed[i]) : 0.;
             double amount = std::min(contract.amount*fraction,capacity);
-            amount = contract.buy ? std::min({amount,space,budgets[i]/purchasePrice})
+            amount = contract.buy ? std::min({amount,space,(budgets[i]+credit)/purchasePrice})
                                   : std::min(amount,value(stocks[i],key));
             if (amount <= 0) continue;
             orders.push_back({i,key,contract.buy,amount});
             capacity -= amount;
             space += contract.buy ? -amount : amount;
-            if (contract.buy) budgets[i] -= amount*purchasePrice;
+            if (contract.buy) {
+                const double cost = amount*purchasePrice;
+                creditUsed[i] += std::max(0.,cost-budgets[i]);
+                budgets[i] = std::max(0.,budgets[i]-cost);
+            }
         }
         Stockpile weeklyQuota, quota;
         for (const auto& [key, basePrice] : TRADE_BASE_PRICES) {
@@ -238,7 +251,10 @@ struct Market {
             return (countryPrice(buyer,key)+countryPrice(seller,key))*.5;
         };
         rules.externalPrice = [&](auto key,bool buy,int country) { return unitPrice(country,key,buy); };
-        rules.budget = [&](int i) { return countries[i].budget; };
+        rules.budget = [&](int i) { return std::max(0.,countries[i].budget); };
+        rules.credit = [&](int i,auto key) {
+            return recoveryResource(key) && i < int(recoveryCredit.size()) ? recoveryCredit[i] : 0.;
+        };
         rules.stock = [&](int i,auto key) { return value(stocks[i],key); };
         rules.freeStorage = [&](int i,auto key) { return freeStorage(capacities[i],stocks[i],key); };
         rules.bucket = storageBucket;

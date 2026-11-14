@@ -2,6 +2,10 @@
 
 #include "world_generation.hpp"
 #include <bit>
+#include <deque>
+#include <filesystem>
+#include <fstream>
+#include <string>
 #include <string_view>
 
 namespace hoi5 {
@@ -70,20 +74,44 @@ inline constexpr std::array<std::string_view,30> rulerNames{
     "\u041d\u0438\u043d\u0430 \u0414\u0430\u043b\u044c\u043d\u0438\u0439 \u0422\u044b\u043b",
 };
 
+inline std::array<std::deque<std::string>,3> customNames;
+
+inline void loadCountryNames(const std::filesystem::path& data) {
+    constexpr std::array files{"country_names.txt","ruler_names.txt","alliance_names.txt"};
+    for (std::size_t i = 0; i < files.size(); ++i) {
+        std::ifstream input(data/files[i]);
+        for (std::string line; std::getline(input,line);) {
+            if (line.starts_with("\xef\xbb\xbf")) line.erase(0,3);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty() && line.front() != '#') customNames[i].push_back(std::move(line));
+        }
+    }
+}
+
 inline auto countryIdentities(unsigned seed) {
     PythonSeed input{seed ^ 0xC017u};
     std::mt19937 rng(input);
-    const auto shuffle = [&](auto values) {
+    const auto shuffle = [&](auto fallback,const auto& custom) {
+        std::vector<std::string_view> values;
+        if (custom.size() < fallback.size()) values.assign(fallback.begin(),fallback.end());
+        if (!custom.empty()) {
+            values.clear();
+            values.insert(values.end(),custom.begin(),custom.end());
+            for (auto name : fallback)
+                if (values.size() < fallback.size() && std::ranges::find(values,name) == values.end())
+                    values.push_back(name);
+        }
         for (unsigned count = values.size(); count > 1; --count) {
             const unsigned bits = std::bit_width(count);
             unsigned index;
             do { index = rng() >> (32-bits); } while (index >= count);
             std::swap(values[count-1],values[index]);
         }
-        return values;
+        std::copy_n(values.begin(),fallback.size(),fallback.begin());
+        return fallback;
     };
-    auto names = shuffle(countryNames);
-    auto rulers = shuffle(rulerNames);
+    auto names = shuffle(countryNames,customNames[0]);
+    auto rulers = shuffle(rulerNames,customNames[1]);
     names[0] = "Player";
     rulers[0] = "";
     return std::pair{names,rulers};

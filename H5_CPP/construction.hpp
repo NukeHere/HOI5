@@ -241,7 +241,8 @@ struct Construction {
 
     template<class Tile,class Complete,class InBattle>
     bool advance(std::vector<Tile>& tiles,std::vector<StartingProfile>& countries,
-                 std::vector<Stockpile>& stocks,int hours,Complete complete,InBattle inBattle,DebugProfiler* debug = nullptr) {
+                 std::vector<Stockpile>& stocks,int hours,Complete complete,InBattle inBattle,DebugProfiler* debug = nullptr,
+                 std::span<const double> recoveryCredit = {}) {
         bool changed = false;
         {
             DebugMeasure timing(debug,"construction_auto_repairs");
@@ -249,6 +250,16 @@ struct Construction {
                 enqueueTileRepairs(tiles[index],index);
         }
         DebugMeasure projects(debug,"construction_projects");
+        std::vector<std::array<double,2>> coverage(queues.size());
+        for (const auto& tile : tiles) {
+            if (tile.owner < 0 || tile.owner >= int(queues.size()) || queues[tile.owner].empty()) continue;
+            const auto effective = [&](Building type) {
+                const auto& building = tile.buildings[type];
+                return building.area*building.health;
+            };
+            coverage[tile.owner][0] += effective(industry);
+            coverage[tile.owner][1] += effective(city)+effective(village)*.5;
+        }
         for (std::size_t country = 0; country < queues.size(); ++country) {
             auto& queue = queues[country];
             std::erase_if(queue,[&](const auto& project) {
@@ -257,7 +268,12 @@ struct Construction {
                     (project.repair && 1-tile.buildings[constructionSpecs[project.spec].building].health <= .001);
             });
             if (queue.empty() || hours <= 0) continue;
-            const double power = buildPower(tiles,int(country),countries[country]);
+            const auto& profile = countries[country];
+            const auto [industrial,settlement] = coverage[country];
+            const double power = std::max(0.,100*(industrial*profile.industryEfficiency+
+                settlement*profile.cityBuildMultiplier)+profile.buildTechBonus);
+            const double recoveryFloor = country < recoveryCredit.size() ?
+                std::min(0.,profile.budget)-recoveryCredit[country] : 0.;
             const int active = std::min(3,int(std::count_if(queue.begin(),queue.end(),[](const auto& p) { return !p.paused; })));
             int used = 0;
             for (auto& project : queue) {
@@ -269,9 +285,12 @@ struct Construction {
                 const auto building = constructionSpecs[project.spec].building;
                 auto& state = tile.buildings[building];
                 if (!project.paid) {
-                    if (countries[country].budget < project.money) {
+                    const bool essential = !project.repair && (building == farms || building == industry ||
+                        building == refinery || building == supplyDepot);
+                    const double available = profile.budget-(essential ? recoveryFloor : 0.);
+                    if (available < project.money) {
                         project.status = ConstructionStatus::waitingMoney;
-                        project.missingMoney = project.money-countries[country].budget;
+                        project.missingMoney = project.money-available;
                         continue;
                     }
                     countries[country].budget -= project.money;
