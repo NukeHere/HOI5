@@ -8250,14 +8250,17 @@ int main(int argc, char** argv) try {
         }
         struct Activity {
             int land{}, neutralLand{}, builds{}, newLandBuilds{}, industry{}, mines{}, newLandMines{},
-                trades{}, treaties{}, wars{}, alliances{};
+                trades{}, treaties{}, wars{}, alliances{}, daysWithoutInvestmentFunds{},
+                daysWithoutDevelopment{}, projectDaysWaitingResources{}, projectDaysWaitingMoney{};
             double volume{};
         };
         std::vector<Activity> activity(campaign.profiles.size());
         if (botCampaign)
             std::cout << "day,country,land,former_neutral_land,build_increases,former_neutral_builds,"
                 "industry_increases,extraction_increases,former_neutral_extraction,"
-                "trade_fills,trade_units,active_treaties,active_wars,active_alliances,budget\n";
+                "trade_fills,trade_units,active_treaties,active_wars,active_alliances,budget,"
+                "days_without_investment_funds,days_without_development,"
+                "project_days_waiting_resources,project_days_waiting_money\n";
         const auto botTerritory = [&] {
             return std::ranges::count(campaign.tiles,1,&Tile::owner);
         };
@@ -8267,6 +8270,21 @@ int main(int argc, char** argv) try {
         for (int hour = 1; hour <= days*24; ++hour) {
             if (!botCampaign && hour == 31*24) campaign.diplomacy.relation(0,1).war = true;
             campaign.advance(1,nullptr,hour%168 == 0 ? std::optional{hour/168} : std::nullopt);
+            if (botCampaign && hour%24 == 0)
+                for (const auto& bot : campaign.supplyBots) {
+                    if (std::ranges::none_of(campaign.tiles,[&](const auto& tile) {
+                        return tile.owner == bot.owner && !tile.water;
+                    })) continue;
+                    auto& row = activity[bot.owner];
+                    row.daysWithoutInvestmentFunds += campaign.botAvailableMoney(bot) <= 0.;
+                    bool developing = false;
+                    for (const auto& project : campaign.construction.queues[bot.owner]) {
+                        developing |= !project.repair && !project.paused;
+                        row.projectDaysWaitingResources += project.status == hoi5::ConstructionStatus::waitingResources;
+                        row.projectDaysWaitingMoney += project.status == hoi5::ConstructionStatus::waitingMoney;
+                    }
+                    row.daysWithoutDevelopment += !developing;
+                }
             if (botCampaign && hour%168 == 0)
                 for (const auto& fill : campaign.market.last.fills)
                     for (int country : {fill.buyer.value_or(-1),fill.seller.value_or(-1)})
@@ -8311,7 +8329,9 @@ int main(int argc, char** argv) try {
                     std::cout << hour/24 << ',' << country << ',' << row.land << ',' << row.neutralLand << ','
                         << row.builds << ',' << row.newLandBuilds << ',' << row.industry << ',' << row.mines << ','
                         << row.newLandMines << ',' << row.trades << ',' << row.volume << ',' << row.treaties << ','
-                        << row.wars << ',' << row.alliances << ',' << campaign.profiles[country].budget << '\n';
+                        << row.wars << ',' << row.alliances << ',' << campaign.profiles[country].budget << ','
+                        << row.daysWithoutInvestmentFunds << ',' << row.daysWithoutDevelopment << ','
+                        << row.projectDaysWaitingResources << ',' << row.projectDaysWaitingMoney << '\n';
                     row = {};
                 }
                 std::cout << std::flush;
