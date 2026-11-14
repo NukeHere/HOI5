@@ -6982,14 +6982,14 @@ int lobbyCapacity(int size) {
     return 12 + (size >= 150 ? 9 : size >= 100 ? 4 : size >= 75 ? 1 : 0);
 }
 
-std::vector<int> lobbySpawnTiles(int size,int countries,unsigned seed) {
+std::vector<int> lobbySpawnTiles(int size,unsigned seed) {
     hoi5::WorldGenerator terrain(size,seed);
     std::vector<int> land;
     for (int r = 0; r < size; ++r) for (int q = 0; q < size; ++q)
         if (terrain.generate(q,r).water <= .5) land.push_back(r*size+q);
     std::vector<int> spawns;
-    const int outer = std::min(12,countries);
-    const int capacity = outer+lobbyCapacity(size)-12;
+    constexpr int outer = 12;
+    const int capacity = lobbyCapacity(size);
     for (int i = 0; i < capacity; ++i) {
         const bool central = i == outer && (size == 75 || size >= 150);
         const int ringSize = i < outer ? outer : size >= 150 ? 8 : 4;
@@ -7015,6 +7015,24 @@ std::vector<int> lobbySpawnTiles(int size,int countries,unsigned seed) {
         if (best >= 0) spawns.push_back(best);
     }
     return spawns;
+}
+
+void resetLobbySlots(std::span<int> slots) {
+    const int outer = std::min(12,int(slots.size()));
+    for (int i = 0; i < int(slots.size()); ++i) slots[i] = i < outer ? i*12/outer : i;
+}
+
+void selectLobbySpawn(std::span<int> slots,int slot,int& selected) {
+    const auto occupant = std::ranges::find(slots,slot);
+    if (selected < 0) {
+        if (occupant != slots.end()) selected = int(occupant-slots.begin());
+    } else if (occupant == slots.begin()+selected) {
+        selected = -1;
+    } else if (occupant == slots.end()) {
+        slots[selected] = slot;
+    } else {
+        std::swap(slots[selected],*occupant);
+    }
 }
 
 World generateWorld(int size, int countries, unsigned seed, int difficulty,std::span<const int> spawnTiles = {}) {
@@ -10763,9 +10781,22 @@ int main(int argc, char** argv) try {
     }
     if (mode == "--check-map") {
         if (world.size != 50 || world.divisions.size() != 20 || world.status.size() != 7) return 1;
+        std::array<int,4> slots{};
+        resetLobbySlots(slots);
+        int selected = -1;
+        selectLobbySpawn(slots,3,selected);
+        if (selected != 1) return 1;
+        selectLobbySpawn(slots,6,selected);
+        if (slots != std::array{0,6,3,9} || selected != 1) return 1;
+        selectLobbySpawn(slots,11,selected);
+        if (slots[1] != 11) return 1;
+        selectLobbySpawn(slots,11,selected);
+        if (selected != -1) return 1;
+        selectLobbySpawn(slots,0,selected);
+        if (selected != 0) return 1;
         for (const auto [size,capacity] : std::array{
             std::pair{50,12},std::pair{75,13},std::pair{100,16},std::pair{150,21}}) {
-            auto spawns = lobbySpawnTiles(size,capacity,146591);
+            auto spawns = lobbySpawnTiles(size,146591);
             if (int(spawns.size()) != capacity || lobbyCapacity(size) != capacity) return 1;
             std::swap(spawns.front(),spawns.back());
             const auto generated = generateWorld(size,capacity,146591,1,spawns);
@@ -11418,9 +11449,9 @@ int main(int argc, char** argv) try {
     std::array<std::array<std::string,3>,maxLobbyCountries> lobbyNames{};
     std::array<int,maxLobbyCountries> lobbyTeams{}, lobbyLevels{}, lobbySlots{};
     lobbyLevels.fill(-1);
-    std::iota(lobbySlots.begin(),lobbySlots.end(),0);
-    int lobbySelected = 0, lobbyEdit = -1;
-    auto spawnTiles = lobbySpawnTiles(sizes[sizeChoice],countries,lobbySeed);
+    resetLobbySlots(std::span(lobbySlots).first(countries));
+    int lobbySelected = -1, lobbyEdit = -1;
+    auto spawnTiles = lobbySpawnTiles(sizes[sizeChoice],lobbySeed);
     const auto previewTerrain = [&] {
         const int map = sizes[sizeChoice];
         hoi5::WorldGenerator terrain(map,lobbySeed);
@@ -11985,15 +12016,14 @@ int main(int argc, char** argv) try {
                             if (dropdown == 1 && countries != choice+1) {
                                 countries = choice+1;
                                 lobbySelected = std::min(lobbySelected,countries-1);
-                                std::iota(lobbySlots.begin(),lobbySlots.end(),0);
-                                spawnTiles = lobbySpawnTiles(sizes[sizeChoice],countries,lobbySeed);
+                                resetLobbySlots(std::span(lobbySlots).first(countries));
                             }
                             if (dropdown == 2 && sizeChoice != choice) {
                                 sizeChoice = choice;
                                 countries = std::min(countries,lobbyCapacity(sizes[sizeChoice]));
                                 lobbySelected = std::min(lobbySelected,countries-1);
-                                std::iota(lobbySlots.begin(),lobbySlots.end(),0);
-                                spawnTiles = lobbySpawnTiles(sizes[sizeChoice],countries,lobbySeed);
+                                resetLobbySlots(std::span(lobbySlots).first(countries));
+                                spawnTiles = lobbySpawnTiles(sizes[sizeChoice],lobbySeed);
                                 lobbyLand = previewTerrain();
                             }
                         }
@@ -12003,14 +12033,18 @@ int main(int argc, char** argv) try {
                             if (setupField(field).contains(point)) dropdown=field;
                         if (lobbyButton(true).contains(point)) startGame();
                         if (lobbyButton(false).contains(point)) setup = false;
+                        int nearestSlot = -1;
+                        float nearestDistance = 196.f;
                         for (int slot = 0; slot < int(spawnTiles.size()); ++slot) {
                             const auto delta = point-spawnPoint(slot);
-                            if (delta.x*delta.x+delta.y*delta.y < 144) {
-                                const auto occupied = std::find(lobbySlots.begin(),lobbySlots.begin()+countries,slot);
-                                if (occupied != lobbySlots.begin()+countries) std::swap(*occupied,lobbySlots[lobbySelected]);
-                                else lobbySlots[lobbySelected] = slot;
-                                break;
+                            if (const float distance = delta.lengthSquared(); distance < nearestDistance) {
+                                nearestSlot = slot;
+                                nearestDistance = distance;
                             }
+                        }
+                        if (nearestSlot >= 0) {
+                            selectLobbySpawn(std::span(lobbySlots).first(countries),nearestSlot,lobbySelected);
+                            continue;
                         }
                         for (int i = 0; i < countries; ++i) {
                             for (int col = 0; col < 4; ++col) if (lobbyRow(i,col).contains(point)) {
@@ -12020,7 +12054,7 @@ int main(int argc, char** argv) try {
                                 if (col == 3) lobbyTeams[i] = (lobbyTeams[i]+1)%(countries+1);
                             }
                         }
-                        if (lobbyTeams[lobbySelected] > 0 && lobbyTeamField().contains(point)) lobbyEdit = 2;
+                        if (lobbySelected >= 0 && lobbyTeams[lobbySelected] > 0 && lobbyTeamField().contains(point)) lobbyEdit = 2;
                         if (lobbyEdit >= 0) {
                             const int i = lobbyEdit == 2 ? lobbyTeams[lobbySelected]-1 : lobbySelected;
                             std::string_view name = lobbyNames[i][lobbyEdit];
@@ -15911,7 +15945,7 @@ int main(int argc, char** argv) try {
                     const auto bytes = value.toUtf8();
                     return std::string(bytes.begin(),bytes.end());
                 };
-                if (const int team = lobbyTeams[lobbySelected]; team > 0) {
+                if (const int team = lobbySelected >= 0 ? lobbyTeams[lobbySelected] : 0; team > 0) {
                     label(window,font,"Название союза",lobbyTeamField().position-sf::Vector2f{0,25},16);
                     field(lobbyTeamField(),lobbyEdit == 2 ? utf8(lobbyText)+"|" :
                         lobbyNames[team-1][2].empty() ? "Союз "+std::to_string(team) : lobbyNames[team-1][2],lobbyEdit == 2);
