@@ -2619,8 +2619,14 @@ struct World {
         });
         tile.owner = country;
         tile.border = countryColor(country);
-        for (auto& bot : supplyBots)
+        for (auto& bot : supplyBots) {
             if (bot.owner == previous || bot.owner == country) bot.urgent = true;
+            if (country == 0 && bot.owner == previous && botDifficulty(previous) >= 2 &&
+                diplomacy.hostile(previous,0)) {
+                std::erase_if(bot.recentBreakthroughs,[&](const auto& loss) { return botHours-loss.second > 336; });
+                bot.recentBreakthroughs.emplace_back(index,botHours);
+            }
+        }
         frontOwnershipChanges.push_back(index);
         propagateWaterOwnership(index);
         const auto location = "("+std::to_string(index%size)+", "+std::to_string(index/size)+")";
@@ -3451,6 +3457,16 @@ struct World {
     bool resolveAirImpact(const hoi5::AirSalvo& salvo,bool& infrastructureChanged) {
         if (salvo.count <= 0 || !airTargetValid(salvo.owner,salvo.target,salvo.strategic)) return false;
         const auto impact = [&] {
+            if (salvo.owner == 0 && salvo.strategic) {
+                const int owner = tiles[salvo.target].owner;
+                const auto bot = std::ranges::find(supplyBots,owner,&hoi5::BotSupplyState::owner);
+                if (bot != supplyBots.end() && botDifficulty(owner) >= 2) {
+                    std::erase_if(bot->recentAirRaids,[&](const auto& raid) { return botHours-raid.second > 336; });
+                    if (std::ranges::none_of(bot->recentAirRaids,[&](const auto& raid) {
+                        return raid.first == salvo.target && botHours-raid.second < 6;
+                    })) bot->recentAirRaids.emplace_back(salvo.target,botHours);
+                }
+            }
             addAirVisual(salvo.owner,salvo.target,salvo.target,salvo.sourceAircraft,true);
             return true;
         };
@@ -4000,6 +4016,74 @@ struct World {
         for (int other = 0; other < int(profiles.size()); ++other)
             if (diplomacy.hostile(owner,other)) return true;
         return false;
+    }
+
+    bool botCapitalThreatened(int owner) const {
+        const int capital = capitals[owner];
+        return capital >= 0 && (tiles[capital].owner != owner ||
+            std::ranges::any_of(divisions,[&](const auto& unit) {
+                return unit.combat.strength > 0. && diplomacy.hostile(owner,unit.owner) &&
+                    hoi5::airHexDistance(capital,unit.r*size+unit.q,size) <= 2;
+            }));
+    }
+
+    int repeatedBotThreat(const std::vector<std::pair<int,int>>& events,int radius,int threshold) const {
+        int result = -1, strongest = threshold-1;
+        for (const auto& [tile,hour] : events) {
+            if (botHours-hour > 336) continue;
+            const int nearby = std::ranges::count_if(events,[&](const auto& event) {
+                return botHours-event.second <= 336 && hoi5::airHexDistance(tile,event.first,size) <= radius;
+            });
+            if (nearby >= threshold && nearby >= strongest) { result = tile; strongest = nearby; }
+        }
+        return result;
+    }
+
+    // Choose roles consistently for all members facing the same opponent.
+    std::pair<int,int> botCoalitionAssignments(int owner,int enemy) const {
+        if (enemy < 0 || enemy >= int(capitals.size()) || owner >= int(capitals.size()) ||
+            capitals[owner] < 0) return {owner,-1};
+        const int capital = capitals[enemy];
+        if (capital < 0) return {owner,-1};
+        int lead = owner, second = -1;
+        const auto distance = [&](int ally) {
+            return hoi5::airHexDistance(capitals[ally],capital,size);
+        };
+        for (int ally : allianceMembers(owner)) {
+            if (ally == owner || ally >= int(capitals.size()) || capitals[ally] < 0 ||
+                !diplomacy.hostile(ally,enemy)) continue;
+            if (std::pair{distance(ally),ally} < std::pair{distance(lead),lead}) {
+                second = lead;
+                lead = ally;
+            } else if (second < 0 || std::pair{distance(ally),ally} < std::pair{distance(second),second})
+                second = ally;
+        }
+        return {lead,second};
+    }
+
+    void supportBotCoalition(hoi5::BotSupplyState& bot) {
+        if (botDifficulty(bot.owner) < 2 || botHours < bot.nextCoalitionSupport) return;
+        const int owner = bot.owner;
+        for (int enemy = 0; enemy < int(capitals.size()); ++enemy) {
+            if (!diplomacy.hostile(owner,enemy)) continue;
+            const auto [lead,second] = botCoalitionAssignments(owner,enemy);
+            const bool merchant = bot.personality == hoi5::BotPersonality::merchant;
+            if (lead == owner || (second == owner && !merchant)) continue;
+            auto& donor = stockpiles[owner];
+            auto& receiver = stockpiles[lead];
+            const double reserve = hoi5::value(donor,"field_supplies");
+            const double amount = std::min({reserve-1000.,merchant ? 600. : 300.,
+                1000.-hoi5::value(receiver,"field_supplies"),
+                hoi5::freeStorage(capacities[lead],receiver,"field_supplies")});
+            if (amount <= 0.) continue;
+            donor["field_supplies"] -= amount;
+            receiver["field_supplies"] += amount;
+            bot.nextCoalitionSupport = botHours+(botDifficulty(owner) == 3 ? 72 : 168);
+            if (lead == 0)
+                news.batchNotice(diplomacy.day,0,"allied_supplies","Союзное снабжение",
+                    std::string(countryNames[owner])+" передаёт полевое снабжение.");
+            return;
+        }
     }
 
     static hoi5::BotMilitary botMilitaryVector(const Division& unit) {
@@ -5682,8 +5766,11 @@ struct World {
             }
         } else if (botAvailableMoney(bot) > 50000000.) {
             for (int ally = 0; ally < int(profiles.size()); ++ally) {
-                if (ally == owner || !diplomacy.allied(owner,ally) || profiles[ally].budget >= 0.) continue;
-                const double amount = std::min({5000000.,-profiles[ally].budget,botAvailableMoney(bot)*.05});
+                if (ally == owner || !diplomacy.allied(owner,ally)) continue;
+                const bool wartimeMerchant = botDifficulty(owner) == 3 && bot.personality == hoi5::BotPersonality::merchant &&
+                    enemy >= 0 && diplomacy.hostile(ally,enemy);
+                const double need = (wartimeMerchant ? 5000000. : 0.)-profiles[ally].budget;
+                const double amount = std::min({5000000.,need,botAvailableMoney(bot)*.05});
                 if (!diplomacy.reason(owner,ally,hoi5::foreignAid,profiles,amount).empty()) continue;
                 hoi5::BotTask aid{hoi5::BotTask::Kind::politics,botHours};
                 aid.targetCountry = ally;
@@ -6217,6 +6304,83 @@ struct World {
         return true;
     }
 
+    void planBotDiversion(hoi5::BotSupplyState& bot,std::set<int>& used,std::vector<BotMovement>& orders) {
+        if (botDifficulty(bot.owner) < 3) return;
+        auto& plan = bot.frontPlan;
+        const int owner = bot.owner;
+        const auto position = [&](const Division& unit) { return unit.r*size+unit.q; };
+        const auto distance = [&](int from,int to) { return hoi5::airHexDistance(from,to,size); };
+        const auto pressure = [&](int tile) {
+            return std::ranges::count_if(divisions,[&](const auto& unit) {
+                return unit.owner == 0 && unit.combat.strength > 0. && distance(position(unit),tile) <= 2;
+            });
+        };
+        const auto available = [&](int index) {
+            const auto& unit = divisions[index];
+            return !used.contains(index) && unit.owner == owner && unit.combat.strength > 0. &&
+                unit.battle < 0 && !unit.retreating && unit.organization >= unit.maxOrganization*.7;
+        };
+        if (plan.enemy >= 0) {
+            const bool spotted = pressure(plan.staging) > 0;
+            if (spotted || botHours >= plan.expires || !diplomacy.hostile(owner,plan.enemy) ||
+                plan.reserve < 0 || plan.reserve >= int(divisions.size()) || !available(plan.reserve) ||
+                tiles[plan.staging].owner != owner || botCapitalThreatened(owner)) {
+                if (spotted && diplomacy.hostile(owner,0))
+                    news.report(diplomacy.day,"diversion_detected","Обнаружен резерв противника",
+                        std::string(countryNames[owner])+" свернула подготовку обходного удара.",
+                        hoi5::NewsPriority::important,0);
+                plan = {};
+                return;
+            }
+            const auto& reserve = divisions[plan.reserve];
+            const bool ready = position(reserve) == plan.staging && reserve.route.empty();
+            const int draw = bot.personality == hoi5::BotPersonality::cautious ? 2 : 1;
+            if (ready && pressure(plan.diversion) >= plan.enemyAtDiversion+draw && pressure(plan.attackPost) <= 1) {
+                orders.push_back({plan.reserve,plan.attackPost});
+                used.insert(plan.reserve);
+                bot.offensiveFocus = plan.attackPost;
+                plan = {};
+                return;
+            }
+            used.insert(plan.reserve);
+            if (reserve.route.empty() && !ready) orders.push_back({plan.reserve,plan.staging});
+            return;
+        }
+        if (botHours < bot.nextFrontPlan || !diplomacy.hostile(owner,0) || botCapitalThreatened(owner)) return;
+        bot.nextFrontPlan = botHours+(bot.personality == hoi5::BotPersonality::opportunist ? 168 : 240);
+        if (bot.hexAssignments.size() < 5) return;
+        int diversion = bot.offensiveFocus;
+        if (diversion < 0 || tiles[diversion].owner != owner || pressure(diversion) == 0) return;
+        const auto nearbyPlayerLand = [&](int tile) {
+            return std::ranges::any_of(botGeography.adjacent(tile),[&](int neighbor) {
+                return tiles[neighbor].owner == 0 && !airDefenseWater(neighbor);
+            });
+        };
+        if (!nearbyPlayerLand(diversion)) return;
+        double best = 0.;
+        for (const auto& [post,quota] : bot.frontQuotas) {
+            if (tiles[post].owner != owner || distance(post,diversion) < 5 || pressure(post) > 1 ||
+                !nearbyPlayerLand(post)) continue;
+            for (int rear : botGeography.adjacent(post)) {
+                if (tiles[rear].owner != owner || tiles[rear].supply < .35 || pressure(rear) > 0 ||
+                    nearbyPlayerLand(rear)) continue;
+                for (const auto& [index,assignment] : bot.hexAssignments) {
+                    if (!available(index) || !divisions[index].route.empty() || assignment == diversion ||
+                        distance(position(divisions[index]),rear) > 8) continue;
+                    const auto route = divisionRoute(divisions[index],position(divisions[index]),rear);
+                    if (route.empty() && position(divisions[index]) != rear) continue;
+                    const double score = tiles[rear].supply+strategicLandValue(post)*.2+1./(1+route.size());
+                    if (score <= best) continue;
+                    best = score;
+                    plan = {0,diversion,rear,post,index,botHours+96,int(pressure(diversion))};
+                }
+            }
+        }
+        if (plan.reserve < 0) return;
+        used.insert(plan.reserve);
+        if (position(divisions[plan.reserve]) != plan.staging) orders.push_back({plan.reserve,plan.staging});
+    }
+
     std::set<int> planBotRecovery(hoi5::BotSupplyState& bot,bool atWar,std::vector<BotMovement>& orders) const {
         const int owner = bot.owner;
         const auto position = [&](int index) { return divisions[index].r*size+divisions[index].q; };
@@ -6494,6 +6658,14 @@ struct World {
             const double threshold = 1.05-.15*bot.aggression;
             if (package.empty() || attack <= std::max(8.,defense*threshold)) continue;
             double value = attack/std::max(8.,defense)+strategicLandValue(target)+futureSupply;
+            if (bot.frontPlan.diversion >= 0 && friendly.contains(bot.frontPlan.diversion)) value += 1.5;
+            if (botDifficulty(owner) >= 2 && owner < int(capitals.size()) && capitals[owner] >= 0) {
+                const auto [lead,second] = botCoalitionAssignments(owner,tiles[target].owner);
+                if (owner == second)
+                    value += std::min(3.,hoi5::airHexDistance(capitals[lead],target,size)*.10);
+                else if (lead != owner && defense > 0.) value -= 1.;
+                if (friendly.contains(bot.offensiveFocus)) value += .8;
+            }
             if (defense <= 0.) {
                 for (int neighbor : botGeography.adjacent(target)) {
                     if (!enemyLand(neighbor) || !enemyUnits(neighbor)) continue;
@@ -6530,7 +6702,37 @@ struct World {
             if (unit.owner == bot.owner && !unit.route.empty() && tiles[unit.route.back()].owner < 0)
                 used.insert(i);
         }
+        const int level = botDifficulty(bot.owner);
+        if (atWar && level >= 2) {
+            const int breakthrough = repeatedBotThreat(bot.recentBreakthroughs,4,level == 3 ? 2 : 3);
+            if (breakthrough >= 0) {
+                const auto& unitIndices = bot.hexAssignments;
+                int reserve = -1, site = -1;
+                double best = 0.;
+                for (const auto& [index,post] : unitIndices) {
+                    const auto& unit = divisions[index];
+                    if (used.contains(index) || unit.battle >= 0 || !unit.route.empty() || unit.retreating ||
+                        unit.owner != bot.owner || unit.combat.strength <= 0. ||
+                        unit.organization < unit.maxOrganization*.75) continue;
+                    for (int next : botGeography.adjacent(breakthrough)) {
+                        if (tiles[next].owner != bot.owner || airDefenseWater(next) ||
+                            tiles[next].supply < .30 || defended(next,bot.owner)) continue;
+                        const int origin = unit.r*size+unit.q;
+                        const int distance = hoi5::airHexDistance(origin,next,size);
+                        if (distance > 5 || (origin != next && divisionRoute(unit,origin,next).empty())) continue;
+                        const double score = unit.combat.strength*tiles[next].supply/(1+distance);
+                        if (score > best) { best = score; reserve = index; site = next; }
+                    }
+                }
+                if (reserve >= 0) {
+                    used.insert(reserve);
+                    if (divisions[reserve].r*size+divisions[reserve].q != site) orders.push_back({reserve,site});
+                }
+            }
+        }
+        if (atWar && bot.frontPlan.enemy >= 0) planBotDiversion(bot,used,orders);
         const auto pinned = assignBotFront(bot,atWar,used);
+        if (atWar && bot.frontPlan.enemy < 0) planBotDiversion(bot,used,orders);
         synchronizeBotArmies(bot,atWar);
         if (atWar) {
             const auto firstAttack = orders.size();
@@ -6570,6 +6772,8 @@ struct World {
         auto& budget = profiles[owner].budget;
         auto& stock = stockpiles[owner];
         const bool atWar = botAtWar(owner);
+        if (difficulty == 3 && atWar && budget >= 0. && !botCapitalThreatened(owner) &&
+            repeatedBotThreat(bot.recentBreakthroughs,4,2) < 0) return false;
         const double balance = taxedTreasury(owner).balance()+bot.tradeBalance;
         const int liveDivisions = std::ranges::count_if(divisions,[&](const auto& unit) {
             return unit.owner == owner && unit.combat.strength > 0.;
@@ -6631,6 +6835,7 @@ struct World {
                     budget -= payment;
                 }
                 botEmergencySupport(bot);
+                supportBotCoalition(bot);
                 {
                     hoi5::DebugMeasure regions(debug,"ai_regions");
                     bot.regions = botGeography.profiles(tiles,bot.owner,capitals[bot.owner],
@@ -6688,6 +6893,17 @@ struct World {
                 if (botAtWar(bot.owner)) {
                     hoi5::DebugMeasure aviation(debug,"ai_air_planning");
                     scheduleBotAir(bot,true);
+                    if (botDifficulty(bot.owner) >= 2 && botHours >= bot.nextAirDefenseMove) {
+                        const int raid = repeatedBotThreat(bot.recentAirRaids,3,botDifficulty(bot.owner) == 3 ? 2 : 3);
+                        if (raid >= 0 && tiles[raid].owner == bot.owner) {
+                            const auto& neighbors = botGeography.adjacent(raid);
+                            const auto base = std::ranges::find_if(neighbors,[&](int tile) {
+                                return tiles[tile].owner == bot.owner &&
+                                    tiles[tile].buildings[hoi5::airbase].area > 0.;
+                            });
+                            repositionBotAirDefense(bot,base == neighbors.end() ? raid : *base,true);
+                        }
+                    }
                 }
                 {
                     hoi5::DebugMeasure fronts(debug,"ai_front_planning");
@@ -8875,6 +9091,51 @@ int main(int argc, char** argv) try {
             if ((bot.emergencyDebt > 0.) != (level == 1)) return 1;
             if (level >= 2 && bot.intelligence <= .25) return 1;
         }
+        auto test = generateWorld(20,3,918273,3);
+        test.startBots(918273);
+        auto& bot = test.supplyBots.front();
+        const int owner = bot.owner, rival = 0, ally = owner == 1 ? 2 : 1;
+        test.diplomacy.relation(owner,rival).war = true;
+        test.diplomacy.relation(ally,rival).war = true;
+        test.diplomacy.relation(owner,ally).treaties.insert(hoi5::ForeignAction::alliance);
+        test.capitals = {0,1,399};
+        const auto roles = test.botCoalitionAssignments(owner,rival);
+        if (roles != std::pair{1,2} || roles != test.botCoalitionAssignments(ally,rival)) return 1;
+        test.botHours = 500;
+        if (test.repeatedBotThreat({{1,200},{2,480}},3,2) != 2 ||
+            test.repeatedBotThreat({{1,100},{2,480}},3,2) != -1) return 1;
+        const int controlled = int(std::ranges::find(test.divisions,owner,&Division::owner)-test.divisions.begin());
+        if (controlled == int(test.divisions.size())) return 1;
+        auto& reserve = test.divisions[controlled];
+        reserve.q = reserve.r = 0;
+        auto& player = test.divisions.front();
+        player.owner = 0;
+        player.q = player.r = 0;
+        test.tiles[0].owner = owner;
+        test.tiles[test.capitals[owner]].owner = owner;
+        bot.frontPlan = {0,1,0,2,controlled,600,0};
+        bot.nextFrontPlan = 700;
+        std::set<int> used;
+        std::vector<World::BotMovement> orders;
+        test.planBotDiversion(bot,used,orders);
+        if (bot.frontPlan.enemy != -1 || !orders.empty()) return 1;
+        for (auto& unit : test.divisions) if (unit.owner == 0) { unit.q = 10; unit.r = 0; }
+        reserve.organization = reserve.maxOrganization;
+        bot.personality = hoi5::BotPersonality::opportunist;
+        bot.frontPlan = {0,10,0,1,controlled,600,0};
+        test.planBotDiversion(bot,used,orders);
+        if (bot.frontPlan.enemy != -1 || orders.size() != 1 ||
+            orders.front().unit != controlled || orders.front().tile != 1 || bot.offensiveFocus != 1) return 1;
+        const int capital = test.capitals[owner];
+        test.tiles[capital].water = false;
+        test.tiles[capital].supply = 1.;
+        test.stockpiles[owner]["field_supplies"] = 0.;
+        test.profiles[owner].budget = 10e6;
+        if (test.botEmergencySupport(bot) || bot.nextEmergencyDay != 0) return 1;
+        bot.recentBreakthroughs = {{10,490},{11,500}};
+        const auto before = test.divisions.size();
+        if (!test.botEmergencySupport(bot) || bot.nextEmergencyDay != 30 ||
+            (test.divisions.size() == before && hoi5::value(test.stockpiles[owner],"field_supplies") <= 0.)) return 1;
         return 0;
     }
     if (mode == "--check-bot-course") {

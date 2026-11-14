@@ -86,6 +86,14 @@ struct BotSupplyState {
     double intelligence = .25;
     int nextEmergencyDay = 0;
     double emergencyDebt = 0.;
+    struct FrontPlan {
+        int enemy = -1, diversion = -1, staging = -1, attackPost = -1;
+        int reserve = -1, expires = 0, enemyAtDiversion = 0;
+    };
+    FrontPlan frontPlan;
+    int nextFrontPlan = 0, nextCoalitionSupport = 0;
+    std::vector<std::pair<int,int>> recentAirRaids;
+    std::vector<std::pair<int,int>> recentBreakthroughs;
     double nextWeekly{}, nextMonthly{};
     double nextRecruitment{};
     double nextAir{};
