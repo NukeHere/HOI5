@@ -19,7 +19,7 @@ inline std::string politicalDate(int day) {
 
 enum class ForeignAction { mission, embargo, trade, alliance, nonaggression, transit,
     revokeTransit, justify, cancelJustification, peace, war, breakTreaties, aid, loan, requestLoan,
-    requestExpedition, offerExpedition, callAlly, joinAlly };
+    requestExpedition, offerExpedition, callAlly, joinAlly, leaveAlliance };
 
 struct ForeignActionInfo {
     ForeignAction action;
@@ -41,7 +41,7 @@ inline constexpr ForeignActionInfo foreignActions[] = {
     {ForeignAction::cancelJustification,"Отменить подготовку войны",0,0,0,0,7,"Снижает дипломатическую напряжённость; потраченные ресурсы не возвращаются."},
     {ForeignAction::peace,"Предложить мир",0,0,0,0,7,"Прекращение войны по текущим границам с временным запретом новой войны."},
     {ForeignAction::war,"Объявить войну",0,20,-60,0,30,"Требует подготовленной цели войны, поддержки общества и политического капитала."},
-    {ForeignAction::breakTreaties,"Расторгнуть договоры",0,8,-20,-.2,7,"Прекращает союз и торговый договор; срок перемирия сохраняется."},
+    {ForeignAction::breakTreaties,"Расторгнуть договоры",0,8,-20,-.2,7,"Прекращает двусторонние договоры. Для выхода из союза есть отдельное решение."},
 };
 inline constexpr ForeignActionInfo foreignAid{ForeignAction::aid,"Безвозмездная помощь",0,0,5,0,30,
     "Выбранная сумма перечисляется сразу, без возврата."};
@@ -57,6 +57,8 @@ inline constexpr ForeignActionInfo foreignCallAlly{ForeignAction::callAlly,"Пр
     "При согласии союзник вступит в войну против выбранной страны."};
 inline constexpr ForeignActionInfo foreignJoinAlly{ForeignAction::joinAlly,"Вступить в войну союзника",0,0,0,0,0,
     "Вы вступите в войну против выбранной страны на стороне союзника."};
+inline constexpr ForeignActionInfo foreignLeaveAlliance{ForeignAction::leaveAlliance,"Выйти из союза",0,0,0,0,0,
+    "Союзные обязательства и право прохода по союзу прекращаются со всеми его участниками."};
 
 
 struct CountryPolitics {
@@ -278,6 +280,43 @@ struct Diplomacy {
         const auto& r = relation(guest,owner);
         return guest == owner || (!r.war && (r.treaties.contains(ForeignAction::alliance) || r.transitGrantors.contains(owner)));
     }
+    std::vector<int> allianceMembers(int country) const {
+        std::vector<int> members{country};
+        for (std::size_t i = 0; i < members.size(); ++i)
+            for (int other = 0; other < int(countries.size()); ++other)
+                if (allied(members[i],other) && std::ranges::find(members,other) == members.end())
+                    members.push_back(other);
+        return members;
+    }
+
+    std::string allianceProposalError(int actor,int target) const {
+        const auto first = allianceMembers(actor), second = allianceMembers(target);
+        if (std::ranges::find(first,target) != first.end()) return "Вы уже в одном союзе";
+        if (first.size() > 1 && second.size() > 1) return "Для вступления сначала выйдите из прежнего союза";
+        for (int a : first) for (int b : second)
+            if (hostile(a,b) || !relation(a,b).embargoes.empty())
+                return "С одним из участников союза действует война или эмбарго";
+        return {};
+    }
+
+    int allianceNameOwner(const std::vector<int>& members) const {
+        const int first = *std::ranges::min_element(members);
+        const auto existing = allianceNames.find(first);
+        return existing == allianceNames.end() ? first : existing->second;
+    }
+
+    std::map<int,int> allianceNames;
+
+    void removeAllianceMember(int actor) {
+        const auto members = allianceMembers(actor);
+        if (members.size() <= 1) return;
+        const int name = allianceNameOwner(members);
+        allianceNames.erase(*std::ranges::min_element(members));
+        auto remaining = members;
+        std::erase(remaining,actor);
+        for (int member : remaining) relation(actor,member).treaties.erase(ForeignAction::alliance);
+        if (remaining.size() > 1) allianceNames[*std::ranges::min_element(remaining)] = name;
+    }
     bool tradeAllowed(int a,int b) const { return a != b && !hostile(a,b) && relation(a,b).embargoes.empty(); }
     double ideologyDistance(int a,int b) const {
         const auto factions = [&](int country) {
@@ -333,6 +372,11 @@ struct Diplomacy {
         const auto& r = relation(actor,target);
         const auto key = std::pair{actor,target};
         const bool financial = action == A::aid || action == A::loan;
+        if (action == A::alliance)
+            if (const auto error = allianceProposalError(actor,target); !error.empty()) return error;
+        if (action == A::leaveAlliance && !allied(actor,target)) return "Требуется действующий союз";
+        if (action == A::breakTreaties && allied(actor,target) && r.treaties.size() == 1 && r.transitGrantors.empty())
+            return "Для прекращения союзных обязательств выберите выход из союза";
         if (action == A::callAlly || action == A::joinAlly) {
             if (!std::isfinite(amount) || amount < 0 || amount >= countries.size() || std::floor(amount) != amount ||
                 !canJoinAlly(action == A::callAlly ? actor : target,action == A::callAlly ? target : actor,int(amount)))
@@ -399,6 +443,7 @@ struct Diplomacy {
         if (offer) offers.push_back({actor,target,day+3,action,amount,
             action == A::callAlly ? relation(actor,int(amount)).warStarted : -1});
         else if (action == A::joinAlly) joinAllyWar(actor,int(amount));
+        else if (action == A::leaveAlliance) removeAllianceMember(actor);
         else {
             double opinion = info.opinion;
             if (action == A::aid) profiles[target].budget += amount;
@@ -437,7 +482,9 @@ struct Diplomacy {
                 r.grievance[target] = std::min(100.,r.grievance[target]+50);
                 r.fear[target] = std::min(100.,r.fear[target]+20);
             } else if (action == A::breakTreaties) {
+                const bool alliance = r.treaties.contains(A::alliance);
                 r.treaties.clear();
+                if (alliance) r.treaties.insert(A::alliance);
                 r.transitGrantors.clear();
                 state.reliability = std::max(0.,state.reliability-.04);
             }
@@ -550,6 +597,24 @@ struct Diplomacy {
             profiles[lender].budget -= offer.amount;
             profiles[borrower].budget += offer.amount;
             loans.push_back({lender,borrower,offer.amount,offer.amount,day+30});
+        } else if (action == A::alliance) {
+            if (!allianceProposalError(offer.actor,offer.target).empty()) {
+                record("Предложение союза отклонено",offer.actor,offer.target);
+                return false;
+            }
+            const auto first = allianceMembers(offer.actor), second = allianceMembers(offer.target);
+            const auto& existing = first.size() > 1 ? first : second;
+            const int representative = std::min(*std::ranges::min_element(first),*std::ranges::min_element(second));
+            const int name = existing.size() > 1 ? allianceNameOwner(existing) : representative;
+            allianceNames.erase(*std::ranges::min_element(existing));
+            allianceNames[representative] = name;
+            for (int a : first) for (int b : second) {
+                auto& ties = relation(a,b);
+                ties.treaties.insert(A::alliance);
+                ties.crisis = 0;
+                goals.erase({a,b});
+                goals.erase({b,a});
+            }
         } else if (action == A::transit) r.transitGrantors.insert(offer.target);
         else if (action != A::requestExpedition && action != A::offerExpedition) r.treaties.insert(action);
         if (action == A::trade || action == A::alliance || action == A::nonaggression || action == A::transit)
