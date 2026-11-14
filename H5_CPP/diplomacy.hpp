@@ -18,7 +18,8 @@ inline std::string politicalDate(int day) {
 }
 
 enum class ForeignAction { mission, embargo, trade, alliance, nonaggression, transit,
-    revokeTransit, justify, cancelJustification, peace, war, breakTreaties, aid, loan, requestLoan };
+    revokeTransit, justify, cancelJustification, peace, war, breakTreaties, aid, loan, requestLoan,
+    requestExpedition, offerExpedition };
 
 struct ForeignActionInfo {
     ForeignAction action;
@@ -48,6 +49,10 @@ inline constexpr ForeignActionInfo foreignLoan{ForeignAction::loan,"Предло
     "Деньги перечисляются после согласия; условия фиксируются при отправке предложения."};
 inline constexpr ForeignActionInfo foreignLoanRequest{ForeignAction::requestLoan,"Запросить кредит",0,0,0,0,60,
     "Запрос займа на 12 месяцев под 5% годовых."};
+inline constexpr ForeignActionInfo foreignExpeditionRequest{ForeignAction::requestExpedition,"Запросить экспедиционные войска",0,0,0,0,14,
+    "Союзник может выделить одну готовую дивизию. После прибытия она перейдёт под ваше командование."};
+inline constexpr ForeignActionInfo foreignExpeditionOffer{ForeignAction::offerExpedition,"Отправить экспедиционные войска",0,0,0,0,14,
+    "Предложить стране одну готовую дивизию. Требуется союз или разрешение на проход."};
 
 struct CountryPolitics {
     static constexpr std::array baselineSocialShares{.45,.25,.28,.02};
@@ -155,6 +160,8 @@ inline std::pair<std::string_view,std::string_view> offerNames(ForeignAction act
         case A::peace: return {"peace","мирный договор"};
         case A::loan: return {"loan","кредит"};
         case A::requestLoan: return {"loan_request","запрос кредита"};
+        case A::requestExpedition: return {"expedition_request","запрос экспедиционных войск"};
+        case A::offerExpedition: return {"expedition","экспедиционные войска"};
         default: return {};
     }
 }
@@ -298,6 +305,8 @@ struct Diplomacy {
         const auto& r = relation(actor,target);
         const auto key = std::pair{actor,target};
         const bool financial = action == A::aid || action == A::loan;
+        if (action == A::requestExpedition && !allied(actor,target)) return "Требуется союз";
+        if (action == A::offerExpedition && !canTransit(actor,target)) return "Требуется разрешение на проход";
         if ((financial || action == A::requestLoan) && (!std::isfinite(amount) || amount < 1000. || amount > 1e12))
             return "Введите сумму от 1 тыс. до 1 трлн";
         if (financial && profiles[actor].budget < amount) return "Недостаточно средств для выбранной суммы";
@@ -498,7 +507,7 @@ struct Diplomacy {
             profiles[borrower].budget += offer.amount;
             loans.push_back({lender,borrower,offer.amount,offer.amount,day+30});
         } else if (action == A::transit) r.transitGrantors.insert(offer.target);
-        else r.treaties.insert(action);
+        else if (action != A::requestExpedition && action != A::offerExpedition) r.treaties.insert(action);
         if (action == A::trade || action == A::alliance || action == A::nonaggression || action == A::transit)
             for (int country : {offer.actor,offer.target}) countries[country].reliability = std::min(1.,countries[country].reliability+.01);
         if (action == A::peace || action == A::alliance || action == A::nonaggression) {
