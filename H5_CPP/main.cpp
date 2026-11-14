@@ -870,13 +870,44 @@ struct World {
         const int site = capitals[recipient];
         if (site < 0 || site >= int(tiles.size()) || tiles[site].owner != recipient ||
             tiles[site].water || battles.contains(site)) return false;
-        for (auto& army : armies) {
-            if (army.owner != sender || (selectedArmy && army.id != selectedArmy)) continue;
-            const auto members = armyMembers(sender,army.id);
+        const bool automatic = request && selectedArmy == 0 &&
+            std::ranges::any_of(supplyBots,[&](const auto& bot) { return bot.owner == sender; });
+        const bool atWar = automatic && botAtWar(sender);
+        const int readyReserve = automatic ? std::ranges::count_if(divisions,[&](const auto& unit) {
+            return unit.owner == sender && unit.combat.strength > 0. && !unit.retreating &&
+                unit.organization >= unit.maxOrganization*.5;
+        }) : 0;
+        auto best = armies.end();
+        double bestScore = -1.;
+        std::vector<int> expedition;
+        for (auto army = armies.begin(); army != armies.end(); ++army) {
+            if (army->owner != sender || (selectedArmy && army->id != selectedArmy)) continue;
+            auto members = armyMembers(sender,army->id);
             if (members.empty() || members.size() > armyCapacity ||
                 std::ranges::any_of(members,[&](int index) { return divisions[index].expeditionSender >= 0; })) continue;
-            if (!dispatch) return true;
-            for (int index : members) {
+            double score = 0.;
+            int readyMembers = 0;
+            if (automatic) {
+                bool committed = false;
+                for (int index : members) {
+                    const auto& unit = divisions[index];
+                    committed |= unit.battle >= 0 || unit.retreating;
+                    readyMembers += unit.organization >= unit.maxOrganization*.5;
+                    score += unit.combat.strength*std::clamp(
+                        unit.organization/std::max(1.,unit.maxOrganization),0.,1.);
+                }
+                if (committed || readyMembers*2 < int(members.size()) ||
+                    readyReserve-readyMembers < (atWar ? 8 : 3) ||
+                    (atWar && army->executing && !army->front.empty())) continue;
+            }
+            if (score <= bestScore) continue;
+            best = army;
+            bestScore = score;
+            expedition = std::move(members);
+        }
+        if (best == armies.end()) return false;
+        if (dispatch) {
+            for (int index : expedition) {
                 auto& unit = divisions[index];
                 detachDivisionFromBattle(index);
                 unit.expeditionSender = sender;
@@ -890,15 +921,14 @@ struct World {
                 unit.attackRoute = unit.retreating = false;
                 unit.progress = unit.visualProgress = 0.;
             }
-            army.owner = recipient;
-            army.front.clear();
-            army.offensive.clear();
-            army.executing = army.automaticLine = false;
-            army.borderOwner = -2;
-            army.reviewHours = 0;
-            return true;
+            best->owner = recipient;
+            best->front.clear();
+            best->offensive.clear();
+            best->executing = best->automaticLine = false;
+            best->borderOwner = -2;
+            best->reviewHours = 0;
         }
-        return false;
+        return true;
     }
 
     void reportForeignResponse(const hoi5::ForeignOffer& offer,bool accepted,int selectedArmy = 0) {
@@ -9867,6 +9897,21 @@ int main(int argc, char** argv) try {
             unit.speed = 1.35;
             unit.armyId = 1;
             expedition.armies.push_back({1,1,"Expedition"});
+            {
+                auto donor = expedition;
+                donor.startBots(7);
+                donor.armies.push_back({2,1,"Reserve"});
+                donor.divisions.front().organization = 10.;
+                for (int i = 0; i < 5; ++i) {
+                    auto ready = donor.divisions.front();
+                    ready.organization = 100.;
+                    ready.armyId = i < 2 ? 2 : 0;
+                    donor.divisions.push_back(std::move(ready));
+                }
+                const hoi5::ForeignOffer request{0,1,0,hoi5::ForeignAction::requestExpedition};
+                if (!donor.deployExpedition(request,true) || donor.armies[0].owner != 1 ||
+                    donor.armies[1].owner != 0 || donor.deployExpedition(request,false)) return 1;
+            }
             if (!expedition.performForeignAction(0,1,hoi5::foreignExpeditionRequest).empty() ||
                 !expedition.answerForeignOffer(0,1,true) || unit.owner != 0 ||
                 unit.expeditionSender != 1 || unit.q != 0 || expedition.armies.front().owner != 0) return 1;
