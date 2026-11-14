@@ -5389,9 +5389,12 @@ struct World {
         const double limit = hoi5::Market::monthlyCapacity(tiles,profiles)[owner];
         const double price = std::max(1.,market.unitPrice(owner,task.resource,true));
         const double purchaseBudget = money*.15;
+        // Contracts are monthly rates. The construction task requests physical stock for the next clearing.
+        const double requested = buy && task.constructionPurchase ?
+            task.amount/hoi5::Market::weeklyFraction : task.amount;
         if (buy && task.constructionPurchase) {
-            const double target = std::min({task.amount,purchaseBudget/price,limit,
-                hoi5::freeStorage(capacities[owner],stockpiles[owner],task.resource)});
+            const double target = std::min({requested,purchaseBudget/price,limit,
+                hoi5::freeStorage(capacities[owner],stockpiles[owner],task.resource)/hoi5::Market::weeklyFraction});
             double otherVolume = 0., otherCost = 0.;
             const auto contracts = market.contracts;
             for (const auto& order : contracts)
@@ -5420,10 +5423,11 @@ struct World {
         for (const auto& order : market.contracts)
             if (order.country == owner && order.buy && order.resource != task.resource)
                 committed += order.amount*market.unitPrice(owner,order.resource,true);
-        double amount = std::max(0.,task.amount);
+        double amount = std::max(0.,requested);
         if (buy) amount = std::min({amount,
             std::max(0.,purchaseBudget-committed)/price,
-            hoi5::freeStorage(capacities[owner],stockpiles[owner],task.resource)});
+            hoi5::freeStorage(capacities[owner],stockpiles[owner],task.resource)/
+                (task.constructionPurchase ? hoi5::Market::weeklyFraction : 1.)});
         else amount = std::min(amount,hoi5::value(stockpiles[owner],task.resource)*.15);
         const double delta = amount-market.contractAmount(owner,task.resource,buy);
         if (std::abs(delta) < std::max(1.,amount*.1)) return true;
@@ -8872,7 +8876,7 @@ int main(int argc, char** argv) try {
         test.capacities[owner][hoi5::storageBucket("steel")] = 1e15;
         test.market.contracts = {{owner,"coal",true,limit-10.},{owner,"food",true,10.}};
         if (steel == bot.tasks.end() || !test.applyBotTrade(bot,*steel) ||
-            test.market.contractAmount(owner,"steel",true) < 54.999 ||
+            std::abs(test.market.contractAmount(owner,"steel",true)*hoi5::Market::weeklyFraction-55.) > 1e-6 ||
             test.market.contractAmount(owner,"food",true) != 10.) return 1;
         return specialized && test.tiles[region->tiles.front()].industries ==
             std::vector<std::string_view>{"machinery","consumer_goods"} ? 0 : 1;
