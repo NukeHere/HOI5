@@ -3820,13 +3820,13 @@ struct World {
             const auto& relation = diplomacy.relation(owner,target);
             const double enemyPower = power(target,ownPower);
             if (diplomacy.goals.contains({owner,target}) && bot.course == hoi5::BotCourseChoice{Course::warPreparation,target}
-                && ownPower >= enemyPower*.75) {
+                && ownPower >= enemyPower*.75 && botCanChallengeCoalition(bot,target)) {
                 set(Course::warPreparation,75.,target);
                 continue;
             }
             if (enemyPower > ownPower*1.1 || relation.crisis >= 25.)
                 set(Course::deterrence,60.+relation.crisis*.2,target);
-            else if (ownPower > enemyPower*(1.15-.25*bot.aggression) &&
+            else if (ownPower > enemyPower*(1.15-.25*bot.aggression) && botCanChallengeCoalition(bot,target) &&
                 !relation.treaties.contains(hoi5::ForeignAction::alliance) &&
                 !relation.treaties.contains(hoi5::ForeignAction::nonaggression)) {
                 const double score = 48.+bot.aggression*16.+std::min(10.,(ownPower/std::max(1.,enemyPower)-1.15)*8.);
@@ -5127,7 +5127,27 @@ struct World {
         return false;
     }
 
+    bool botCanChallengeCoalition(const hoi5::BotSupplyState& bot,int target) const {
+        if (botDifficulty(bot.owner) < 2) return true;
+        const auto estimatedAttack = [&](int country) {
+            const auto report = bot.militaryReports.find(country);
+            if (report == bot.militaryReports.end()) return 0.;
+            const auto& attack = report->second.divisions[hoi5::attack];
+            return botHours-attack.observedHour <= 720 ? attack.value : 0.;
+        };
+        const double own = estimatedAttack(bot.owner);
+        const double opponent = estimatedAttack(target);
+        if (own <= 0. || opponent <= 0.) return true;
+        double opposingPower = opponent;
+        for (int ally : allianceMembers(target)) {
+            if (ally == target || ally == bot.owner || diplomacy.allied(bot.owner,ally)) continue;
+            opposingPower += .5*estimatedAttack(ally);
+        }
+        return own >= opposingPower*.85;
+    }
+
     bool botWarPreparationReady(const hoi5::BotSupplyState& bot,int target) const {
+        if (!botCanChallengeCoalition(bot,target)) return false;
         const int owner = bot.owner;
         std::vector<int> front;
         for (int tile = 0; tile < int(tiles.size()); ++tile) {
@@ -8516,6 +8536,18 @@ int main(int argc, char** argv) try {
             peaceful.selectBotCourse(first,equal);
             peaceful.selectBotCourse(second,equal);
             if (first.course.first != Course::development || second.course.first != Course::warPreparation) return 1;
+            peaceful.profiles.resize(3);
+            peaceful.diplomacy.countries.resize(3);
+            for (const auto [country,power] : std::array{std::pair{0,80.},std::pair{1,100.},std::pair{2,100.}}) {
+                auto& attack = first.militaryReports[country].divisions[hoi5::attack];
+                attack.value = power;
+                attack.observedHour = peaceful.botHours;
+            }
+            if (!peaceful.botCanChallengeCoalition(first,0)) return 1;
+            peaceful.diplomacy.relation(0,2).treaties.insert(hoi5::ForeignAction::alliance);
+            if (peaceful.botCanChallengeCoalition(first,0) || peaceful.botWarPreparationReady(first,0)) return 1;
+            peaceful.botHours += 721;
+            if (!peaceful.botCanChallengeCoalition(first,0)) return 1;
         }
 
         bot.nextWeekly = bot.nextMonthly = 2000.;
