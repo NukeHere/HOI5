@@ -1030,6 +1030,51 @@ struct World {
                 offer.action == hoi5::ForeignAction::peace ? P::critical : P::important);
     }
 
+    bool returnExpedition(int recipient,int sender) {
+        if (sender < 0 || sender >= int(capitals.size())) return false;
+        int site = capitals[sender];
+        const auto safe = [&](int tile) {
+            return tile >= 0 && tile < int(tiles.size()) && tiles[tile].owner == sender &&
+                !tiles[tile].water && !battles.contains(tile) && !defended(tile,sender);
+        };
+        if (!safe(site)) {
+            site = -1;
+            for (int tile = 0; tile < int(tiles.size()); ++tile)
+                if (safe(tile) && (site < 0 || tiles[tile].supply > tiles[site].supply)) site = tile;
+        }
+        if (site < 0) return false;
+        std::set<int> affectedArmies;
+        bool returned = false;
+        for (int index = 0; index < int(divisions.size()); ++index) {
+            auto& unit = divisions[index];
+            if (unit.owner != recipient || unit.expeditionSender != sender || unit.combat.strength <= 0.) continue;
+            detachDivisionFromBattle(index);
+            if (unit.armyId > 0) affectedArmies.insert(unit.armyId);
+            unit.owner = sender;
+            unit.expeditionSender = -1;
+            unit.armyId = 0;
+            unit.q = site%size;
+            unit.r = site/size;
+            unit.route.clear();
+            unit.postBattleRoute.clear();
+            unit.assignedFrontPost = -1;
+            unit.manualFrontHours = 0;
+            unit.attackRoute = unit.retreating = false;
+            unit.progress = unit.visualProgress = 0.;
+            returned = true;
+        }
+        if (returned) {
+            std::erase_if(armies,[&](const Army& army) {
+                return army.owner == recipient && affectedArmies.contains(army.id) &&
+                    armyMembers(recipient,army.id).empty();
+            });
+            for (auto& bot : supplyBots)
+                if (bot.owner == sender || bot.owner == recipient) bot.urgent = true;
+            diplomacy.record("Экспедиционные войска возвращены",recipient,sender);
+        }
+        return returned;
+    }
+
     const hoi5::ForeignOffer* incomingOffer(int actor,int target,
                                           std::optional<hoi5::ForeignAction> action = {}) const {
         const auto it = std::ranges::find_if(diplomacy.offers,[&](const auto& offer) {
@@ -10198,6 +10243,11 @@ int main(int argc, char** argv) try {
             if (!expedition.performForeignAction(0,1,hoi5::foreignExpeditionRequest).empty() ||
                 !expedition.answerForeignOffer(0,1,true) || unit.owner != 0 ||
                 unit.expeditionSender != 1 || unit.q != 0 || expedition.armies.front().owner != 0) return 1;
+            expedition.tiles[1].water = true;
+            unit.route = {2};
+            if (!expedition.returnExpedition(0,1) || unit.owner != 1 || unit.expeditionSender != -1 ||
+                unit.armyId != 0 || !unit.route.empty() || unit.q != 1 || unit.r != 1 || !expedition.armies.empty() ||
+                expedition.returnExpedition(0,1)) return 1;
         }
         {
             auto surrender = test;
@@ -11412,7 +11462,7 @@ int main(int argc, char** argv) try {
     };
     const auto lobbyTeamField = [&] { const auto b = lobbyBounds(); return sf::FloatRect{{b.position.x,b.position.y+261},{205,34}}; };
     const auto lobbyButton = [&](bool start) { const auto b = lobbyBounds(); return sf::FloatRect{
-        {b.position.x,b.position.y+b.size.y-(start ? 76.f : 36.f)},{205,32}}; };
+        {std::max(8.f,b.position.x-12.f),b.position.y+(start ? 319.f : 359.f)},{205,32}}; };
     const auto commitLobbyText = [&] {
         if (lobbyEdit < 0) return;
         const auto value = lobbyText.toUtf8();
@@ -15450,6 +15500,13 @@ int main(int argc, char** argv) try {
                         add("Налоги",[&] { openCountryDetail(CountryDetail::taxes); },{224,234,244},"Н");
                         add("Программы поддержки групп",[&] { openCountryDetail(CountryDetail::programs); },{224,234,244},"П");
                     } else if (countryTab == CountryTab::actions) {
+                        if (std::ranges::any_of(world.divisions,[&](const auto& unit) {
+                            return unit.owner == 0 && unit.expeditionSender == country && unit.combat.strength > 0.;
+                        })) add("Вернуть экспедиционные войска",[&,country] {
+                            foreignMessage = world.returnExpedition(0,country) ?
+                                "Экспедиционные войска возвращены" : "У отправителя нет безопасного гекса для возврата";
+                            std::erase_if(selectedDivisions,[&](int index) { return world.divisions[index].owner != 0; });
+                        },{224,234,244},"›","Все уцелевшие переданные дивизии вернутся под командование отправителя.");
                         if (world.puppetMasters.contains(country) && world.puppetMasters.at(country) == 0) {
                             constexpr std::array orders{"Изъять 25% складских запасов","Передать одну дивизию",
                                 "Передать одно авиакрыло"};
