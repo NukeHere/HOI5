@@ -4163,7 +4163,7 @@ struct World {
                 } else if (groundCombatRandom.uniform() < .08) {
                     civilWarWarnings[key] = diplomacy.day+7;
                     news.report(diplomacy.day,"civil_war_risk","Угроза гражданской войны",
-                        std::string(countryNames[owner])+" может потерять контроль над одним из регионов. До выступления осталась неделя.",
+                        std::string(countryNames[owner])+" может потерять контроль над регионом. До выступления осталась неделя.",
                         hoi5::NewsPriority::critical,owner);
                 }
             }
@@ -5391,12 +5391,12 @@ struct World {
                 building = type;
                 sector = specialization;
             };
-            const auto storageGap = [&](std::string_view bucket) {
-                const double full = hoi5::value(capacities[owner],bucket);
-                const double free = hoi5::freeStorage(capacities[owner],stockpiles[owner],bucket);
+            const auto storageGap = [&](std::string_view resource) {
+                const double full = hoi5::value(capacities[owner],hoi5::storageBucket(resource));
+                const double free = hoi5::freeStorage(capacities[owner],stockpiles[owner],resource);
                 return full > 0. ? std::max(0.,.30-free/full) : 0.;
             };
-            const double finishedGap = storageGap("finished"), fuelGap = storageGap("fuel");
+            const double finishedGap = storageGap("construction_goods"), fuelGap = storageGap("refined_fuel");
             for (const auto& region : bot.regions) for (int tile : region.tiles) {
                 const auto& cell = tiles[tile];
                 if (cell.owner != owner || cell.water) continue;
