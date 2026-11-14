@@ -40,6 +40,7 @@ struct BotTask {
     int targetCountry = -1;
     int politicalAction = -1;
     bool exactSite = false;
+    bool constructionPurchase = false;
 
     bool pending() const { return status == BotTaskStatus::planned || status == BotTaskStatus::blocked; }
     bool active() const { return pending() || status == BotTaskStatus::executing ||

@@ -4050,6 +4050,7 @@ struct World {
         const auto duplicate = [&](const hoi5::BotTask& existing) {
             return existing.active() && existing.kind == task.kind && existing.tile == task.tile &&
                 existing.resource == task.resource && existing.amount == task.amount &&
+                existing.constructionPurchase == task.constructionPurchase &&
                 existing.defenseType == task.defenseType && existing.trainingType == task.trainingType &&
                 existing.buildingSpec == task.buildingSpec && existing.sector == task.sector &&
                 existing.targetCountry == task.targetCountry && existing.politicalAction == task.politicalAction;
@@ -4828,8 +4829,13 @@ struct World {
         }
         std::ranges::sort(trades,[](const auto& a,const auto& b) { return a.score > b.score; });
         for (std::size_t i = 0; i < std::min<std::size_t>(6,trades.size()); ++i)
-            addBotTask(bot,{trades[i].buy ? hoi5::BotTask::Kind::buy : hoi5::BotTask::Kind::sell,
-                botHours,-1,trades[i].key,trades[i].amount});
+        {
+            const auto& trade = trades[i];
+            hoi5::BotTask task{trade.buy ? hoi5::BotTask::Kind::buy : hoi5::BotTask::Kind::sell,
+                botHours,-1,trade.key,trade.amount};
+            task.constructionPurchase = trade.buy && hoi5::value(constructionDemand,trade.key) > 0.;
+            addBotTask(bot,task);
+        }
         if (std::ranges::count(construction.queues[owner],false,&hoi5::ConstructionProject::repair) >= 4 ||
             botAvailableMoney(bot) <= 0 || bot.regions.empty()) return;
 
@@ -5380,18 +5386,47 @@ struct World {
         const int owner = bot.owner;
         const bool buy = task.kind == hoi5::BotTask::Kind::buy;
         const double money = botAvailableMoney(bot);
+        const double limit = hoi5::Market::monthlyCapacity(tiles,profiles)[owner];
+        const double price = std::max(1.,market.unitPrice(owner,task.resource,true));
+        const double purchaseBudget = money*.15;
+        if (buy && task.constructionPurchase) {
+            const double target = std::min({task.amount,purchaseBudget/price,limit,
+                hoi5::freeStorage(capacities[owner],stockpiles[owner],task.resource)});
+            double otherVolume = 0., otherCost = 0.;
+            const auto contracts = market.contracts;
+            for (const auto& order : contracts)
+                if (order.country == owner && order.buy && order.resource != task.resource) {
+                    otherVolume += order.amount;
+                    otherCost += order.amount*market.unitPrice(owner,order.resource,true);
+                }
+            for (const auto& order : contracts) {
+                if (order.country != owner || !order.buy || order.resource == task.resource ||
+                    order.resource == "food" || order.resource == "refined_fuel" ||
+                    std::ranges::any_of(construction.queues[owner],[&](const auto& project) {
+                        return !project.paused && hoi5::value(project.resources,order.resource) >
+                            hoi5::value(project.resourcesSpent,order.resource);
+                    })) continue;
+                const double unitPrice = market.unitPrice(owner,order.resource,true);
+                const double reduction = std::min(order.amount,std::max({0.,otherVolume+target-limit,
+                    (otherCost+target*price-purchaseBudget)/unitPrice}));
+                if (reduction > 0. && market.changeContract(owner,order.resource,true,-reduction,limit)) {
+                    otherVolume -= reduction;
+                    otherCost -= reduction*unitPrice;
+                    botBalanceRefresh.insert(owner);
+                }
+            }
+        }
         double committed = 0.;
         for (const auto& order : market.contracts)
             if (order.country == owner && order.buy && order.resource != task.resource)
                 committed += order.amount*market.unitPrice(owner,order.resource,true);
         double amount = std::max(0.,task.amount);
         if (buy) amount = std::min({amount,
-            std::max(0.,money*.15-committed)/std::max(1.,market.unitPrice(owner,task.resource,true)),
+            std::max(0.,purchaseBudget-committed)/price,
             hoi5::freeStorage(capacities[owner],stockpiles[owner],task.resource)});
         else amount = std::min(amount,hoi5::value(stockpiles[owner],task.resource)*.15);
         const double delta = amount-market.contractAmount(owner,task.resource,buy);
         if (std::abs(delta) < std::max(1.,amount*.1)) return true;
-        const double limit = hoi5::Market::monthlyCapacity(tiles,profiles)[owner];
         if (!market.changeContract(owner,task.resource,buy,delta,limit)) return false;
         botBalanceRefresh.insert(owner);
         return true;
@@ -8830,6 +8865,15 @@ int main(int argc, char** argv) try {
             std::cerr << "Construction procurement failed to reserve steel and order the remaining 55 units\n";
             return 1;
         }
+        const auto steel = std::ranges::find_if(bot.tasks,[](const auto& task) {
+            return task.constructionPurchase && task.resource == "steel";
+        });
+        const double limit = hoi5::Market::monthlyCapacity(test.tiles,test.profiles)[owner];
+        test.capacities[owner][hoi5::storageBucket("steel")] = 1e15;
+        test.market.contracts = {{owner,"coal",true,limit-10.},{owner,"food",true,10.}};
+        if (steel == bot.tasks.end() || !test.applyBotTrade(bot,*steel) ||
+            test.market.contractAmount(owner,"steel",true) < 54.999 ||
+            test.market.contractAmount(owner,"food",true) != 10.) return 1;
         return specialized && test.tiles[region->tiles.front()].industries ==
             std::vector<std::string_view>{"machinery","consumer_goods"} ? 0 : 1;
     }
