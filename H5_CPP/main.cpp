@@ -194,7 +194,6 @@ struct Tile {
 
 struct Division {
     int owner{};
-    int expeditionRecipient = -1;
     int expeditionSender = -1;
     int armyId{};
     int manualFrontHours{};
@@ -534,7 +533,6 @@ struct World {
     }
 
     bool orderMove(Division& unit, int destination,bool append = false) const {
-        if (unit.expeditionRecipient >= 0) return false;
         if (unit.battle >= 0 || unit.retreating || unit.combat.strength <= 0 || unit.organization < unit.maxOrganization * .30) return false;
         if (destination < 0 || destination >= static_cast<int>(tiles.size())) return false;
         const bool extend = append && !unit.route.empty();
@@ -790,6 +788,9 @@ struct World {
             (!std::ranges::any_of(tiles,[&](const auto& tile) { return tile.owner == actor; }) ||
              !std::ranges::any_of(tiles,[&](const auto& tile) { return tile.owner == target; })))
             return "Государство не контролирует территорию";
+        if (action.action == hoi5::ForeignAction::offerExpedition &&
+            !deployExpedition({actor,target,diplomacy.day+3,action.action,amount},false))
+            return "Выберите доступную армию до 20 дивизий";
         const auto error = diplomacy.act(actor,target,action,profiles,amount,bot);
         if (!error.empty()) return error;
         using A = hoi5::ForeignAction;
@@ -853,31 +854,64 @@ struct World {
         return {};
     }
 
-    bool deployExpedition(const hoi5::ForeignOffer& offer,bool dispatch) {
+    bool deployExpedition(const hoi5::ForeignOffer& offer,bool dispatch,int selectedArmy = 0) {
         using A = hoi5::ForeignAction;
-        if (offer.action != A::requestExpedition && offer.action != A::offerExpedition) return true;
-        const int sender = offer.action == A::offerExpedition ? offer.actor : offer.target;
-        const int recipient = offer.action == A::offerExpedition ? offer.target : offer.actor;
-        if (recipient >= int(capitals.size()) || !diplomacy.canTransit(sender,recipient) ||
-            (offer.action == A::requestExpedition && !diplomacy.allied(sender,recipient))) return false;
+        const bool request = offer.action == A::requestExpedition;
+        if (!request && offer.action != A::offerExpedition) return true;
+        const int sender = request ? offer.target : offer.actor;
+        const int recipient = request ? offer.actor : offer.target;
+        if (!request) {
+            if (!std::isfinite(offer.amount) || offer.amount < 1. ||
+                offer.amount > std::numeric_limits<int>::max() || std::floor(offer.amount) != offer.amount) return false;
+            selectedArmy = int(offer.amount);
+        }
+        if (recipient >= int(capitals.size()) || diplomacy.hostile(sender,recipient) ||
+            (request && !diplomacy.allied(sender,recipient))) return false;
         const int site = capitals[recipient];
-        if (site < 0 || site >= int(tiles.size()) || tiles[site].owner != recipient || tiles[site].water) return false;
-        for (auto& unit : divisions) {
-            if (unit.owner != sender || unit.expeditionRecipient >= 0 || unit.expeditionSender >= 0 || unit.armyId != 0 ||
-                !unit.route.empty() || unit.battle >= 0 || unit.retreating || unit.combat.strength <= 0. ||
-                unit.organization < unit.maxOrganization*.30) continue;
-            const int origin = unit.r*size+unit.q;
-            if (origin != site && divisionRoute(unit,origin,site).empty()) continue;
+        if (site < 0 || site >= int(tiles.size()) || tiles[site].owner != recipient ||
+            tiles[site].water || battles.contains(site)) return false;
+        for (auto& army : armies) {
+            if (army.owner != sender || (selectedArmy && army.id != selectedArmy)) continue;
+            const auto members = armyMembers(sender,army.id);
+            if (members.empty() || members.size() > armyCapacity ||
+                std::ranges::any_of(members,[&](int index) { return divisions[index].expeditionSender >= 0; })) continue;
             if (!dispatch) return true;
-            if (!orderMove(unit,site)) continue;
-            unit.expeditionRecipient = recipient;
+            for (int index : members) {
+                auto& unit = divisions[index];
+                detachDivisionFromBattle(index);
+                unit.expeditionSender = sender;
+                unit.owner = recipient;
+                unit.q = site%size;
+                unit.r = site/size;
+                unit.route.clear();
+                unit.postBattleRoute.clear();
+                unit.assignedFrontPost = -1;
+                unit.manualFrontHours = 0;
+                unit.attackRoute = unit.retreating = false;
+                unit.progress = unit.visualProgress = 0.;
+            }
+            army.owner = recipient;
+            army.front.clear();
+            army.offensive.clear();
+            army.executing = army.automaticLine = false;
+            army.borderOwner = -2;
+            army.reviewHours = 0;
             return true;
         }
         return false;
     }
 
-    void reportForeignResponse(const hoi5::ForeignOffer& offer,bool accepted) {
-        if (accepted) accepted = deployExpedition(offer,true);
+    void reportForeignResponse(const hoi5::ForeignOffer& offer,bool accepted,int selectedArmy = 0) {
+        if (accepted) accepted = deployExpedition(offer,true,selectedArmy);
+        if (offer.action == hoi5::ForeignAction::requestExpedition) {
+            const auto bot = std::ranges::find(supplyBots,offer.actor,&hoi5::BotSupplyState::owner);
+            if (bot != supplyBots.end())
+                for (auto& task : bot->tasks)
+                    if (task.kind == hoi5::BotTask::Kind::politics &&
+                        task.status == hoi5::BotTaskStatus::waitingOffer && task.targetCountry == offer.target &&
+                        task.politicalAction == int(offer.action))
+                        task.status = accepted ? hoi5::BotTaskStatus::succeeded : hoi5::BotTaskStatus::failed;
+        }
         const auto [key,label] = hoi5::offerNames(offer.action);
         const std::string source(countryNames[offer.actor]), target(countryNames[offer.target]), name(label);
         using P = hoi5::NewsPriority;
@@ -901,7 +935,7 @@ struct World {
         return it == diplomacy.offers.end() ? nullptr : &*it;
     }
 
-    bool answerForeignOffer(int actor,int target,bool accept,std::optional<hoi5::ForeignAction> action = {}) {
+    bool answerForeignOffer(int actor,int target,bool accept,std::optional<hoi5::ForeignAction> action = {},int selectedArmy = 0) {
         const auto* incoming = incomingOffer(actor,target,action);
         if (!incoming) return false;
         const auto offer = *incoming;
@@ -909,8 +943,8 @@ struct World {
         if (offer.action == hoi5::ForeignAction::loan)
             accept = accept && std::ranges::any_of(tiles,[&](const auto& tile) { return tile.owner == actor; }) &&
                 std::ranges::any_of(tiles,[&](const auto& tile) { return tile.owner == target; });
-        const bool accepted = diplomacy.resolve(offer,accept && deployExpedition(offer,false),profiles);
-        reportForeignResponse(offer,accepted);
+        const bool accepted = diplomacy.resolve(offer,accept && deployExpedition(offer,false,selectedArmy),profiles);
+        reportForeignResponse(offer,accepted,selectedArmy);
         return accepted;
     }
 
@@ -991,14 +1025,15 @@ struct World {
         if (offer.action == hoi5::ForeignAction::requestExpedition) {
             const int ready = std::ranges::count_if(divisions,[&](const auto& unit) {
                 return unit.owner == offer.target && unit.combat.strength > 0. &&
-                    unit.expeditionRecipient < 0 && unit.organization >= unit.maxOrganization*.5;
+                    unit.expeditionSender < 0 && unit.organization >= unit.maxOrganization*.5;
             });
             return ready >= (botAtWar(offer.target) ? 10 : 5) &&
                 (botAtWar(offer.actor) || std::ranges::any_of(diplomacy.goals,[&](const auto& goal) {
                     return goal.first.second == offer.actor;
                 }));
         }
-        if (offer.action == hoi5::ForeignAction::offerExpedition) return diplomacy.canTransit(offer.actor,offer.target);
+        if (offer.action == hoi5::ForeignAction::offerExpedition)
+            return diplomacy.allied(offer.actor,offer.target) || fallback;
         if (offer.action == hoi5::ForeignAction::requestLoan)
             return profiles[offer.target].budget >= std::max(20000000.,offer.amount*5.) &&
                 (diplomacy.allied(offer.actor,offer.target) || fallback) &&
@@ -3674,18 +3709,6 @@ struct World {
             auto& unit = divisions[index];
             if (unit.combat.strength <= 0) continue;
             const int here = at(unit.q,unit.r).owner;
-            if (unit.expeditionRecipient >= 0 && !diplomacy.canTransit(unit.owner,unit.expeditionRecipient)) {
-                unit.expeditionRecipient = -1;
-                unit.route.clear();
-            }
-            if (unit.expeditionRecipient >= 0 && here == unit.expeditionRecipient && unit.route.empty() &&
-                unit.battle < 0) {
-                unit.expeditionSender = unit.owner;
-                unit.owner = unit.expeditionRecipient;
-                unit.expeditionRecipient = -1;
-                unit.postBattleRoute.clear();
-                unit.assignedFrontPost = -1;
-            }
             if (unit.retreating && unit.route.empty() && here == unit.owner) {
                 unit.retreating = false;
                 unit.progress = unit.visualProgress = 0.;
@@ -5318,7 +5341,11 @@ struct World {
         }
         if (!partners.empty()) addPolitics(std::ranges::max_element(partners,{},&std::pair<double,int>::first)->second,
             alliance.action);
-        if (enemy >= 0 || !aggressors.empty()) {
+        const bool expeditionPending = std::ranges::any_of(diplomacy.offers,[&](const auto& offer) {
+            return (offer.action == hoi5::ForeignAction::requestExpedition && offer.actor == owner) ||
+                (offer.action == hoi5::ForeignAction::offerExpedition && offer.target == owner);
+        });
+        if ((enemy >= 0 || !aggressors.empty()) && !expeditionPending) {
             const int opposition = enemy >= 0 ? enemy : *aggressors.begin();
             const auto military = [&](int country) {
                 const auto report = bot.militaryReports.find(country);
@@ -5494,7 +5521,9 @@ struct World {
         if (action == hoi5::ForeignAction::loan)
             return performForeignAction(owner,task.targetCountry,hoi5::foreignLoan,task.amount).empty();
         if (action == hoi5::ForeignAction::requestExpedition)
-            return performForeignAction(owner,task.targetCountry,hoi5::foreignExpeditionRequest,0.,true).empty();
+            return std::ranges::none_of(diplomacy.offers,[&](const auto& offer) {
+                return offer.actor == owner && offer.action == action;
+            }) && performForeignAction(owner,task.targetCountry,hoi5::foreignExpeditionRequest,0.,true).empty();
         if (action == hoi5::ForeignAction::requestLoan || action == hoi5::ForeignAction::aid)
             return performForeignAction(owner,task.targetCountry,
                 action == hoi5::ForeignAction::aid ? hoi5::foreignAid : hoi5::foreignLoanRequest,task.amount).empty();
@@ -9836,12 +9865,11 @@ int main(int argc, char** argv) try {
             unit.maxOrganization = unit.organization = 100.;
             unit.combat.strength = 100.;
             unit.speed = 1.35;
+            unit.armyId = 1;
+            expedition.armies.push_back({1,1,"Expedition"});
             if (!expedition.performForeignAction(0,1,hoi5::foreignExpeditionRequest).empty() ||
-                !expedition.answerForeignOffer(0,1,true) || unit.owner != 1 ||
-                unit.expeditionRecipient != 0) return 1;
-            for (int hour = 0; hour < 100 && unit.expeditionRecipient >= 0; ++hour)
-                expedition.updateDivisions(1);
-            if (unit.owner != 0 || unit.expeditionSender != 1 || unit.expeditionRecipient >= 0) return 1;
+                !expedition.answerForeignOffer(0,1,true) || unit.owner != 0 ||
+                unit.expeditionSender != 1 || unit.q != 0 || expedition.armies.front().owner != 0) return 1;
         }
         {
             auto surrender = test;
@@ -10946,6 +10974,7 @@ int main(int argc, char** argv) try {
     };
     const hoi5::ForeignActionInfo* countryDecision = nullptr;
     std::string countryDecisionAmount = "5000000", countryDecisionError;
+    int expeditionArmyChoice = 0;
     std::vector<CountryHit> countryDecisionHits;
     const auto hasDecisionAmount = [&] {
         return countryDecision == &hoi5::foreignAid || countryDecision == &hoi5::foreignLoan ||
@@ -11185,6 +11214,16 @@ int main(int argc, char** argv) try {
     const auto deferOfferButton = [](sf::IntRect dialog) {
         return sf::IntRect{{dialog.position.x+dialog.size.x/2-180,dialog.position.y+dialog.size.y-138},{360,36}};
     };
+    int incomingExpeditionArmy = 0;
+    const auto expeditionPicker = [](sf::IntRect dialog) {
+        return sf::IntRect{{dialog.position.x+dialog.size.x/2-180,dialog.position.y+245},{360,32}};
+    };
+    const auto expeditionChoices = [&](const hoi5::ForeignOffer& offer) {
+        std::vector<int> choices;
+        for (const auto& army : world.armies)
+            if (army.owner == 0 && world.deployExpedition(offer,false,army.id)) choices.push_back(army.id);
+        return choices;
+    };
     while (window.isOpen()) {
         const auto updateStart = DebugClock::now();
         const float frameSeconds = clock.restart().asSeconds();
@@ -11225,11 +11264,21 @@ int main(int argc, char** argv) try {
                     click && click->button == sf::Mouse::Button::Left) {
                     const auto dialog = offerDialog();
                     const bool accept = offerButton(dialog,true).contains(click->position);
-                    if (deferOfferButton(dialog).contains(click->position)) {
+                    const bool expedition = offer->action == hoi5::ForeignAction::requestExpedition;
+                    if (expedition && expeditionPicker(dialog).contains(click->position)) {
+                        const auto choices = expeditionChoices(*offer);
+                        const auto current = std::ranges::find(choices,incomingExpeditionArmy);
+                        if (!choices.empty())
+                            incomingExpeditionArmy = current == choices.end() || std::next(current) == choices.end() ?
+                                choices.front() : *std::next(current);
+                    } else if (deferOfferButton(dialog).contains(click->position)) {
                         deferOffers = !deferOffers;
                         showDeferredOffer = false;
                     } else if (accept || offerButton(dialog,false).contains(click->position)) {
-                        world.answerForeignOffer(offer->actor,offer->target,accept,offer->action);
+                        if (accept && expedition && (incomingExpeditionArmy <= 0 ||
+                            !world.deployExpedition(*offer,false,incomingExpeditionArmy))) continue;
+                        world.answerForeignOffer(offer->actor,offer->target,accept,offer->action,incomingExpeditionArmy);
+                        incomingExpeditionArmy = 0;
                         showDeferredOffer = false;
                     }
                 }
@@ -15006,6 +15055,7 @@ int main(int argc, char** argv) try {
                             }
                             add(std::move(caption),[&,selected] {
                                 countryDecision = selected;
+                                expeditionArmyChoice = 0;
                                 countryDecisionHits.clear();
                                 countryDecisionError.clear();
                                 foreignMessage.clear();
@@ -16173,7 +16223,21 @@ int main(int argc, char** argv) try {
                     }
                     y += 36;
                 }
-                const double amount = hasDecisionAmount() ? double(amountValue()) : 0.;
+                const bool expedition = action.action == Action::offerExpedition;
+                if (expedition) {
+                    for (const auto& army : world.armies) {
+                        if (army.owner != 0 || !world.deployExpedition({0,foreignTarget,0,action.action,double(army.id)},false)) continue;
+                        button((expeditionArmyChoice == army.id ? "[x] " : "[ ] ")+army.name+
+                            " · "+std::to_string(world.armyMembers(0,army.id).size())+" див.",
+                            {{28,y+4},{dialog.x-56,28}},[&,id = army.id] {
+                                expeditionArmyChoice = id;
+                                countryDecisionError.clear();
+                            });
+                        y += 36;
+                    }
+                    if (expeditionArmyChoice == 0) textRow("Выберите армию для отправки");
+                }
+                const double amount = hasDecisionAmount() ? double(amountValue()) : expedition ? expeditionArmyChoice : 0.;
                 const double cost = action.action == Action::aid ? amount : action.money;
                 textRow("Расход сейчас: $"+formatAmount(cost)+"; повтор с "+date(diplomacy.day+action.cooldown));
                 if (action.capital > 0) capitalRow(action.capital);
@@ -16200,9 +16264,10 @@ int main(int argc, char** argv) try {
                 const auto reason = diplomacy.reason(0,foreignTarget,action,world.profiles,amount);
                 if (!countryDecisionError.empty()) textRow(countryDecisionError);
                 else if (!reason.empty()) textRow(std::string(reason));
-                if (reason.empty())
+                if (reason.empty() && (!expedition || expeditionArmyChoice > 0))
                     button("Подтвердить решение",{{28,y+4},{dialog.x-56,28}},[&] {
-                        const double sum = hasDecisionAmount() ? double(amountValue()) : 0.;
+                        const double sum = hasDecisionAmount() ? double(amountValue()) :
+                            countryDecision->action == Action::offerExpedition ? expeditionArmyChoice : 0.;
                         countryDecisionError = world.performForeignAction(0,foreignTarget,*countryDecision,sum);
                         if (!countryDecisionError.empty()) return;
                         countryDecision = nullptr;
@@ -16398,9 +16463,9 @@ int main(int argc, char** argv) try {
                 case Action::requestLoan: title = "Запрашивает кредит на "+formatMoney(offer->amount);
                     detail = "Срок 12 месяцев, ставка 5% годовых."; break;
                 case Action::requestExpedition: title = "Запрашивает экспедиционные войска";
-                    detail = "Одна свободная дивизия перейдёт под командование союзника после прибытия."; break;
+                    detail = "Выбранная армия перейдёт под командование союзника и прибудет в его столицу."; break;
                 case Action::offerExpedition: title = "Предлагает экспедиционные войска";
-                    detail = "Одна дивизия перейдёт под ваше командование после прибытия."; break;
+                    detail = "Армия прибудет в вашу столицу и перейдёт под ваше командование."; break;
                 default: title = "Предлагает соглашение"; break;
             }
             for (const auto& [line,offset,fontSize,color] : std::array{
@@ -16416,6 +16481,15 @@ int main(int argc, char** argv) try {
                 window.draw(text);
             }
             const auto preference = deferOfferButton(dialog);
+            if (offer->action == Action::requestExpedition) {
+                const auto picker = expeditionPicker(dialog);
+                const auto army = std::ranges::find(world.armies,incomingExpeditionArmy,&World::Army::id);
+                const bool selected = army != world.armies.end() && world.deployExpedition(*offer,false,army->id);
+                box(window,sf::Vector2f(picker.position),sf::Vector2f(picker.size),{30,39,50},{116,144,163});
+                battleLabel(window,cardFont,selected ? army->name+" · сменить" :
+                    expeditionChoices(*offer).empty() ? "Нет доступных армий" : "Выбрать армию",
+                    sf::Vector2f(picker.getCenter()),16,{224,234,244},.5f);
+            }
             box(window,sf::Vector2f(preference.position),sf::Vector2f(preference.size),{30,39,50},{116,144,163});
             battleLabel(window,cardFont,deferOffers ? "[x] Больше не показывать автоматически" :
                 "[ ] Больше не показывать автоматически",

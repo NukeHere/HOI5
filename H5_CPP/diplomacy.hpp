@@ -50,9 +50,10 @@ inline constexpr ForeignActionInfo foreignLoan{ForeignAction::loan,"Предло
 inline constexpr ForeignActionInfo foreignLoanRequest{ForeignAction::requestLoan,"Запросить кредит",0,0,0,0,60,
     "Запрос займа на 12 месяцев под 5% годовых."};
 inline constexpr ForeignActionInfo foreignExpeditionRequest{ForeignAction::requestExpedition,"Запросить экспедиционные войска",0,0,0,0,14,
-    "Союзник может выделить одну готовую дивизию. После прибытия она перейдёт под ваше командование."};
+    "Союзник может отправить в вашу столицу одну армию до 20 дивизий."};
 inline constexpr ForeignActionInfo foreignExpeditionOffer{ForeignAction::offerExpedition,"Отправить экспедиционные войска",0,0,0,0,14,
-    "Предложить стране одну готовую дивизию. Требуется союз или разрешение на проход."};
+    "Предложить стране одну армию до 20 дивизий. Требуется согласие получателя."};
+
 
 struct CountryPolitics {
     static constexpr std::array baselineSocialShares{.45,.25,.28,.02};
@@ -306,7 +307,6 @@ struct Diplomacy {
         const auto key = std::pair{actor,target};
         const bool financial = action == A::aid || action == A::loan;
         if (action == A::requestExpedition && !allied(actor,target)) return "Требуется союз";
-        if (action == A::offerExpedition && !canTransit(actor,target)) return "Требуется разрешение на проход";
         if ((financial || action == A::requestLoan) && (!std::isfinite(amount) || amount < 1000. || amount > 1e12))
             return "Введите сумму от 1 тыс. до 1 трлн";
         if (financial && profiles[actor].budget < amount) return "Недостаточно средств для выбранной суммы";
