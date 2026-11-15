@@ -4163,7 +4163,8 @@ struct World {
                 } else if (groundCombatRandom.uniform() < .08) {
                     civilWarWarnings[key] = diplomacy.day+7;
                     news.report(diplomacy.day,"civil_war_risk","Угроза гражданской войны",
-                        std::string(countryNames[owner])+" может потерять контроль над регионом. До выступления осталась неделя.",
+                        std::string(policyGroups[7+faction])+" готовят выступление. Дата: "+
+                            hoi5::politicalDate(diplomacy.day+7)+". Рост терпения фракции может предотвратить раскол.",
                         hoi5::NewsPriority::critical,owner);
                 }
             }
@@ -5621,8 +5622,11 @@ struct World {
             task.targetCoverage = project.target;
             task.tile = *site;
             for (const auto& [key,amount] : requirements)
-                if (const double shortfall = amount-hoi5::value(resources,key); shortfall > 0.)
-                    addBotTask(bot,{hoi5::BotTask::Kind::buy,botHours,-1,key,shortfall*4.});
+                if (const double shortfall = amount-hoi5::value(resources,key); shortfall > 0.) {
+                    hoi5::BotTask purchase{hoi5::BotTask::Kind::buy,botHours,-1,key,shortfall};
+                    purchase.constructionPurchase = true;
+                    addBotTask(bot,purchase);
+                }
         }
         task.tile = *site;
         task.targetCoverage = project.target;
@@ -5908,40 +5912,40 @@ struct World {
                 }
             }
             if (partner >= 0) addPolitics(partner,agreement);
-            if (owner != 0 && !diplomacy.countries.empty() &&
-                std::ranges::any_of(tiles,[](const auto& tile) { return tile.owner == 0; })) {
-                using Action = hoi5::ForeignAction;
-                const auto& relation = diplomacy.relation(owner,0);
-                const auto opinion = relation.opinion.find(owner);
-                const double trust = opinion == relation.opinion.end() ? 0. : opinion->second;
-                const auto propose = [&](Action action) {
-                    const auto& info = *std::ranges::find(hoi5::foreignActions,action,&hoi5::ForeignActionInfo::action);
-                    if (incomingOffer(owner,0,action) || !diplomacy.reason(owner,0,info,profiles).empty()) return false;
-                    addPolitics(0,action);
-                    return true;
-                };
-                if (trust >= 0 && !relation.treaties.contains(Action::trade)) propose(Action::trade);
-                if (trust < 25) propose(Action::mission);
-                if (trust >= 45 && !relation.treaties.contains(Action::alliance)) propose(Action::alliance);
-                else if (trust >= 20 && !relation.treaties.contains(Action::nonaggression)) propose(Action::nonaggression);
-                else if (trust >= 15 && !diplomacy.canTransit(owner,0) &&
-                    std::ranges::any_of(bot.regions,[&](const auto& region) {
-                        return std::ranges::any_of(region.borders,[&](int tile) {
-                            return std::ranges::any_of(botGeography.adjacent(tile),
-                                [&](int neighbor) { return tiles[neighbor].owner == 0; });
-                        });
-                    })) propose(Action::transit);
-                const double available = botAvailableMoney(bot);
-                if (trust >= 10 && profiles[0].budget < 5000000. && available >= 20000000. &&
-                    !incomingOffer(owner,0,Action::loan)) {
-                    const double amount = std::min(5000000.-profiles[0].budget,available*.1);
-                    if (diplomacy.reason(owner,0,hoi5::foreignLoan,profiles,amount).empty()) {
-                        hoi5::BotTask loan{hoi5::BotTask::Kind::politics,botHours};
-                        loan.targetCountry = 0;
-                        loan.politicalAction = int(Action::loan);
-                        loan.amount = amount;
-                        addBotTask(bot,loan);
-                    }
+        }
+        if (owner != 0 && !diplomacy.countries.empty() &&
+            std::ranges::any_of(tiles,[](const auto& tile) { return tile.owner == 0; })) {
+            using Action = hoi5::ForeignAction;
+            const auto& relation = diplomacy.relation(owner,0);
+            const auto opinion = relation.opinion.find(owner);
+            const double trust = opinion == relation.opinion.end() ? 0. : opinion->second;
+            const auto propose = [&](Action action) {
+                const auto& info = *std::ranges::find(hoi5::foreignActions,action,&hoi5::ForeignActionInfo::action);
+                if (incomingOffer(owner,0,action) || !diplomacy.reason(owner,0,info,profiles).empty()) return false;
+                addPolitics(0,action);
+                return true;
+            };
+            if (trust >= 0 && !relation.treaties.contains(Action::trade)) propose(Action::trade);
+            if (trust < 25) propose(Action::mission);
+            if (trust >= 45 && !relation.treaties.contains(Action::alliance)) propose(Action::alliance);
+            else if (trust >= 20 && !relation.treaties.contains(Action::nonaggression)) propose(Action::nonaggression);
+            else if (trust >= 15 && !diplomacy.canTransit(owner,0) &&
+                std::ranges::any_of(bot.regions,[&](const auto& region) {
+                    return std::ranges::any_of(region.borders,[&](int tile) {
+                        return std::ranges::any_of(botGeography.adjacent(tile),
+                            [&](int neighbor) { return tiles[neighbor].owner == 0; });
+                    });
+                })) propose(Action::transit);
+            const double available = botAvailableMoney(bot);
+            if (trust >= 10 && profiles[0].budget < 5000000. && available >= 20000000. &&
+                !incomingOffer(owner,0,Action::loan)) {
+                const double amount = std::min(5000000.-profiles[0].budget,available*.1);
+                if (diplomacy.reason(owner,0,hoi5::foreignLoan,profiles,amount).empty()) {
+                    hoi5::BotTask loan{hoi5::BotTask::Kind::politics,botHours};
+                    loan.targetCountry = 0;
+                    loan.politicalAction = int(Action::loan);
+                    loan.amount = amount;
+                    addBotTask(bot,loan);
                 }
             }
         }
@@ -7016,8 +7020,11 @@ struct World {
         using Status = hoi5::BotTaskStatus;
         std::vector<std::pair<hoi5::BotSupplyState*,Task*>> orders;
         std::vector<BotMovement> movements;
+        std::vector<bool> hasTerritory(profiles.size());
+        for (const auto& tile : tiles)
+            if (tile.owner >= 0 && tile.owner < int(hasTerritory.size())) hasTerritory[tile.owner] = true;
         for (auto& bot : supplyBots) {
-            if (std::ranges::none_of(tiles,[&](const auto& tile) { return tile.owner == bot.owner; })) continue;
+            if (!hasTerritory[bot.owner]) continue;
             {
                 hoi5::DebugMeasure reviews(debug,"ai_reviews");
                 updateBotReviews(bot,debug);
@@ -11290,7 +11297,13 @@ int main(int argc, char** argv) try {
             auto civil = generateWorld(50,3,146591,1);
             civil.startBots(146591);
             const auto before = civil.divisions.size();
-            if (!civil.startCivilWar(0,1) || !civil.startCivilWar(0,0) ||
+            civil.diplomacy.countries[0].factionPatience[1] = 0.;
+            civil.diplomacy.countries[0].factionRadicalization[1] = 1.;
+            civil.civilWarWarnings[{0,1}] = 7;
+            civil.diplomacy.day = 6;
+            if (civil.checkCivilWars() || civil.profiles.size() != 3) return 1;
+            civil.diplomacy.day = 7;
+            if (!civil.checkCivilWars() || !civil.startCivilWar(0,0) ||
                 !civil.diplomacy.hostile(0,3) || !civil.diplomacy.hostile(3,4) ||
                 civil.divisions.size() != before || civil.tiles[civil.capitals[3]].owner != 3 ||
                 std::ranges::count(civil.divisions,3,&Division::owner) == 0) return 1;

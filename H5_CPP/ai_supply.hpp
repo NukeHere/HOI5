@@ -138,13 +138,19 @@ inline int supplyHexDistance(int first,int second,int width) {
 
 inline std::optional<BotSupplyChoice> bestBotSupplySite(int width,std::span<const BotSupplyPoint> points,
                                                      std::span<const BotSupplyCandidate> candidates) {
+    static const auto falloff = [] {
+        std::array<double,8> values{};
+        for (int distance = 0; distance < int(values.size()); ++distance)
+            values[distance] = std::pow(.78,distance);
+        return values;
+    }();
     std::optional<BotSupplyChoice> best;
     for (const auto& candidate : candidates) {
         double gain = 0.;
         for (const auto& point : points) {
             const int distance = supplyHexDistance(candidate.tile,point.tile,width);
             if (distance > 7) continue;
-            const double expected = candidate.strength*std::pow(.78,distance)*(.42+.58*point.passability);
+            const double expected = candidate.strength*falloff[distance]*(.42+.58*point.passability);
             gain += std::max(0.,std::min(.6,expected)-point.current)*point.weight;
         }
         gain *= candidate.multiplier;
