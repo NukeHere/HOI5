@@ -69,12 +69,13 @@ inline Stockpile distributeTileStockpile(const Stockpile& stocks,const Stockpile
 }
 
 template<class Tile>
-Stockpile storageCapacity(const std::vector<Tile>& tiles,int country) {
+Stockpile storageCapacity(const std::vector<Tile>& tiles,int country,const std::vector<int>* territory=nullptr) {
     Stockpile result{{"raw",0},{"semi_finished",0},{"finished",0},{"fuel",0}};
-    for (const auto& tile : tiles) {
-        if (tile.owner != country) continue;
+    const auto add=[&](const auto& tile) {
         for (const auto& [bucket,capacity] : tileStorageCapacity(tile)) result[bucket] += capacity;
-    }
+    };
+    if(territory) {for(int index:*territory) add(tiles[index]);}
+    else for(const auto& tile:tiles) if(tile.owner==country) add(tile);
     return result;
 }
 

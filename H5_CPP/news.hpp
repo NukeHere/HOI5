@@ -27,8 +27,11 @@ struct NewsItem {
 
     bool important() const { return priority >= NewsPriority::important; }
     bool automaticPopup(int observer) const {
-        if (viewer >= 0) return important();
-        return key == "alliance" || key == "war" || (key == "war_justification" && target == observer);
+        // Yellow and lower-priority news remain available in the ticker and archive.
+        if (priority != NewsPriority::critical) return false;
+        if (viewer >= 0) return true;
+        return key == "alliance" || key == "war" || key == "capitulation" ||
+            key == "country_defeated" || (key == "war_justification" && target == observer);
     }
     bool visibleTo(int country) const { return viewer < 0 || viewer == country || otherViewer == country; }
 };

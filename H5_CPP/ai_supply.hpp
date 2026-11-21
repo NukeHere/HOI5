@@ -2,6 +2,7 @@
 
 #include "ai_regions.hpp"
 #include "ai_flow.hpp"
+#include "ai_scheduler.hpp"
 #include "python_seed.hpp"
 #include <algorithm>
 #include <cmath>
@@ -74,6 +75,8 @@ inline double botSustainmentTarget(double recoveryAtFull,double dailyLoss,double
 struct BotSupplyState {
     int owner;
     double nextDaily;
+    double nextSupplyPlan{},nextDefensePlan{};
+    int dailyPlansRun{},economyPlansRun{};
     int target = -1;
     std::list<BotTask> tasks;
     double tradeBalance = 0.;
@@ -106,12 +109,17 @@ struct BotSupplyState {
     int nextWartimeAirRefresh{};
     int nextAirDefenseMove{};
     double nextEconomy{};
+    CompiledProductionBalance planningBalance;
     int nextFiscalReview{},demobilizedDivisions{},parkedAircraft{};
     Stockpile importTargets,exportTargets,exportFloors,commercialDemand;
     double sustainableExportIncome{},recurringImportCost{};
     std::string_view commercialRecipe;
     std::map<std::string_view,int> deficitSince;
     Stockpile sovereignNeeds;
+    ProductionPlan sovereignFullPlan;
+    std::array<ProductionFlows,productionStages> sovereignPassive;
+    Stockpile sovereignUses;
+    int nextSovereigntyReview{};
     double sovereignPower{};
     int sovereignClaim=-1,sovereignDeposit=-1,sovereignEnemy=-1;
     std::map<int,int> supplyPresenceSince;
@@ -166,14 +174,36 @@ inline std::optional<BotSupplyChoice> bestBotSupplySite(int width,std::span<cons
             values[distance] = std::pow(.78,distance);
         return values;
     }();
+    // Only points within seven hexes can contribute. Index fixed-size map
+    // blocks, then retain original point order for identical floating-point sums.
+    constexpr int block=8;
+    const int columns=(width+block-1)/block;
+    const bool indexed=width>0 && points.size()>32 && std::ranges::all_of(points,[&](const auto& p){return p.tile>=0 && p.tile<width*width;});
+    std::vector<std::vector<std::size_t>> buckets(indexed?columns*columns:0);
+    if(indexed) for(std::size_t i=0;i<points.size();++i) {
+        const int tile=points[i].tile;
+        buckets[(tile/width/block)*columns+tile%width/block].push_back(i);
+    }
+    std::vector<std::size_t> nearby;
     std::optional<BotSupplyChoice> best;
     for (const auto& candidate : candidates) {
         double gain = 0.;
-        for (const auto& point : points) {
+        const auto add=[&](const auto& point) {
             const int distance = supplyHexDistance(candidate.tile,point.tile,width);
-            if (distance > 7) continue;
+            if (distance > 7) return;
             const double expected = candidate.strength*falloff[distance]*(.42+.58*point.passability);
             gain += std::max(0.,std::min(point.target,expected)-point.current)*point.weight;
+        };
+        if(indexed && candidate.tile>=0 && candidate.tile<width*width) {
+            nearby.clear();const int q=candidate.tile%width,r=candidate.tile/width;
+            for(int y=std::max(0,(r-7)/block);y<=std::min(columns-1,(r+7)/block);++y)
+                for(int x=std::max(0,(q-7)/block);x<=std::min(columns-1,(q+7)/block);++x) {
+                    const auto& bucket=buckets[y*columns+x];nearby.insert(nearby.end(),bucket.begin(),bucket.end());
+                }
+            std::ranges::sort(nearby);
+            for(auto i:nearby) add(points[i]);
+        } else {
+            for(const auto& point:points) add(point);
         }
         gain *= candidate.multiplier;
         if (gain > .05 && (!best || gain > best->gain)) best = BotSupplyChoice{gain,candidate.tile};

@@ -30,6 +30,7 @@ struct AirWing {
     std::string_view interceptorAmmoKey = "medium_air_to_air_missile";
     int damaged = 0;
     double defensiveHours = 0, abortedHours = 0;
+    double repairProgress = 0;
     std::vector<std::pair<int,int>> composition;
     std::vector<std::string_view> targetPriorities;
     std::vector<int> strategicOperationArea;
@@ -122,13 +123,14 @@ struct AirLayer {
     int nextDefenseId = 0;
     std::vector<std::array<int,std::size(aircraftTypes)>> reserves;
     void registerConstructedBase(int owner,int index,BuildingCoverage& building) {
-        if (std::ranges::any_of(bases,[&](const auto& base) { return base.tile == index; })) return;
+        const auto existing=std::ranges::find(bases,index,&Airbase::tile);
         // Python's first base registration adds the completed coverage again, up to the initial cap.
-        building.area = std::max(building.area,std::min(.42,2*building.area));
+        if(existing==bases.end()) building.area = std::max(building.area,std::min(.42,2*building.area));
         const double effective = building.area*building.health;
-        bases.push_back({owner,index,1+int(effective>=.32),std::max(18,int(28+effective*90)),
+        const Airbase updated{owner,index,1+int(effective>=.32),std::max(18,int(28+effective*90)),
             std::max(8,int(8+effective*38)),8000+effective*38000,4000+effective*18000,
-            .8+effective*1.4,effective>=.30});
+            .8+effective*1.4,effective>=.30};
+        if(existing==bases.end()) bases.push_back(updated);else *existing=updated;
     }
 
     struct DefenseReplacement { int type,remaining,site = -1; };

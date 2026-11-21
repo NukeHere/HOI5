@@ -42,11 +42,10 @@ struct TreasuryFlows {
 };
 
 template<class Tile>
-TreasuryFlows monthlyTreasury(const std::vector<Tile>& tiles,int owner,double population) {
+TreasuryFlows monthlyTreasury(const std::vector<Tile>& tiles,int owner,double population,const std::vector<int>* territory=nullptr) {
     TreasuryFlows flows;
     flows.government += std::max(0.,population)/1e6*48000;
-    for (const auto& tile : tiles) {
-        if (tile.owner != owner) continue;
+    const auto add=[&](const auto& tile) {
         if (!tile.water) flows.government += 3500;
         flows.population += monthlyTilePopulationIncome(tile);
         flows.companies += monthlyTileCompanyIncome(tile);
@@ -60,7 +59,9 @@ TreasuryFlows monthlyTreasury(const std::vector<Tile>& tiles,int owner,double po
         flows.disability += millions*2200;
         flows.localServices += millions*(std::clamp(tile.buildings[city].area,0.,1.)*70000
             + std::clamp(tile.buildings[village].area,0.,1.)*28000);
-    }
+    };
+    if(territory) {for(int index:*territory) add(tiles[index]);}
+    else for(const auto& tile:tiles) if(tile.owner==owner) add(tile);
     flows.social = flows.pensions+flows.children+flows.disability+flows.localServices;
     return flows;
 }

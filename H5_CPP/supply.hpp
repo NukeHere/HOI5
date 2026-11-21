@@ -5,6 +5,7 @@
 #include <cmath>
 #include <span>
 #include <vector>
+#include "simulation_workers.hpp"
 
 namespace hoi5 {
 
@@ -26,7 +27,9 @@ double supplySourceStrength(const Tile& tile,bool capital) {
 }
 
 template<class Tile>
-void recalculateSupply(std::span<Tile> tiles, int size, const std::vector<int>& capitals) {
+void recalculateSupply(std::span<Tile> tiles, int size, const std::vector<int>& capitals,
+                       SimulationWorkers* workers=nullptr,const std::vector<std::vector<int>>* territory=nullptr,
+                       const std::vector<unsigned char>* changed=nullptr) {
     constexpr std::array<double,buildingCount> relayWeights{0., 0., .28, .72, .22, 0., 0., 0., 0., 0., 0., 0.};
     struct SupplyOffset { int q, r; double factor; };
     static const auto offsets = [] {
@@ -41,7 +44,7 @@ void recalculateSupply(std::span<Tile> tiles, int size, const std::vector<int>& 
             }
         return result;
     }();
-    for (auto& tile : tiles) tile.supply = 0;
+    for (auto& tile : tiles) if(!changed || tile.owner<0 || tile.owner>=int(changed->size()) || (*changed)[tile.owner]) tile.supply = 0;
     const auto effective = [](const BuildingCoverage& building) {
         return building.area * building.health;
     };
@@ -54,25 +57,31 @@ void recalculateSupply(std::span<Tile> tiles, int size, const std::vector<int>& 
                 tile.supply = std::max(tile.supply, strength * factor);
         }
     };
-    std::vector<bool> hasSource(capitals.size());
-    for (int index = 0; index < static_cast<int>(tiles.size()); ++index) {
+    std::vector<std::vector<int>> grouped;
+    if(!territory) {
+        grouped.resize(capitals.size());
+        for(int i=0;i<int(tiles.size());++i) if(tiles[i].owner>=0 && tiles[i].owner<int(grouped.size())) grouped[tiles[i].owner].push_back(i);
+    }
+    const auto& owned=territory?*territory:grouped;
+    std::vector<double> updates(tiles.size());
+    const auto countryWork=[&](std::size_t country) {
+    bool hasSource=false;
+    for (int index:owned[country]) {
         const auto& source = tiles[index];
         if (source.water || source.owner < 0) continue;
         const double strength = supplySourceStrength(source,index == capitals[source.owner]);
         if (strength <= 0) continue;
-        hasSource[source.owner] = true;
+        hasSource = true;
         spread(index,source.owner,std::clamp(strength,0.,1.));
     }
-    for (int country = 0; country < static_cast<int>(capitals.size()); ++country)
-        if (!hasSource[country] && capitals[country] >= 0)
+        if (!hasSource && capitals[country] >= 0)
             spread(capitals[country],country,.65);
     const auto passability = [](const Tile& tile) { return std::clamp(1. / tile.movementCost, 0., 1.); };
-    for (auto& tile : tiles) tile.supply *= .42 + passability(tile) * .58;
+    for (int index:owned[country]) tiles[index].supply *= .42 + passability(tiles[index]) * .58;
 
-    std::vector<double> updates(tiles.size());
     for (int pass = 0; pass < 2; ++pass) {
-        std::fill(updates.begin(), updates.end(), 0.);
-        for (int index = 0; index < static_cast<int>(tiles.size()); ++index) {
+        for(int index:owned[country]) updates[index]=0.;
+        for (int index:owned[country]) {
             const auto& tile = tiles[index];
             if (tile.owner < 0 || tile.water) continue;
             double relay = 0;
@@ -94,9 +103,14 @@ void recalculateSupply(std::span<Tile> tiles, int size, const std::vector<int>& 
                 if (candidate > neighbor.supply + .001) updates[next] = std::max(updates[next], std::min(1., candidate));
             }
         }
-        for (std::size_t i = 0; i < tiles.size(); ++i)
+        for (int i:owned[country])
             tiles[i].supply = std::max(tiles[i].supply, updates[i]);
     }
+    };
+    std::vector<std::size_t> activeCountries;
+    for(std::size_t country=0;country<capitals.size();++country) if(!changed || (*changed)[country]) activeCountries.push_back(country);
+    if(workers) workers->forEach(activeCountries.size(),[&](std::size_t i){countryWork(activeCountries[i]);});
+    else for(auto country:activeCountries) countryWork(country);
 }
 
 }

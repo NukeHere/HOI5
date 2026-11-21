@@ -1,6 +1,7 @@
 #pragma once
 
 #include "production_data.hpp"
+#include "production_graph.hpp"
 #include <set>
 #include <functional>
 
@@ -175,23 +176,7 @@ inline ProductionPlan demandProductionPlan(double power,const Production& passiv
         for(auto [key,amount]:stage.outputs) baseOutput[key]+=amount*std::clamp(supported,0.,1.);
     }
     const auto close=[&](const Stockpile& use) {
-        Stockpile demand=use,units;
-        for(int pass=0;pass<12;++pass) {
-            Stockpile next=use;units.clear();
-            for(const auto& recipe:recipes) {
-                if(recipe.building!=industry || !recipe.technology.empty() || recipe.outputs.empty()) continue;
-                double count=0.;
-                for(auto [key,yield]:recipe.outputs) if(yield>0)
-                    count=std::max(count,std::max(0.,value(demand,key)-value(baseOutput,key))/yield);
-                units[recipe.id]=count;
-                for(auto [key,amount]:recipe.inputs) next[key]+=amount*count;
-            }
-            demand=std::move(next);
-        }
-        Stockpile powers;
-        for(const auto& recipe:recipes) if(recipe.building==industry && recipe.rate>0 && recipe.powerCost>0)
-            powers[recipe.id]=value(units,recipe.id)*recipe.powerCost/recipe.rate;
-        return powers;
+        return productionGraph().close(use,baseOutput);
     };
     const auto sum=[](const Stockpile& powers){double total=0.;for(auto [key,amount]:powers) total+=amount;return total;};
     const auto wanted=close(endUse);Stockpile assigned=wanted;
@@ -247,14 +232,16 @@ inline bool moveProductionLine(ProductionPlan& plan,std::size_t from,std::size_t
 template<class Tile>
 Production buildProduction(const std::vector<Tile>& tiles, int size, int country, double population,
                            const std::set<std::string_view>& technologies,
-                           const ProductionPlan* plan = nullptr,double efficiency = 1.) {
+                           const ProductionPlan* plan = nullptr,double efficiency = 1.,
+                           const std::vector<int>* territory=nullptr,const std::vector<int>* offshore=nullptr) {
     Production result;
-    for (const auto& tile : tiles)
-        if (tile.owner == country) accumulateTileProduction(result,tile,technologies);
-    for (int index = 0; index < int(tiles.size()); ++index) {
+    if(territory) {for(int index:*territory) accumulateTileProduction(result,tiles[index],technologies);}
+    else for(const auto& tile:tiles) if(tile.owner==country) accumulateTileProduction(result,tile,technologies);
+    const auto addSea=[&](int index) {
         const auto& sea = tiles[index];
-        if (!sea.water && sea.natural.water <= .55) continue;
-        if (sea.owner >= 0 && sea.owner != country) continue;
+        if (!sea.water && sea.natural.water <= .55) return;
+        if (sea.owner >= 0 && sea.owner != country) return;
+        if(std::ranges::none_of(sea.deposits,[](const auto& d){return d.resource=="phosphorite";})) return;
         const int q = index%size, r = index/size, shift = r%2;
         double coverage = 0.;
         int beneficiary = -1;
@@ -271,16 +258,23 @@ Production buildProduction(const std::vector<Tile>& tiles, int size, int country
                 beneficiary = coast.owner;
             }
         }
-        if (beneficiary != country) continue;
+        if (beneficiary != country) return;
         for (const auto& deposit : sea.deposits)
             if (deposit.resource == "phosphorite")
                 result[raw].outputs[deposit.resource] += coverage*.95*5200*
                     std::min(1.,std::log10(deposit.mass+1)/std::log10(1500001.));
-    }
+    };
+    if(offshore) {for(int index:*offshore) addSea(index);}
+    else for(int index=0;index<int(tiles.size());++index) addSea(index);
     for (const auto& [name,amount] : lifeSupport) result[upkeep].inputs[name] += population/1e6*amount;
     result.passive = static_cast<const std::array<ProductionFlows,productionStages>&>(result);
     result.nationalPlan = true;
-    result.totalPower = result.unusedPower = productionPower(tiles,country,efficiency);
+    double power=0.;
+    if(territory) {
+        for(int index:*territory) power+=std::max(0.,tiles[index].buildings[industry].area)*std::clamp(tiles[index].buildings[industry].health,0.,1.)*100.;
+        power*=std::isfinite(efficiency)?std::max(0.,efficiency):0.;
+    } else power=productionPower(tiles,country,efficiency);
+    result.totalPower = result.unusedPower = power;
     const auto defaults = plan ? ProductionPlan{} : startingProductionPlan(result.totalPower);
     for (const auto& assignment : plan ? *plan : defaults) {
         ProductionLine line; line.recipe = assignment.recipe;
@@ -380,5 +374,57 @@ std::array<double,productionStages> runProduction(const Production& production,S
     if (report) *report = std::move(lines);
     return stageRatios;
 }
+
+// Reusable exact six-hour forecast executor. Compile map keys and line metadata
+// once per forecast, rather than allocating/copying every production report 120 times.
+class ForecastProductionStepper {
+    struct Line { double units;std::vector<std::pair<std::size_t,double>> inputs,outputs; };
+    Production passive;
+    std::map<std::string_view,std::size_t> ids;
+    std::vector<std::string_view> keys;
+    std::vector<double*> held;
+    std::vector<double> demand,ratios,pending;
+    std::vector<bool> output;
+    std::vector<Line> lines;
+    double fraction;
+    int hours;
+public:
+    std::vector<double> actualUnits;
+    std::vector<const Recipe*> recipesUsed;
+    ForecastProductionStepper(const Production& model,Stockpile& stock,int stepHours=6):fraction(stepHours/720.),hours(stepHours) {
+        const auto& flows=model.nationalPlan?model.passive:static_cast<const std::array<ProductionFlows,productionStages>&>(model);
+        static_cast<std::array<ProductionFlows,productionStages>&>(passive)=flows;
+        const std::vector<ProductionLine> empty;
+        const auto& sourceLines=model.nationalPlan?model.lines:empty;
+        for(const auto& line:sourceLines) {for(auto [key,a]:line.inputs) ids.try_emplace(key);for(auto [key,a]:line.outputs) ids.try_emplace(key);}
+        for(const auto& stage:flows) {for(auto [key,a]:stage.inputs) ids.try_emplace(key);for(auto [key,a]:stage.outputs) ids.try_emplace(key);}
+        for(auto& [key,id]:ids) {id=keys.size();keys.push_back(key);held.push_back(&stock[key]);}
+        demand.resize(keys.size());ratios.resize(keys.size());pending.resize(keys.size());output.resize(keys.size());
+        for(const auto& source:sourceLines) {
+            Line line{source.plannedUnits,{},{}};
+            for(auto [key,a]:source.inputs) {const auto id=ids.at(key);line.inputs.emplace_back(id,a);demand[id]+=a*fraction;}
+            for(auto [key,a]:source.outputs) {const auto id=ids.at(key);line.outputs.emplace_back(id,a);output[id]=true;}
+            lines.push_back(std::move(line));recipesUsed.push_back(productionRecipe(source.recipe));
+        }
+        for(const auto& stage:flows) for(auto [key,a]:stage.outputs) output[ids.at(key)]=true;
+        actualUnits.resize(lines.size());
+    }
+    template<class AddStock>
+    std::array<double,productionStages> run(Stockpile& stock,AddStock addStock,
+        const std::function<void(std::string_view,double,double)>& consume={}) {
+        std::fill(pending.begin(),pending.end(),0.);
+        for(std::size_t i=0;i<keys.size();++i) ratios[i]=demand[i]>0?std::clamp(*held[i]/demand[i],0.,1.):1.;
+        for(std::size_t i=0;i<lines.size();++i) {
+            const auto& line=lines[i];double ratio=1.;
+            for(auto [id,a]:line.inputs) if(a>0 && ratios[id]<1.) ratio=std::min(ratio,ratios[id]);
+            actualUnits[i]=line.units*fraction*ratio;
+            for(auto [id,a]:line.inputs) *held[id]=std::max(0.,*held[id]-a*fraction*ratio);
+            for(auto [id,a]:line.outputs) pending[id]+=a*fraction*ratio;
+        }
+        auto result=runPassiveProduction(passive,stock,hours,[&](auto key,double a){pending[ids.at(key)]+=a;},consume);
+        for(std::size_t i=0;i<keys.size();++i) if(output[i]) addStock(keys[i],pending[i]);
+        return result;
+    }
+};
 
 }

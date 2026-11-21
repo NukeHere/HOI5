@@ -26,6 +26,9 @@ struct Battle {
     double width = 80.;
     std::array<double,2> organizationDamage{}, strengthDamage{};
     std::uint64_t creationOrder{};
+    // Cumulative actual damage inflicted by each side's aircraft in this battle.
+    std::array<double,2> airOrganizationDamage{}, airStrengthDamage{};
+    std::array<int,2> airHits{};
 };
 
 inline double combatDamage(const CombatStats& attacker, const CombatStats& target, bool defending, std::array<double,3> ammo = {1,1,1}, double supply = 1, double fort = 0, double airBonus = 0,double terrainAttack = 1,double terrainDefense = 1) {

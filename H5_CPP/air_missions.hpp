@@ -224,6 +224,22 @@ inline int munitionsPerSortie(const Munition& weapon) {
     return 1;
 }
 
+template<class Eligible>
+const Munition* availableMissionWeapon(int type,bool strategic,bool hardened,Eligible eligible) {
+    if(type<0 || type>=int(std::size(aircraftMunitions))) return nullptr;
+    const auto& allowed=aircraftMunitions[type];
+    const auto* preferred=missionWeapon(type,strategic);
+    const Munition* best=nullptr;double score=-1.;
+    for(const auto& weapon:munitions) {
+        if(std::ranges::find(allowed,weapon.key)==allowed.end() || weapon.type=="air_to_air_missile" || !eligible(weapon)) continue;
+        double value=weapon.key==(preferred?preferred->key:std::string_view{})?10.:1.;
+        if(strategic) value+=weapon.damageMult;
+        if(hardened && weapon.type=="bunker_buster") value+=20.;
+        if(value>score) {score=value;best=&weapon;}
+    }
+    return best;
+}
+
 inline double buildingDamage(const AirSalvo& salvo,Building building,double collateral) {
     const auto& weapon = *salvo.weapon;
     double penetration = .72+std::min(1.5,weapon.penetration)*.34;
