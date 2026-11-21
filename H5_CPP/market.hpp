@@ -8,6 +8,18 @@
 namespace hoi5 {
 
 struct Market {
+    static double orderStep(std::string_view key,bool shift=false,bool control=false) {
+        constexpr std::string_view individual[]{"tank","old_ifv","old_light_artillery","old_light_aa_artillery","ships",
+            "light_fighter","multirole_fighter","fighter_bomber","cas_aircraft","attack_helicopter","strategic_bomber",
+            "manpads_team","short_range_aa","medium_range_sam","long_range_sam","radar_unit",
+            "tactical_cruise_missile","small_ballistic_missile","heavy_strategic_missile","bunker_buster"};
+        constexpr std::string_view medium[]{"gold","silver","uranium","old_at_missiles","light_guided_missile",
+            "short_air_to_air_missile","medium_air_to_air_missile","anti_air_ammo","guided_bomb","glide_bomb"};
+        const bool piece=std::find(std::begin(individual),std::end(individual),key)!=std::end(individual);
+        const bool moderate=std::find(std::begin(medium),std::end(medium),key)!=std::end(medium);
+        const double base=piece ? 10. : moderate ? 100. : 1000.;
+        return control ? base/10. : shift ? base*10. : base;
+    }
     static bool recoveryResource(std::string_view key) {
         return key == "food" || key == "construction_goods" || key == "steel" ||
             key == "machinery" || key == "refined_fuel";

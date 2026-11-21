@@ -27,6 +27,7 @@ struct AirWing {
     bool airSuperiority = false;
     bool intercept = false, patrol = false;
     int interceptorAmmo = -1;
+    std::string_view interceptorAmmoKey = "medium_air_to_air_missile";
     int damaged = 0;
     double defensiveHours = 0, abortedHours = 0;
     std::vector<std::pair<int,int>> composition;
@@ -53,7 +54,6 @@ struct AirWing {
     }
 
     void changeComposition(int aircraft,int delta,bool refillNewCapacity = false) {
-        const int oldCapacity = interceptorCapacity();
         if (composition.empty() && count > 0) composition.emplace_back(type,count);
         auto item = std::ranges::find(composition,aircraft,&std::pair<int,int>::first);
         if (item == composition.end()) composition.emplace_back(aircraft,delta);
@@ -65,7 +65,7 @@ struct AirWing {
         if (missionType(2) < 0) intercept = airSuperiority = patrol = false;
         if (interceptorAmmo >= 0) {
             const int capacity = interceptorCapacity();
-            const int addedAmmo = refillNewCapacity ? std::max(0,capacity-oldCapacity) : 0;
+            const int addedAmmo = 0; // Supplied from national stock.
             interceptorAmmo = std::min(capacity,interceptorAmmo+addedAmmo);
         }
     }
@@ -141,12 +141,9 @@ struct AirLayer {
 
     static DefenseQuote defenseQuote(int type) {
         constexpr std::array prices{500000.,1200000.,2500000.,5000000.,1000000.};
-        DefenseQuote quote{prices[type],{{"steel",80},{"construction_goods",200},{"electronics",40},
-            {"machinery",15},{"vehicles",2}}};
+        DefenseQuote quote{prices[type],{{defenseClasses[type].key,1}, {"construction_goods",40}}};
         const auto& unit = defenseClasses[type];
-        const bool shortRange = unit.key == "short_range_aa";
-        if (unit.ammo > 0) quote.resources.emplace_back(shortRange ? "light_aa_ammo" : "anti_air_ammo",unit.ammo);
-        if (shortRange) quote.resources.emplace_back("old_light_aa_artillery",2);
+        if (unit.ammo > 0) quote.resources.emplace_back(unit.key == "short_range_aa" ? "light_aa_ammo" : "anti_air_ammo",unit.ammo);
         return quote;
     }
 
@@ -453,7 +450,7 @@ struct AirLayer {
         if (tile < 0) return -1;
         const int count = std::min({std::max(1,requested),reserve,freeCapacity(tiles,country,tile,type)});
         wings.push_back({country,tile,type,count});
-        wings.back().interceptorAmmo = wings.back().interceptorCapacity();
+        wings.back().interceptorAmmo = 0;
         reserve -= count;
         return int(wings.size())-1;
     }

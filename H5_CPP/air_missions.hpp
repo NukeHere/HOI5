@@ -66,12 +66,12 @@ inline double fighterAircraftHitChance(int fighterType,int targetType,const Muni
 
 inline std::span<const std::pair<std::string_view,double>> airEquipmentTargetProfile(std::string_view type) {
     using Target = std::pair<std::string_view,double>;
-    static constexpr Target rockets[]{{"vehicles",2.40},{"old_ifv",2.05},{"old_at_missiles",1.80},
+    static constexpr Target rockets[]{{"tank",2.2},{"vehicles",2.40},{"old_ifv",2.05},{"old_at_missiles",1.80},
         {"old_light_artillery",.80},{"old_light_aa_artillery",.75},{"spare_parts",.45}};
-    static constexpr Target guided[]{{"vehicles",2.40},{"old_ifv",2.15},{"old_at_missiles",1.95},
+    static constexpr Target guided[]{{"tank",2.5},{"vehicles",2.40},{"old_ifv",2.15},{"old_at_missiles",1.95},
         {"old_light_aa_artillery",1.05},{"old_light_artillery",.80},{"spare_parts",.70}};
     static constexpr Target bombs[]{{"field_supplies",2.20},{"spare_parts",1.80},{"old_light_artillery",1.60},
-        {"old_light_aa_artillery",1.25},{"weapons",.75},{"infantry_equipment",.65},{"vehicles",.55},{"old_ifv",.45}};
+        {"old_light_aa_artillery",1.25},{"infantry_equipment",.65},{"vehicles",.55},{"old_ifv",.45}};
     static constexpr Target heavy[]{{"field_supplies",1.75},{"spare_parts",1.55},{"old_light_artillery",1.25},
         {"old_light_aa_artillery",1.15},{"vehicles",.85},{"old_ifv",.70},{"old_at_missiles",.65}};
     if (type == "unguided_rocket") return rockets;

@@ -11,6 +11,7 @@
 namespace hoi5 {
 
 class NewsPanel {
+    int observer = 0;
     int seen{}, popup{}, archiveScroll{}, popupScroll{};
     std::size_t tickerIndex{};
     float tickerPosition{};
@@ -32,17 +33,17 @@ public:
             return original;
         const bool preparing = item.key == "war_justification";
         if (!preparing && item.key != "war") return original;
-        if (actor == 0)
+        if (actor == observer)
             return headline ? original : original+(preparing
                 ? " Наша страна готовит цель войны; объявление войны потребует отдельного решения."
                 : " Наша страна официально находится в состоянии войны.");
-        if (target == 0)
+        if (target == observer)
             return headline ? original : original+(preparing
                 ? " Заявление направлено против нашей страны. Война ещё не объявлена."
                 : " Нашей стране объявлена война.");
         const std::string source(names[actor]), destination(names[target]);
         const auto allied = [&](int country) {
-            return politics->relation(0,country).treaties.contains(ForeignAction::alliance);
+            return politics->relation(observer,country).treaties.contains(ForeignAction::alliance);
         };
         if (allied(actor)) {
             if (headline) return "Наш союзник "+source+(preparing
@@ -59,7 +60,7 @@ public:
                 ? " Заявления прозвучали в адрес нашего союзника "+destination+". Дипломаты внимательно следят за обстановкой: угроза войны стала заметно серьёзнее."
                 : " Военные действия направлены против нашего союзника "+destination+". В союзных столицах обсуждают дальнейшие шаги, но автоматического вступления в войну договор не предусматривает.");
         }
-        if (!preparing && politics->ideologyDistance(0,target)+.12 < politics->ideologyDistance(0,actor)) {
+        if (!preparing && politics->ideologyDistance(observer,target)+.12 < politics->ideologyDistance(observer,actor)) {
             const std::string title = "Близкая нам по взглядам страна "+destination+" оказалась в войне";
             return headline ? title : original+" Общественные настроения в "+destination+
                 " ближе к нашим, чем настроения в стране "+source+". "+title+".";
@@ -145,7 +146,8 @@ private:
     }
 
 public:
-    void setDiplomacy(const Diplomacy& state,std::span<const std::string_view> countryNames) {
+    void setDiplomacy(const Diplomacy& state,std::span<const std::string_view> countryNames,int country = 0) {
+        observer = country;
         politics = &state;
         names = countryNames;
     }
@@ -164,7 +166,7 @@ public:
 
     void update(const News& news,float dt,sf::Vector2f size,float left,float minimumBottom = 0.f,
                 float rightInset = 0.f,float popupBottom = 0.f) {
-        items = news.visible(0);
+        items = news.visible(observer);
         const float margin = size.x >= 1100 ? 310 : 74;
         float width = std::min(560.f,size.x-left-margin);
         float bottom = 16;
@@ -189,7 +191,7 @@ public:
             if (const auto* current = activeItem(); current && current->priority == NewsPriority::important) ++yellow;
             for (auto it = items.rbegin(); it != items.rend(); ++it) {
                 const auto& item = **it;
-                if (item.id <= seen || !item.important()) continue;
+                if (item.id <= seen || !item.automaticPopup(observer)) continue;
                 if (item.priority == NewsPriority::critical) {
                     const auto firstYellow = std::ranges::find_if(pending,[&](int id) {
                         return find(id)->priority == NewsPriority::important;

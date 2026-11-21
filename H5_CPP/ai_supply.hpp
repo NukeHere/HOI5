@@ -16,7 +16,7 @@
 
 namespace hoi5 {
 
-struct BotSupplyPoint { int tile; double weight, passability, current; };
+struct BotSupplyPoint { int tile; double weight, passability, current; double target = .6; };
 struct BotSupplyCandidate { int tile; double strength, multiplier; };
 struct BotSupplyChoice { double gain; int tile; };
 
@@ -65,6 +65,12 @@ struct BotReview {
     BotCourseOptions options;
 };
 
+inline double botSustainmentTarget(double recoveryAtFull,double dailyLoss,double enemyRecovery,int difficulty) {
+    if(recoveryAtFull<=0 || (dailyLoss<=0 && enemyRecovery<=0)) return .5;
+    const double margin=difficulty==3?1.15:difficulty==2?1.05:1.;
+    return std::clamp((dailyLoss+enemyRecovery*margin)/recoveryAtFull,.5,difficulty==3?.9:.75);
+}
+
 struct BotSupplyState {
     int owner;
     double nextDaily;
@@ -100,6 +106,22 @@ struct BotSupplyState {
     int nextWartimeAirRefresh{};
     int nextAirDefenseMove{};
     double nextEconomy{};
+    int nextFiscalReview{},demobilizedDivisions{},parkedAircraft{};
+    Stockpile importTargets,exportTargets,exportFloors,commercialDemand;
+    double sustainableExportIncome{},recurringImportCost{};
+    std::string_view commercialRecipe;
+    std::map<std::string_view,int> deficitSince;
+    Stockpile sovereignNeeds;
+    double sovereignPower{};
+    int sovereignClaim=-1,sovereignDeposit=-1,sovereignEnemy=-1;
+    std::map<int,int> supplyPresenceSince;
+    struct OrgObservation { int owner,tile,hour;double organization; };
+    struct Sustainment { double dailyLoss{},enemyRecovery{},target=.5;int hour{}; };
+    std::map<int,OrgObservation> orgObservations;
+    std::map<int,Sustainment> sustainment;
+    std::map<int,int> frontHoldSince;
+    std::map<std::pair<int,int>,std::pair<double,int>> projectProgress;
+    std::set<std::pair<int,int>> deferredProjects;
     double nextExpansion{};
     double nextDiplomacy{};
     BotCourseChoice course{BotCourse::development,-1};
@@ -151,7 +173,7 @@ inline std::optional<BotSupplyChoice> bestBotSupplySite(int width,std::span<cons
             const int distance = supplyHexDistance(candidate.tile,point.tile,width);
             if (distance > 7) continue;
             const double expected = candidate.strength*falloff[distance]*(.42+.58*point.passability);
-            gain += std::max(0.,std::min(.6,expected)-point.current)*point.weight;
+            gain += std::max(0.,std::min(point.target,expected)-point.current)*point.weight;
         }
         gain *= candidate.multiplier;
         if (gain > .05 && (!best || gain > best->gain)) best = BotSupplyChoice{gain,candidate.tile};

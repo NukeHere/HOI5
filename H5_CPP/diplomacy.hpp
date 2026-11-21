@@ -74,6 +74,52 @@ struct CountryPolitics {
     std::array<double,11> programHours{}, programFunded{}, programFunding{};
     double food = 1, goods = 1, foodPrice = 1, goodsPrice = 1, supply = 1;
 
+    // Fractions in [0,1], durations in game days.
+    std::array<double,2> delivered{}, needed{};
+    double crisisDays = 0, unrest = 0, territorialLoss = 0, repression = 0;
+    int protestPending = 0, protestDay = 0, protestCooldown = 0, reliefDays = 0;
+    double hardship(bool war) const {
+        return std::clamp(.75*std::clamp(1.-std::min(food,goods),0.,1.)+.10*std::max(0,taxes[0])+
+            (war ? .10*(1-warSupport)+.25*territorialLoss : 0.)+.20*repression,0.,1.);
+    }
+    void advanceCrisis(bool war) {
+        repression *= std::exp(-1./365.);
+        const double pressure = hardship(war);
+        reliefDays = pressure < .30 ? std::min(365,reliefDays+1) : 0;
+        crisisDays = std::clamp(crisisDays+(pressure >= .30 ? pressure : -2.),0.,720.);
+        const double radical = *std::max_element(factionRadicalization.begin(),factionRadicalization.end());
+        const double target = std::clamp(.65*pressure+.45*crisisDays/720.+.25*radical+.35*repression-.20,0.,1.);
+        unrest = std::clamp(unrest+(target-unrest)/(pressure >= .30 ? 90. : 45.),0.,1.);
+        if (protestCooldown > 0) --protestCooldown;
+        if (!protestPending && crisisDays >= 30 && !protestCooldown && unrest >= .18) {
+            protestPending = unrest >= .70 ? 3 : unrest >= .40 ? 2 : 1;
+            protestDay = 0;
+        }
+        if (protestPending) ++protestDay;
+    }
+    bool civilWarRisk(int faction) const {
+        return reliefDays < 7 && crisisDays >= 180 && unrest >= .55-.30*repression &&
+            factionPatience[faction] <= .12 && factionRadicalization[faction] >= .75;
+    }
+    bool resolveProtest(int choice) {
+        if (!protestPending || choice < 0 || choice > 3 || (choice == 0 && capital < 10)) return false;
+        if (choice == 0) {
+            repression = std::max(0.,repression-.04);
+            capital -= 10; unrest = std::max(0.,unrest-.12);
+            for (auto& p : factionPatience) p = std::min(1.,p+.06);
+        } else if (choice == 1) {
+            legitimacy = std::min(1.,legitimacy+.025);
+            unrest = std::clamp(unrest+(protestPending == 3 ? .08 : -.025),0.,1.);
+        } else {
+            repression = std::min(1.,repression+(choice == 2 ? .04 : .12));
+            unrest = std::max(0.,unrest-(choice == 2 ? .10 : .23));
+            legitimacy = std::max(0.,legitimacy-(choice == 2 ? .04 : .12));
+            for (auto& p : factionPatience) p = std::max(0.,p-(choice == 2 ? .03 : .09));
+            for (auto& r : factionRadicalization) r = std::min(1.,r+(choice == 2 ? .04 : .12));
+        }
+        protestPending = protestDay = 0; protestCooldown = 30;
+        return true;
+    }
     void refreshSupport() {
         double social = 0., factions = 0.;
         for (int i = 0; i < 4; ++i) {
@@ -105,7 +151,7 @@ struct CountryPolitics {
         const double shortage = std::max(0.,1-std::min(food,goods));
         const double pressure = std::max(0.,foodPrice-1)*.60 + std::max(0.,goodsPrice-1)*.40;
         const double exposure = group == 0 || group == 3 || group == 4 || group == 8 ? 1. : .5;
-        target -= exposure*(.18*shortage+.025*std::min(2.,pressure));
+        target -= exposure*(.48*shortage+.025*std::min(2.,pressure));
         if (group == 7) target += .025*std::min(2,wars);
         if (group == 0 || group == 3 || group == 8 || group == 9)
             target -= .02*std::min(2,wars)*(1-std::clamp(warSupport,0.,1.));
@@ -121,7 +167,7 @@ struct CountryPolitics {
         const auto met = factionDemands(war,budget);
         for (int faction = 0; faction < int(met.size()); ++faction) {
             const double wartime = war ? (faction == 0 ? .05 : faction < 3 ? -.08 : 0.) : 0.;
-            const double target = std::clamp(.7+1.5*(groups[7+faction]-.61)+wartime+(met[faction] ? .08 : -.35),0.,1.);
+            const double target = std::clamp(.7+1.5*(groups[7+faction]-.61)+wartime+(met[faction] ? .08 : -.35)-.35*hardship(war)-.20*unrest,0.,1.);
             auto& patience = factionPatience[faction];
             patience = std::clamp(patience+(target-patience)/90.,0.,1.);
             auto& radical = factionRadicalization[faction];
@@ -147,7 +193,10 @@ struct Relation {
     std::set<int> embargoes, transitGrantors;
 };
 
-struct ForeignOffer { int actor, target, due; ForeignAction action; double amount{}; int warStarted = -1; };
+struct ForeignOffer {
+    int actor, target, due; ForeignAction action; double amount{}; int warStarted = -1;
+    bool operator==(const ForeignOffer&) const = default;
+};
 struct GovernmentLoan {
     int lender, borrower;
     double original, principal;
@@ -306,10 +355,18 @@ struct Diplomacy {
     }
 
     std::map<int,int> allianceNames;
+    // One entry per observer/target; repeated decisions merge until the bot wakes.
+    std::map<std::pair<int,int>,std::set<ForeignAction>> alliedReviews;
+    void queueAlliedReview(int actor,int target,ForeignAction action) {
+        for (int member : allianceMembers(actor))
+            if (member != actor && member != target) alliedReviews[{member,target}].insert(action);
+    }
 
     void removeAllianceMember(int actor) {
         const auto members = allianceMembers(actor);
         if (members.size() <= 1) return;
+        for (int member : members) for (int target = 0; target < int(countries.size()); ++target)
+            if (member != target) alliedReviews[{member,target}].insert(ForeignAction::leaveAlliance);
         const int name = allianceNameOwner(members);
         allianceNames.erase(*std::ranges::min_element(members));
         auto remaining = members;
@@ -491,6 +548,7 @@ struct Diplomacy {
             r.trust = std::clamp(r.trust+info.trust,0.,1.);
             r.opinion[target] = std::clamp(r.opinion[target]+opinion,-100.,100.);
         }
+        queueAlliedReview(actor,target,action);
         record(std::string(info.label),actor,target);
         return {};
     }
@@ -535,8 +593,9 @@ struct Diplomacy {
             if (!war && state.reputation < .5) state.reputation = std::min(.5,state.reputation+.00005);
             state.capital = std::clamp(state.capital+.05*(state.support+state.legitimacy)/1.22-(war ? .04 : 0.),0.,100.);
             state.advanceFactions(war,profiles[i].budget);
-            state.stability = approach(state.stability,.72+.70*supportGap-.25*shortage,90);
-            state.legitimacy = approach(state.legitimacy,.61+.40*supportGap-.10*shortage,180);
+            state.advanceCrisis(war);
+            state.stability = approach(state.stability,.72+.70*supportGap-.35*shortage-.35*state.unrest-.15*state.territorialLoss,90);
+            state.legitimacy = approach(state.legitimacy,.61+.65*supportGap-.25*shortage-.25*state.unrest,180);
         }
         for (auto& [pair, relation] : relations) {
             for (auto& [country, amount] : relation.grievance) amount = std::max(0.,amount-.02);
@@ -581,6 +640,7 @@ struct Diplomacy {
                 return false;
             }
             joinAllyWar(offer.target,enemy);
+            queueAlliedReview(offer.target,enemy,A::war);
             return true;
         }
         const bool loan = action == A::loan || action == A::requestLoan;
@@ -629,6 +689,12 @@ struct Diplomacy {
             r.truceUntil = day+30;
         }
         record("Соглашение принято",offer.actor,offer.target);
+        queueAlliedReview(offer.actor,offer.target,action);
+        queueAlliedReview(offer.target,offer.actor,action);
+        if (action == A::alliance)
+            for (int member : allianceMembers(offer.actor))
+                for (int other = 0; other < int(countries.size()); ++other)
+                    if (member != other) alliedReviews[{member,other}].insert(action);
         return true;
     }
 

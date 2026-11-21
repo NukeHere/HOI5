@@ -3,6 +3,7 @@
 #include "debug_profiler.hpp"
 
 #include "construction_data.hpp"
+#include "production_data.hpp"
 
 #include <optional>
 
@@ -210,10 +211,10 @@ struct Construction {
             if (water || !coastal) return "Порт только рядом с водой";
         }
         if (water && data.building != oilGasRig) return "Нужна суша";
-        constexpr ResourceWeight solid[] = {{"coal",1},{"peat",.55},{"iron_ore",1},{"copper_ore",.82},
-            {"bauxite",.64},{"sulfur",.42},{"phosphorite",.40},{"apatite",.36}};
         constexpr ResourceWeight oil[] = {{"oil",1},{"natural_gas",.95}};
-        if (data.building == mine && resourceScore(tile.deposits,solid) <= 0) return "Нужны твердые залежи";
+        if (data.building == mine && std::ranges::none_of(tile.deposits,[](const auto& d) {
+            return d.mass>0 && d.resource!="oil" && d.resource!="natural_gas" && mineWeights.contains(d.resource);
+        })) return "Нужны твердые залежи";
         if (data.building == oilGasRig && resourceScore(tile.deposits,oil) <= 0) return "Нужна нефть или газ";
         return {};
     }

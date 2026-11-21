@@ -9,8 +9,8 @@ inline constexpr std::array<std::string_view,4> storageBuckets{"raw","semi_finis
 inline std::string_view storageBucket(std::string_view resource) {
     constexpr std::array fuel{"coal","oil","natural_gas","peat","uranium","refined_fuel"};
     constexpr std::array semi{"steel","chemicals","food","fertilizer","copper_wire"};
-    constexpr std::array manufactured{"consumer_goods","machinery","vehicles","electronics","construction_goods",
-        "weapons","infantry_equipment","old_assault_rifles","small_arms_ammo","old_light_artillery",
+    constexpr std::array manufactured{"tank","light_fighter","multirole_fighter","fighter_bomber","cas_aircraft","attack_helicopter","strategic_bomber","unguided_rockets","light_guided_missile","guided_bomb","glide_bomb","tactical_cruise_missile","small_ballistic_missile","heavy_strategic_missile","bunker_buster","short_air_to_air_missile","medium_air_to_air_missile","manpads_team","short_range_aa","medium_range_sam","long_range_sam","radar_unit","consumer_goods","machinery","vehicles","electronics","construction_goods",
+        "infantry_equipment","old_assault_rifles","small_arms_ammo","old_light_artillery",
         "light_artillery_ammo","old_light_aa_artillery","light_aa_ammo","old_ifv","old_at_missiles",
         "autocannon_ammo","artillery_ammo","tank_ammo","anti_air_ammo","spare_parts","field_supplies","ships"};
     if (std::find(fuel.begin(),fuel.end(),resource) != fuel.end()) return "fuel";

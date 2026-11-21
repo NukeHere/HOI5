@@ -8,6 +8,16 @@
 
 namespace hoi5 {
 
+// Relative planning pressure; transit alone provides no guarantee against war.
+inline double botBorderPressure(bool alliance,bool nonaggression,bool transit,bool threat,
+                                double trust,double reliability,double attitude) {
+    if (threat) return 1.;
+    if (alliance) return std::clamp(.05+.15*(1.-trust)+.1*(1.-reliability)+
+        std::max(0.,-attitude)/500.,.05,.35);
+    if (nonaggression) return .35;
+    return transit ? .85 : 1.;
+}
+
 enum BotMilitaryMetric { personnel, attack, defense, breakthrough, armor, piercing, mobility, readiness, militaryMetrics };
 using BotMilitary = std::array<double,militaryMetrics>;
 

@@ -254,6 +254,32 @@ double placeStartingBuildings(std::vector<Tile>& tiles, int size, int capital,
     return remaining;
 }
 
+// Place finite, climate-appropriate fields using unfertilized output only.
+// Fertilizer is an optional gain, never a prerequisite for the starting food balance.
+template<class Tile>
+double ensureStartingFood(std::vector<Tile>& tiles,const std::vector<int>& land,double monthlyNeed) {
+    double output = 0.;
+    std::vector<int> candidates;
+    for (int index : land) {
+        const auto& tile = tiles[index];
+        output += tile.buildings[farms].area*tile.buildings[farms].health*
+            agricultureScore(tile.natural)*30000.;
+        if (!tile.water && agricultureScore(tile.natural) >= .15) candidates.push_back(index);
+    }
+    std::stable_sort(candidates.begin(),candidates.end(),[&](int a,int b) {
+        return agricultureScore(tiles[a].natural) > agricultureScore(tiles[b].natural);
+    });
+    for (int index : candidates) {
+        if (output >= monthlyNeed*1.05) break;
+        auto& field = tiles[index].buildings[farms];
+        const double rate = agricultureScore(tiles[index].natural)*30000.*field.health;
+        if (rate <= 0) continue;
+        const double added = std::min(std::max(0.,.65-field.area),(monthlyNeed*1.05-output)/rate);
+        field.area += added; output += added*rate;
+    }
+    return std::max(0.,monthlyNeed-output);
+}
+
 template<class Tile>
 void distributeStartingPopulation(std::vector<Tile>& tiles, const std::vector<int>& land, double population) {
     constexpr std::array<std::pair<Building,double>, 9> ruralWeights{{

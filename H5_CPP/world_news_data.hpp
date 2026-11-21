@@ -13,6 +13,9 @@ struct WorldNewsTemplate {
     int cooldown;
 };
 
+// Applies only to random templates, including contextual oil-crisis bonuses.
+inline constexpr double randomWorldEventFrequency = 0.25;
+
 // Order matches WORLD_TEMPLATES in H5_Python/news_system.py.
 inline constexpr WorldNewsTemplate worldNewsTemplates[] = {
     {"oil_crisis","Мировой нефтяной кризис",

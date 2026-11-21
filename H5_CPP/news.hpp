@@ -26,6 +26,10 @@ struct NewsItem {
     int actor = -1, target = -1;
 
     bool important() const { return priority >= NewsPriority::important; }
+    bool automaticPopup(int observer) const {
+        if (viewer >= 0) return important();
+        return key == "alliance" || key == "war" || (key == "war_justification" && target == observer);
+    }
     bool visibleTo(int country) const { return viewer < 0 || viewer == country || otherViewer == country; }
 };
 
@@ -183,7 +187,7 @@ public:
                 const auto high = rng() >> 5;
                 const auto low = rng() >> 6;
                 const double draw = (high*67108864. + low)/9007199254740992.;
-                if (draw >= std::min(1.,chance)) continue;
+                if (draw >= std::min(1.,chance*randomWorldEventFrequency)) continue;
                 std::string body(event.body);
                 if (event.key == "oil_crisis") {
                     if (context.majorOilExporterRestricted)

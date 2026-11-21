@@ -61,6 +61,7 @@ add_test(NAME reference_map COMMAND HOI5 --check-map)
 add_test(NAME friendly_movement COMMAND HOI5 --check-movement)
 add_test(NAME neutral_capture COMMAND HOI5 --check-capture)
 add_test(NAME economy_tick_and_trade COMMAND HOI5 --check-economy)
+add_test(NAME trade_access_transitions COMMAND HOI5 --check-trade-access)
 add_test(NAME diplomacy_and_battle COMMAND HOI5 --check-battle)
 add_test(NAME construction_and_training COMMAND HOI5 --check-construction-training)
 add_test(NAME air_strike COMMAND HOI5 --check-air-strike)
@@ -74,6 +75,7 @@ add_test(NAME news_file_log COMMAND HOI5 --check-news-log "${CMAKE_CURRENT_BINAR
 add_test(NAME supply_python_parity COMMAND HOI5 --check-supply-parity)
 add_test(NAME bot_regions_python_parity COMMAND HOI5 --check-bot-regions)
 add_test(NAME bot_front_posts_python_parity COMMAND HOI5 --check-bot-front-posts)
+add_test(NAME bot_allied_border_distribution COMMAND HOI5 --check-bot-front-posts allied-distribution)
 add_test(NAME bot_border_campaign COMMAND HOI5 --check-border-campaign)
 add_test(NAME bot_generated_campaign COMMAND HOI5 --check-campaign 146591 365)
 set_tests_properties(bot_generated_campaign PROPERTIES
@@ -92,3 +94,36 @@ add_test(NAME airbase_capture COMMAND HOI5 --check-airbase-capture)
 add_test(NAME defense_reload COMMAND HOI5 --check-defense-reload)
 add_test(NAME field_helipad COMMAND HOI5 --check-field-helipad)
 add_test(NAME air_wing_rebase COMMAND HOI5 --check-air-rebase)
+
+add_test(NAME opposing_entry_contact COMMAND HOI5 --check-entry-contact)
+
+if(BUILD_TESTING)
+    add_executable(land_path_check H5_CPP/tests/land_path_check.cpp)
+    target_compile_features(land_path_check PRIVATE cxx_std_20)
+    add_test(NAME long_land_path_regression COMMAND land_path_check)
+    add_test(NAME long_movement_orders COMMAND HOI5 --check-long-orders)
+endif()
+
+add_test(NAME political_crisis_long_campaign COMMAND HOI5 --check-political-crisis)
+
+if(BUILD_TESTING)
+    add_executable(political_flows_check H5_CPP/tests/political_flows_check.cpp)
+    target_compile_features(political_flows_check PRIVATE cxx_std_20)
+    add_test(NAME political_actual_consumption_and_pause COMMAND political_flows_check)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(production_power_check H5_CPP/tests/production_power_check.cpp)
+    target_compile_features(production_power_check PRIVATE cxx_std_20)
+    add_test(NAME production_power_contract COMMAND production_power_check)
+endif()
+
+add_test(NAME bot_economic_development_peace COMMAND HOI5 --check-economic-development 146591 30 peace 30 3)
+add_test(NAME bot_economic_development_scarcity COMMAND HOI5 --check-economic-development 918273 30 scarcity 20 6)
+
+add_test(NAME bot_strategic_fortifications COMMAND HOI5 --check-bot-fortifications)
+
+add_test(NAME bot_financial_sustainability COMMAND HOI5 --check-bot-finances)
+
+add_test(NAME bot_export_economy COMMAND HOI5 --check-bot-exports)
+add_test(NAME bot_sovereign_economy COMMAND HOI5 --check-bot-sovereignty)

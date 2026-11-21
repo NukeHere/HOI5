@@ -32,6 +32,12 @@ public:
     void setSpeed(int value) { speed = std::clamp(value,1,5); }
     void changeSpeed(int delta) { setSpeed(speed+delta); }
 
+    // Cosmetic mission seconds retain their real-time duration at every speed,
+    // but follow both the simulation pause and the blocking Escape menu.
+    double airVisualDelta(double frameSeconds, bool menuOpen) const {
+        return paused || menuOpen ? 0. : std::clamp(frameSeconds,0.,.05);
+    }
+
     template<class Step>
     void update(double deltaTime, Step step) {
         if (paused) return;
@@ -41,12 +47,12 @@ public:
         const double secondsPerStep = .25 * hoursPerStep / hours;
         const int ticks = std::min(16, int((accumulator + 1e-10) / secondsPerStep));
         const auto started = Clock::now();
-        for (int i = 0; i < ticks; ++i) {
+        for (int i = 0; i < ticks && !paused; ++i) {
             if (i && Clock::now() - started >= std::chrono::milliseconds(8)) break;
             accumulator = std::max(0., accumulator - secondsPerStep);
             ++tickCount;
             int remaining = hoursPerStep;
-            while (remaining > 0) {
+            while (remaining > 0 && !paused) {
                 const int duration = std::min({6, remaining, 24 - elapsedHours % 24});
                 elapsedHours += duration;
                 if (elapsedHours == nextMarketHour) {

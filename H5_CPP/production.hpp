@@ -2,6 +2,7 @@
 
 #include "production_data.hpp"
 #include <set>
+#include <functional>
 
 namespace hoi5 {
 
@@ -43,7 +44,7 @@ std::vector<std::string_view> industryAllocation(const std::vector<Tile>& tiles,
     score("chemicals") += refineryScore*.24+cityScore*.10;
     score("electronics") += cityScore*.30+pass*.08;
     score("shipbuilding") += portScore*.65;
-    score("weapons") += cityScore*.12+score("metallurgy")*.14;
+    score("military") += cityScore*.12+score("metallurgy")*.14;
     for (auto& [key,value] : scores) value = std::clamp(value,0.,1.);
     std::stable_sort(scores.begin(),scores.end(),[](const auto& a,const auto& b) { return a.second > b.second; });
     std::vector allocation{scores.front().first};
@@ -115,11 +116,7 @@ void accumulateTileProduction(Production& result,const Tile& tile,
         if (!recipe.technology.empty() && !technologies.contains(recipe.technology)) continue;
         double units = recipe.rate * effective(recipe.building);
         if (units <= 0) continue;
-        if (recipe.building == industry) {
-            const auto& allocation = tile.industries;
-            if (std::find(allocation.begin(),allocation.end(),recipe.sector) == allocation.end()) continue;
-            units *= std::pow(.9, allocation.size()-1) / allocation.size();
-        }
+        if (recipe.building == industry) continue;
         for (const auto& [name,amount] : recipe.inputs) result[recipe.stage].inputs[name] += amount*units;
         for (const auto& [name,amount] : recipe.outputs) result[recipe.stage].outputs[name] += amount*units;
     }
@@ -127,9 +124,130 @@ void accumulateTileProduction(Production& result,const Tile& tile,
     for (const auto& [name,amount] : villageUpkeep) result[upkeep].inputs[name] += effective(village)*amount;
 }
 
+inline const Recipe* productionRecipe(std::string_view id) {
+    for (const auto& recipe : recipes) if (recipe.id == id) return &recipe;
+    return nullptr;
+}
+template<class Tile>
+double productionPower(const std::vector<Tile>& tiles,int country,double efficiency = 1.) {
+    double power = 0;
+    for (const auto& tile : tiles) if (tile.owner == country)
+        power += std::max(0.,tile.buildings[industry].area)*std::clamp(tile.buildings[industry].health,0.,1.)*100.;
+    return power*(std::isfinite(efficiency) ? std::max(0.,efficiency) : 0.);
+}
+inline ProductionPlan startingProductionPlan(double power) {
+    const std::pair<std::string_view,double> shares[]{
+        {"consumer_goods",.18},{"construction_goods",.17},{"steel",.16},
+        {"chemicals",.09},{"copper_wire",.06},{"fertilizer",.05},
+        {"machinery",.07},{"vehicles",.035},{"electronics",.025},
+        {"infantry_equipment",.025},{"old_assault_rifles",.025},{"small_arms_ammo",.025},
+        {"old_light_artillery",.01},{"old_light_aa_artillery",.01},{"old_ifv",.01},{"tank",.01},
+        {"old_at_missiles",.01},{"field_supplies",.015},{"spare_parts",.015},
+        {"light_artillery_ammo",.005},{"light_aa_ammo",.005},{"autocannon_ammo",.005},
+        {"artillery_ammo",.003},{"tank_ammo",.003},{"anti_air_ammo",.004}};
+    ProductionPlan result;
+    double total = 0.;
+    for (auto [key,share] : shares) total += share;
+    for (auto [key,share] : shares) result.push_back({key,power*share/total});
+    return result;
+}
+// National demand closure: quantities are monthly; transient orders are amortized by caller.
+// Rebuild from end uses, rather than growing assignments or reading legacy tile sectors.
+inline ProductionPlan demandProductionPlan(double power,const Production& passive,
+                                           Stockpile endUse,const Stockpile& stocks,const Stockpile& recurrentSales = {}) {
+    // Reserves and one-off orders may be postponed while stocks cover them; recurring
+    // civilian upkeep below is never mistaken for another stock-replenishment order.
+    for(auto& [key,amount]:endUse) amount=std::max(0.,amount+(amount*.5-value(stocks,key))/3.);
+    for(auto [key,amount]:recurrentSales) endUse[key]+=std::max(0.,amount);
+    Stockpile baseOutput;
+    const double baseFood=value(passive[raw].outputs,"food");
+    const double foodNeed=value(passive[upkeep].inputs,"food")+value(passive[upkeep].inputs,"consumer_goods")*.4;
+    const double bonusFood=value(passive[agriculture].outputs,"food");
+    const double fertilizerShare=bonusFood>0?std::clamp((foodNeed*1.02-baseFood)/bonusFood,0.,1.):0.;
+    for (int index=0;index<productionStages;++index) {
+        const auto& stage=passive[index];double supported=1.;
+        for(auto [key,amount]:stage.inputs) {
+            const double wanted=index==agriculture?amount*fertilizerShare:amount;
+            endUse[key]+=wanted;
+            if(amount>0) supported=std::min(supported,(value(baseOutput,key)+value(stocks,key)/3.)/amount);
+        }
+        // A nominal refinery without oil must not suppress a feasible chemical recipe.
+        for(auto [key,amount]:stage.outputs) baseOutput[key]+=amount*std::clamp(supported,0.,1.);
+    }
+    const auto close=[&](const Stockpile& use) {
+        Stockpile demand=use,units;
+        for(int pass=0;pass<12;++pass) {
+            Stockpile next=use;units.clear();
+            for(const auto& recipe:recipes) {
+                if(recipe.building!=industry || !recipe.technology.empty() || recipe.outputs.empty()) continue;
+                double count=0.;
+                for(auto [key,yield]:recipe.outputs) if(yield>0)
+                    count=std::max(count,std::max(0.,value(demand,key)-value(baseOutput,key))/yield);
+                units[recipe.id]=count;
+                for(auto [key,amount]:recipe.inputs) next[key]+=amount*count;
+            }
+            demand=std::move(next);
+        }
+        Stockpile powers;
+        for(const auto& recipe:recipes) if(recipe.building==industry && recipe.rate>0 && recipe.powerCost>0)
+            powers[recipe.id]=value(units,recipe.id)*recipe.powerCost/recipe.rate;
+        return powers;
+    };
+    const auto sum=[](const Stockpile& powers){double total=0.;for(auto [key,amount]:powers) total+=amount;return total;};
+    const auto wanted=close(endUse);Stockpile assigned=wanted;
+    if(sum(wanted)>power) {
+        // Protect a positive construction-material flow and its entire input chain before
+        // optional reserves/luxuries. Otherwise upkeep can consume every unit forever.
+        Stockpile bootstrap;
+        const double upkeepGoods=value(passive[upkeep].inputs,"construction_goods");
+        bootstrap["construction_goods"]=std::max(upkeepGoods*1.25,
+            std::min(value(endUse,"construction_goods"),upkeepGoods*1.6));
+        const double machines=upkeepGoods>0?150.*std::clamp(upkeepGoods/1000.,.5,2.4):0.;
+        bootstrap["machinery"]=std::max(0.,machines-value(stocks,"machinery")/3.);
+        assigned=close(bootstrap);
+        const double reserved=sum(assigned);
+        if(reserved>power) for(auto& [key,amount]:assigned) amount*=std::max(0.,power)/reserved;
+        else {
+            // Civilian recurring consumption must not compete with arbitrary equipment
+            // reserve orders: losing household goods also destroys political/tax stability.
+            Stockpile civilian=bootstrap;
+            for(auto [key,amount]:passive[upkeep].inputs)
+                civilian[key]=std::max(value(civilian,key),amount);
+            const auto fit=[&](const Stockpile& floor,const Stockpile& target) {
+                double low=0.,high=1.;
+                for(int pass=0;pass<12;++pass) {
+                    const double fraction=(low+high)*.5;Stockpile blended=floor;
+                    for(auto [key,amount]:target) blended[key]+=std::max(0.,amount-value(floor,key))*fraction;
+                    auto candidate=close(blended);
+                    if(sum(candidate)<=power) {low=fraction;assigned=std::move(candidate);} else high=fraction;
+                }
+            };
+            auto basic=close(civilian);
+            if(sum(basic)>power) fit(bootstrap,civilian);
+            else {assigned=std::move(basic);fit(civilian,endUse);}
+        }
+    }
+    ProductionPlan result;
+    for(const auto& recipe:recipes) if(recipe.building==industry && value(assigned,recipe.id)>1e-8)
+        result.push_back({recipe.id,value(assigned,recipe.id)});
+    return result;
+}
+
+inline bool setProductionPower(ProductionPlan& plan,std::string_view id,double power) {
+    const auto* recipe = productionRecipe(id);
+    if (!recipe || recipe->building != industry || !std::isfinite(power) || power < 0) return false;
+    for (auto& line : plan) if (line.recipe == id) { line.power = power; return true; }
+    plan.push_back({recipe->id,power}); return true;
+}
+inline bool moveProductionLine(ProductionPlan& plan,std::size_t from,std::size_t to) {
+    if (from >= plan.size() || to >= plan.size()) return false;
+    auto line = plan[from]; plan.erase(plan.begin()+from); plan.insert(plan.begin()+to,line); return true;
+}
+
 template<class Tile>
 Production buildProduction(const std::vector<Tile>& tiles, int size, int country, double population,
-                           const std::set<std::string_view>& technologies) {
+                           const std::set<std::string_view>& technologies,
+                           const ProductionPlan* plan = nullptr,double efficiency = 1.) {
     Production result;
     for (const auto& tile : tiles)
         if (tile.owner == country) accumulateTileProduction(result,tile,technologies);
@@ -160,12 +278,41 @@ Production buildProduction(const std::vector<Tile>& tiles, int size, int country
                     std::min(1.,std::log10(deposit.mass+1)/std::log10(1500001.));
     }
     for (const auto& [name,amount] : lifeSupport) result[upkeep].inputs[name] += population/1e6*amount;
+    result.passive = static_cast<const std::array<ProductionFlows,productionStages>&>(result);
+    result.nationalPlan = true;
+    result.totalPower = result.unusedPower = productionPower(tiles,country,efficiency);
+    const auto defaults = plan ? ProductionPlan{} : startingProductionPlan(result.totalPower);
+    for (const auto& assignment : plan ? *plan : defaults) {
+        ProductionLine line; line.recipe = assignment.recipe;
+        line.assignedPower = std::isfinite(assignment.power) ? std::max(0.,assignment.power) : 0.;
+        const auto* recipe = productionRecipe(line.recipe);
+        if (!recipe || recipe->building != industry) {
+            line.limits.push_back("invalid_recipe"); result.lines.push_back(line); continue;
+        }
+        if (!recipe->technology.empty() && !technologies.contains(recipe->technology)) {
+            line.limits.push_back("technology"); result.lines.push_back(line); continue;
+        }
+        line.availablePower = std::min(line.assignedPower,result.unusedPower);
+        result.unusedPower -= line.availablePower;
+        if (line.availablePower < line.assignedPower) line.limits.push_back("capacity");
+        line.plannedUnits = recipe->rate*line.availablePower/recipe->powerCost;
+        for (auto [key,amount] : recipe->inputs) {
+            line.inputs[key] = amount*line.plannedUnits;
+            result[recipe->stage].inputs[key] += amount*line.plannedUnits;
+        }
+        for (auto [key,amount] : recipe->outputs) {
+            line.outputs[key] = amount*line.plannedUnits;
+            result[recipe->stage].outputs[key] += amount*line.plannedUnits;
+        }
+        result.lines.push_back(std::move(line));
+    }
     return result;
 }
 
 template<class AddStock>
-std::array<double,productionStages> runProduction(const Production& production, Stockpile& stock,
-                                                  int hours, AddStock addStock) {
+std::array<double,productionStages> runPassiveProduction(const Production& production, Stockpile& stock,
+                                                  int hours, AddStock addStock,
+    const std::function<void(std::string_view,double,double)>& consume = {}) {
     std::array<double,productionStages> ratios{};
     const double fraction = hours / 720.;
     for (int stage = 0; stage < productionStages; ++stage) {
@@ -177,11 +324,61 @@ std::array<double,productionStages> runProduction(const Production& production, 
         ratios[stage] = ratio;
         for (const auto& [name,amount] : inputs) {
             auto& stored = stock[name];
+            if (stage == upkeep && consume) consume(name,std::min(stored,amount*fraction),amount*fraction);
             stored = std::max(0.,stored-amount*fraction*(stage == upkeep ? 1. : ratio));
         }
         for (const auto& [name,amount] : outputs) addStock(name,amount*fraction*ratio);
     }
     return ratios;
+}
+
+template<class AddStock>
+std::array<double,productionStages> runProduction(const Production& production,Stockpile& stock,
+    int hours,AddStock addStock,
+    const std::function<void(std::string_view,double,double)>& consume = {},
+    std::vector<ProductionLine>* report = nullptr) {
+    if (report) report->clear();
+    if (hours <= 0) return {};
+    if (!production.nationalPlan) return runPassiveProduction(production,stock,hours,addStock,consume);
+    const double fraction = hours/720.;
+    Stockpile demand, pending;
+    auto lines = production.lines;
+    for (const auto& line : lines) for (auto [key,amount] : line.inputs) demand[key] += amount*fraction;
+    Stockpile ratios;
+    for (auto [key,amount] : demand) ratios[key] = amount > 0 ? std::clamp(value(stock,key)/amount,0.,1.) : 1.;
+    for (auto& line : lines) {
+        double ratio = 1;
+        for (auto [key,amount] : line.inputs) if (amount > 0 && ratios[key] < 1.) {
+            ratio = std::min(ratio,ratios[key]); line.limits.push_back(key);
+        }
+        line.actualUnits = line.plannedUnits*fraction*ratio;
+        for (auto [key,amount] : line.inputs) {
+            line.actualInputs[key] = amount*fraction*ratio;
+            stock[key] = std::max(0.,stock[key]-line.actualInputs[key]);
+        }
+        for (auto [key,amount] : line.outputs) {
+            line.actualOutputs[key] = amount*fraction*ratio;
+            pending[key] += line.actualOutputs[key];
+        }
+    }
+    Production passive;
+    static_cast<std::array<ProductionFlows,productionStages>&>(passive) = production.passive;
+    auto stageRatios = runPassiveProduction(passive,stock,hours,[&](auto key,double amount) { pending[key] += amount; },consume);
+    Stockpile acceptedRatio;
+    for (auto [key,amount] : pending) {
+        if constexpr (std::is_void_v<decltype(addStock(key,amount))>) {
+            addStock(key,amount); acceptedRatio[key] = 1.;
+        } else {
+            const double accepted = std::clamp(double(addStock(key,amount)),0.,amount);
+            acceptedRatio[key] = amount > 0 ? accepted/amount : 1.;
+        }
+    }
+    for (auto& line : lines) for (auto [key,amount] : line.actualOutputs) {
+        line.storedOutputs[key] = amount*acceptedRatio[key];
+        if (acceptedRatio[key] < 1. && amount > 0) line.limits.push_back("storage");
+    }
+    if (report) *report = std::move(lines);
+    return stageRatios;
 }
 
 }
