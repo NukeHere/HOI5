@@ -10,6 +10,7 @@
 #include "debug_profiler.hpp"
 #include "diplomacy.hpp"
 #include "combat.hpp"
+#include "combat_sampling.hpp"
 #include "land_path.hpp"
 #include "air_missions.hpp"
 #include "construction.hpp"
@@ -3836,7 +3837,7 @@ struct World {
                 return battery.tile==salvo.target && battery.health>0 && diplomacy.hostile(salvo.owner,battery.owner);
             });
             if(target==air.defense.end()) return false;
-            const int hits=std::binomial_distribution<int>(salvo.count,std::clamp(salvo.weapon->accuracy*(1.-hoi5::defenseClasses[target->type].camouflage*.4),0.,1.))(combatRandom);
+            const int hits=hoi5::sampleCombatHits(salvo.count,std::clamp(salvo.weapon->accuracy*(1.-hoi5::defenseClasses[target->type].camouflage*.4),0.,1.),combatRandom);
             target->health=std::max(0.,target->health-hits*salvo.weapon->damageMult*.12);
             return impact();
         }
@@ -3868,7 +3869,7 @@ struct World {
         const int sorties = std::max(1,int(std::ceil(ready*std::clamp(wing.sortieIntensity,0.,1.)*.18)));
         const int fueled=wing.owner>=0 && wing.owner<int(stockpiles.size()) ?
             int(hoi5::value(stockpiles[wing.owner],"refined_fuel")/hoi5::fighterSortieFuel(hoi5::airHexDistance(wing.base,tile,size))) : 0;
-        return std::min({targets,wing.interceptorAmmo,2*sorties,fueled});
+        return std::max(0,std::min({targets,wing.interceptorAmmo,2*sorties,fueled}));
     }
 
     void interceptAircraft(int targetIndex,int exposure,int sorties,int targetType = -1) {
@@ -3889,9 +3890,10 @@ struct World {
             return std::tuple{-a.chance,a.distance} < std::tuple{-b.chance,b.distance};
         });
         for (const auto& candidate : candidates) {
-            const int engaged = std::min(candidate.engaged,sorties);
-            if (!engaged) break;
+            if(sorties<=0) break;
             auto& fighter = air.wings[candidate.wing];
+            const int engaged=std::min(candidate.engaged,fighterEngagement(fighter,target.owner,exposure,sorties));
+            if(engaged<=0) continue;
             fighter.interceptorAmmo -= engaged;
             stockpiles[fighter.owner]["refined_fuel"]-=engaged*hoi5::fighterSortieFuel(candidate.distance);
             addAirVisual(fighter.owner,fighter.base,exposure,fighter.missionType(2));
@@ -4043,7 +4045,7 @@ struct World {
             const int spent = engaged*candidate.perTarget;
             if (candidate.battery) candidate.battery->ammo -= spent;
             else candidate.division->consume(candidate.ammoKey,spent);
-            const int hits = std::binomial_distribution<int>(engaged,candidate.chance)(combatRandom);
+            const int hits = hoi5::sampleCombatHits(engaged,candidate.chance,combatRandom);
             result.hits += hits;
             const auto lost = applyAircraftHits(wing,hits,type,tile,
                 candidate.battery ? candidate.battery->owner : candidate.division->owner);
@@ -4086,10 +4088,12 @@ struct World {
         });
         for (const auto& candidate : candidates) {
             auto& fighter=air.wings[candidate.wing];
-            fighter.interceptorAmmo -= candidate.engaged;
-            stockpiles[fighter.owner]["refined_fuel"]-=candidate.engaged*hoi5::fighterSortieFuel(candidate.distance);
+            const int engaged=std::min(candidate.engaged,fighterEngagement(fighter,salvo.owner,salvo.current,salvo.count));
+            if(engaged<=0) continue;
+            fighter.interceptorAmmo -= engaged;
+            stockpiles[fighter.owner]["refined_fuel"]-=engaged*hoi5::fighterSortieFuel(candidate.distance);
             addAirVisual(fighter.owner,fighter.base,salvo.current,fighter.missionType(2));
-            salvo.inbound.push_back({air.wings[candidate.wing].owner,candidate.engaged,candidate.chance,1.});
+            salvo.inbound.push_back({fighter.owner,engaged,candidate.chance,1.});
             if (salvo.remaining <= 0) salvo.terminalReactionSpent = true;
         }
     }
@@ -4165,7 +4169,7 @@ struct World {
             if (probability < .03*scarcity) continue;
             if (defender.battery) defender.battery->ammo -= spent;
             else defender.division->consume(defender.ammoKey,spent);
-            salvo.count -= std::binomial_distribution<int>(engaged,probability)(combatRandom);
+            salvo.count -= hoi5::sampleCombatHits(engaged,probability,combatRandom);
         }
     }
 
@@ -4259,7 +4263,7 @@ struct World {
                 if (salvo.attack.remaining > 0) return false;
                 const int engaged = std::min(salvo.attack.count,salvo.sorties);
                 const double chance = emergencyEvasion(salvo.targetWing,engaged,salvo.attack.chance,type);
-                const int hits = std::binomial_distribution<int>(engaged,chance)(combatRandom);
+                const int hits = hoi5::sampleCombatHits(engaged,chance,combatRandom);
                 applyAircraftHits(target,hits,type,salvo.exposure,salvo.attack.owner);
                 if (hits > 0) {
                     target.abortedHours = std::max(target.abortedHours,6.);
@@ -4272,8 +4276,8 @@ struct World {
                     interceptor.remaining -= hours*2.5;
                     if (interceptor.remaining > 0) return false;
                     if (salvo.count > 0 && diplomacy.hostile(interceptor.owner,salvo.owner))
-                        salvo.count -= std::binomial_distribution<int>(std::min(salvo.count,interceptor.count),
-                            interceptor.chance)(combatRandom);
+                        salvo.count -= hoi5::sampleCombatHits(std::min(salvo.count,interceptor.count),
+                            interceptor.chance,combatRandom);
                     return true;
                 });
             }
@@ -5722,7 +5726,7 @@ struct World {
                 return tiles[next].owner >= 0 && diplomacy.hostile(owner,tiles[next].owner);
             });
         })) fronts.push_back(&region);
-        std::map<int,int> assignments;
+        std::map<std::pair<int,int>,int> assignments;
         struct HelicopterDetachment { int wing, base, count; };
         std::vector<HelicopterDetachment> detachments;
         const bool combat = botAtWar(owner);
@@ -5741,34 +5745,56 @@ struct World {
         for (int wingIndex = 0; wingIndex < int(air.wings.size()); ++wingIndex) {
             auto& wing = air.wings[wingIndex];
             if (wing.owner != owner || wing.count <= 0) continue;
+            const bool helicopter = hoi5::aircraftTypes[wing.type].helicopter;
+            const auto& bases = helicopter ? helicopterBases : rearBases;
+            const int casRole=wing.missionType(0),fighterRole=wing.missionType(2),strikeType=wing.missionType(1);
+            const bool groundDedicated=casRole>=0 && fighterRole<0;
+            const int role=groundDedicated?0:fighterRole>=0?1:2;
+            const int missionType=groundDedicated?casRole:fighterRole>=0?fighterRole:strikeType;
+            std::vector<int> deploymentBases{wing.base};
+            for(int base:bases) if(base!=wing.base && air.freeCapacity(tiles,owner,base,wing.type,wingIndex)>=wing.count)
+                deploymentBases.push_back(base);
             const hoi5::BotRegion* assigned = nullptr;
             auto rank = std::tuple{std::numeric_limits<int>::max(),0.,0};
             for (const auto* region : fronts) {
                 bool reachable = false;
-                for (const int tile : region->tiles) for (int type = 0; type < int(std::size(hoi5::aircraftTypes)); ++type)
-                    reachable |= wing.typeCount(type) > 0 && botAirReach(wing.base,tile,type);
+                const auto reaches=[&](int base,int tile) {return botAirReach(base,tile,missionType);};
+                for(int tile:region->borders) for(int next:botGeography.adjacent(tile)) {
+                    if(tiles[next].owner<0 || !diplomacy.hostile(owner,tiles[next].owner)) continue;
+                    reachable|=reaches(wing.base,next);
+                    for(int base:deploymentBases) if(!reachable && reaches(base,next)) reachable=true;
+                }
                 if (!reachable) continue;
-                const auto candidate = std::tuple{assignments[region->base],-region->importance,region->base};
+                const auto candidate = std::tuple{assignments[{region->base,role}],-region->importance,region->base};
                 if (!assigned || candidate < rank) { assigned = region; rank = candidate; }
             }
-            if (!assigned) {
+            if (!assigned && groundDedicated && combat && !fronts.empty()) {
+                // Retain an actual front as the deployment objective even when a forward base is still missing.
+                assigned=*std::ranges::min_element(fronts,[&](auto a,auto b) {
+                    return hoi5::supplyHexDistance(wing.base,a->anchor,size)<hoi5::supplyHexDistance(wing.base,b->anchor,size);
+                });
+            }
+            if (!assigned && !groundDedicated) {
                 const auto fallback = std::ranges::find_if(bot.regions,[&](const auto& region) {
                     return std::ranges::find(region.tiles,task.tile) != region.tiles.end();
                 });
                 if (fallback != bot.regions.end()) assigned = &*fallback;
             }
-            if (!assigned) continue;
-            ++assignments[assigned->base];
+            if (!assigned) {
+                if(groundDedicated) {
+                    wing.airSuperiority=wing.intercept=wing.patrol=false;
+                    wing.enabledMissions={false,false};wing.targetPriorities={"enemy_units"};
+                    wing.operationArea.clear();wing.strategicOperationArea.clear();wing.target=-1;
+                }
+                continue;
+            }
+            ++assignments[{assigned->base,role}];
             const auto tileKey = [&](int tile) { return std::pair{tile%size,tile/size}; };
             const int center = assigned->tiles[assigned->tiles.size()/2];
             int bestBase = wing.base;
-            const bool helicopter = hoi5::aircraftTypes[wing.type].helicopter;
-            const auto& bases = helicopter ? helicopterBases : rearBases;
-            const int missionType = wing.missionType(0) >= 0 ? wing.missionType(0) : wing.type;
-            const int strikeType = wing.missionType(1);
             std::set<int> nearbyTargets;
             for (int tile : assigned->borders) for (int next : botGeography.adjacent(tile))
-                if (diplomacy.hostile(owner,tiles[next].owner) && !airDefenseWater(next))
+                if (tiles[next].owner>=0 && diplomacy.hostile(owner,tiles[next].owner) && !airDefenseWater(next))
                     nearbyTargets.insert(next);
             const auto reachRank = [&](int base) {
                 const auto targets = std::ranges::count_if(nearbyTargets,[&](int tile) {
@@ -5777,7 +5803,7 @@ struct World {
                 double strategic = 0.;
                 for (const auto [tile,value] : strikeTargets)
                     if (botAirReach(base,tile,strikeType)) strategic += value;
-                return std::tuple{strategic,targets,botAirReach(base,center,missionType),
+                return std::tuple{groundDedicated?double(targets):strategic,targets,botAirReach(base,center,missionType),
                     -hoi5::supplyHexDistance(base,center,size)};
             };
             for (const int base : bases)
@@ -5818,7 +5844,9 @@ struct World {
                 readiness<.6 || !combat ? hoi5::AirRisk::cautious : hoi5::AirRisk::normal;
             wing.sortieIntensity *= readiness<.5?.5:1.;
 
-            std::set<int> area(assigned->tiles.begin(),assigned->tiles.end());
+            std::set<int> area;
+            if(!groundDedicated) area.insert(assigned->tiles.begin(),assigned->tiles.end());
+            else area.insert(assigned->borders.begin(),assigned->borders.end());
             for (const int tile : assigned->tiles) for (const int next : botGeography.adjacent(tile))
                 if (tiles[next].owner >= 0 && diplomacy.hostile(owner,tiles[next].owner)) area.insert(next);
             std::set<int> support;
@@ -5838,14 +5866,14 @@ struct World {
                     (strikeType>=0 && (enemyDivisions[tile]>=3 || support.contains(tile)) && botAirReach(wing.base,tile,strikeType))))
                     concentrations.emplace_back((2*enemyDivisions[tile]+(support.contains(tile) ? 10 : 0))/proximity,tile);
             }
-            for (const auto [tile,value] : strikeTargets)
+            if(!groundDedicated) for (const auto [tile,value] : strikeTargets)
                 if (botAirReach(wing.base,tile,strikeType)) strategic.emplace_back(value,tile);
             bool enemyAir=false,enemyDefense=false;
             for(const auto& other:air.wings) if(other.readyCount()>0 && diplomacy.hostile(owner,other.owner) &&
                 (botAirReach(wing.base,other.base,missionType) || airWingCanReach(other,center))) {enemyAir=true;break;}
             for(const auto& battery:air.defense) if(battery.health>0 && diplomacy.hostile(owner,battery.owner) &&
                 botAirReach(wing.base,battery.tile,strikeType>=0?strikeType:casType)) {enemyDefense=true;break;}
-            wing.targetPriorities=hoi5::botAirTargetPriorities(!concentrations.empty() || !support.empty(),enemyAir,enemyDefense,strikeType>=0);
+            wing.targetPriorities=hoi5::botAirTargetPriorities(groundDedicated || !concentrations.empty() || !support.empty(),enemyAir,enemyDefense,strikeType>=0);
             if(strikeType>=0) for(const auto& [score,tile]:concentrations)
                 if(botAirReach(wing.base,tile,strikeType)) strategic.emplace_back(score,tile);
             const auto addRanked = [&](auto& targets,std::size_t limit) {
@@ -8592,6 +8620,7 @@ struct World {
             hoi5::DebugMeasure timing(debug,"server_market");
             executeWeeklyMarket(*marketRotation);
         }
+        hoi5::traceSimulation("economyStart");
         const auto economyStart=Clock::now();
         for(std::size_t country=0;country<production.size();++country) {
             auto& stocks=stockpiles[country];
@@ -8603,6 +8632,7 @@ struct World {
             profiles[country].budget+=taxedTreasury(int(country)).operatingBalance()*hours/720.;
         }
         if(debug) debug->record("server_economy",economyStart);
+        hoi5::traceSimulation("productionStart");
         const auto productionStart=Clock::now();
         std::vector<hoi5::Stockpile> reserved(production.size());
         for(std::size_t country=0;country<production.size();++country)
@@ -8644,6 +8674,7 @@ struct World {
         if(debug) debug->record("server_production",productionStart);
         advancePoliticsHours(hours,debug);
         const bool civilWar = profiles.size() != countriesBeforePolitics;
+        hoi5::traceSimulation("constructionStart");
         const auto constructionStart = Clock::now();
         const bool built = construction.advance(tiles,profiles,stockpiles,hours,
             [&](int country,int index,hoi5::Building building,bool repair) {
@@ -8675,6 +8706,7 @@ struct World {
             },[&](int index) { return battles.contains(index); },debug,marketRecoveryCredit());
         reportConstructionAlerts(hours);
         if (debug) debug->record("server_construction",constructionStart);
+        hoi5::traceSimulation("populationStart");
         const auto populationStart = Clock::now();
         populationHours += hours;
         const bool populationTick = populationHours >= 720 && !profiles.empty() && profiles.size() == production.size();
@@ -8694,6 +8726,7 @@ struct World {
             rebuildEconomy();
         };
         if ((built || populationTick) && !capitals.empty()) refreshBuildings();
+        hoi5::traceSimulation("divisionsStart");
         const auto divisionsStart = Clock::now();
         advanceManualFrontTimers(hours);
         bool ownershipChanged = updateDivisions(hours) || civilWar;
@@ -8703,6 +8736,7 @@ struct World {
             updateTraining(hours);
         }
         bool battleDamage = false;
+        hoi5::traceSimulation("battlesStart");
         const auto battlesStart = Clock::now();
         ownershipChanged |= advanceBattles(hours,battleDamage,debug);
         if (ownershipChanged && !profiles.empty())
@@ -8717,9 +8751,11 @@ struct World {
                 }
             }
         if (debug) debug->record("server_ground_battles",battlesStart);
+        hoi5::traceSimulation("helipadStart");
         const auto helipadStart = Clock::now();
         const bool helipadBuilt = updateFieldHelipads(hours);
         if (debug) debug->record("server_field_helipads",helipadStart);
+        hoi5::traceSimulation("defenseStart");
         const auto defenseStart = Clock::now();
         air.advanceDefenseReplacements(tiles,capitals,hours,[&](int tile) { return battles.contains(tile); },
             [&](int owner) { return botForwardDefenseSites(owner); },
@@ -10778,6 +10814,7 @@ int main(int argc, char** argv) try {
                 test.diplomacy.goals.clear();
                 for(auto& [pair,ties]:test.diplomacy.relations) ties.war=false;
             }
+            hoi5::traceSimulation("hour="+std::to_string(hour));
             test.advance(6,nullptr,hour%168==0?std::optional{hour/168}:std::nullopt);
             if(scenario=="peace") for(auto& [pair,ties]:test.diplomacy.relations) ties.war=false;
             delivered.resize(test.profiles.size());needed.resize(test.profiles.size());
@@ -11429,6 +11466,18 @@ int main(int argc, char** argv) try {
             auto& wing=test.air.wings.back();wing.airSuperiority=wing.patrol=wing.intercept=true;
             wing.interceptorAmmo=32;wing.operationArea={3};test.stockpiles[owner]["refined_fuel"]=1000.;
         }
+        auto limited=test;
+        limited.air.wings.push_back(limited.air.wings[1]);
+        limited.stockpiles[1]["refined_fuel"]=hoi5::fighterSortieFuel(hoi5::airHexDistance(5,3,6));
+        limited.interceptAircraft(0,3,4,0);
+        if(!check(limited.stockpiles[1]["refined_fuel"]==0. && limited.aircraftInterceptors.size()==1,__LINE__)) return 1;
+        limited.stockpiles[1]["refined_fuel"]=-100.;
+        if(!check(limited.fighterEngagement(limited.air.wings[1],0,3,4)==0,__LINE__)) return 1;
+        auto missileLimited=test;missileLimited.air.wings.push_back(missileLimited.air.wings[1]);
+        missileLimited.stockpiles[1]["refined_fuel"]=hoi5::fighterSortieFuel(hoi5::airHexDistance(5,3,6));
+        hoi5::AirSalvo targetMissile{0,0,3,3,4,hoi5::missionWeapon(1,true),1.,1.,0.,true};
+        missileLimited.launchFighterInterceptors(targetMissile);
+        if(!check(missileLimited.stockpiles[1]["refined_fuel"]==0. && targetMissile.inbound.size()==1,__LINE__)) return 1;
         World::SortieCounts used{};
         if(!check(test.launchAirPatrol(0,used)>0,__LINE__) || !check(used[0]>0,__LINE__) ||
             !check(test.aircraftInterceptors.size()==1,__LINE__) || !check(test.airVisuals.size()==2,__LINE__) ||
@@ -11443,6 +11492,43 @@ int main(int argc, char** argv) try {
         test.air.wings[0].abortedHours=0.;test.diplomacy.relation(0,1).war=false;
         if(!check(test.launchAirPatrol(0,used)==0,__LINE__)) return 1;
         std::cout<<"Active patrol, visible interception, fuel, ammunition, shared aircraft and no-flight gates passed\n";
+        return 0;
+    }
+    if(mode=="--check-bot-cas-front") {
+        const auto check=[](bool ok,int line){if(!ok) std::cerr<<"CAS deployment failed at "<<line<<"\n";return ok;};
+        World fixture;fixture.size=18;fixture.tiles.resize(324);fixture.profiles.resize(2);
+        fixture.stockpiles.resize(2);fixture.air.reserves.resize(2);fixture.construction.queues.resize(2);
+        fixture.diplomacy.countries.resize(2);fixture.diplomacy.relation(0,1).war=true;
+        const int rear=8*18,forward=rear+9,front=rear+11,enemy=rear+12;
+        fixture.capitals={enemy,rear};
+        for(int i=0;i<324;++i) {fixture.tiles[i].owner=i%18<12?1:0;fixture.tiles[i].supply=.8;}
+        fixture.botGeography.build(18,[](int){return false;},[&](int tile,auto visit){fixture.forFrontNeighbor(tile,visit);});
+        for(int base:{rear,forward}) {
+            fixture.air.bases.push_back({1,base,1,46,15});fixture.tiles[base].buildings[hoi5::airbase]={.3,1.};
+        }
+        fixture.stockpiles[1]["refined_fuel"]=1000000.;
+        Division opponent;opponent.owner=0;opponent.q=12;opponent.r=8;fixture.divisions.push_back(opponent);
+        for(int type:{3,4}) {
+            auto test=fixture;test.air.wings.push_back({1,rear,type,4});
+            hoi5::BotSupplyState bot{1,0};
+            bot.regions.push_back({0,1,rear,{rear,rear+1},{}});
+            bot.regions.push_back({1,1,forward,{forward,front},{front}});
+            if(!check(test.applyBotAir(bot,{hoi5::BotTask::Kind::air,0,rear}),__LINE__)) return 1;
+            const auto& wing=test.air.wings.front();
+            if(!check(wing.base==forward,__LINE__) || !check(wing.enabledMissions[0],__LINE__) ||
+                !check(!wing.intercept && !wing.airSuperiority && !wing.patrol,__LINE__) ||
+                !check(!wing.targetPriorities.empty() && wing.targetPriorities.front()=="enemy_units",__LINE__) ||
+                !check(std::ranges::find(wing.operationArea,enemy)!=wing.operationArea.end(),__LINE__) ||
+                !check(std::ranges::find(wing.operationArea,rear)==wing.operationArea.end(),__LINE__)) return 1;
+        }
+        // The connected land army must reserve posts on the actual hostile front as well.
+        auto land=fixture;hoi5::BotSupplyState controller{1,0};
+        for(int i=0;i<6;++i) {Division unit;unit.owner=1;unit.q=0;unit.r=8;land.divisions.push_back(unit);}
+        land.assignBotFront(controller,true);
+        if(!check(!controller.frontQuotas.empty(),__LINE__) || !check(std::ranges::any_of(controller.frontQuotas,[&](auto item){
+            return item.second>0 && std::ranges::any_of(land.botGeography.adjacent(item.first),[&](int next){return land.tiles[next].owner==0;});
+        }),__LINE__)) return 1;
+        std::cout<<"CAS/helicopters leave rear regions for a reachable front, select troops, and land divisions cover the hostile border\n";
         return 0;
     }
     if (mode == "--check-bot-air") {
@@ -11533,7 +11619,7 @@ int main(int argc, char** argv) try {
         for (const auto& wing : test.air.wings) {
             if (wing.owner != owner) continue;
             ++wings;
-            if (wing.operationArea.empty() || wing.sortieIntensity < .3)
+            if ((wing.operationArea.empty() && (wing.enabledMissions[0] || wing.enabledMissions[1] || wing.intercept)) || wing.sortieIntensity < .3)
                 { std::cerr << "--check-bot-air failed at " << __LINE__ << ": " << __FILE__ << "\n"; return 1; }
             if (wing.missionType(2) >= 0 && (!wing.airSuperiority || !wing.intercept || !wing.patrol)) { std::cerr << "--check-bot-air failed at " << __LINE__ << ": " << __FILE__ << "\n"; return 1; }
         }

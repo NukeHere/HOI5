@@ -1,4 +1,6 @@
 #pragma once
+#include <cstdio>
+#include <cstdlib>
 
 #include <array>
 #include <chrono>
@@ -6,6 +8,14 @@
 #include <string_view>
 
 namespace hoi5 {
+// Opt-in, flushed stage journal for reproducing stalls without a debugger.
+inline void traceSimulation(std::string_view stage) {
+    static const char* path=std::getenv("HOI5_TRACE_STEPS");
+    if(!path || !*path) return;
+    static FILE* output=std::fopen(path,"w");
+    if(output) {std::fprintf(output,"%.*s\n",int(stage.size()),stage.data());std::fflush(output);}
+}
+
 
 struct DebugRow { std::string_view label; std::array<std::string_view,3> keys; };
 inline constexpr DebugRow debugRows[] = {
@@ -128,7 +138,7 @@ class DebugMeasure {
 
 public:
     DebugMeasure(DebugProfiler* profiler,std::string_view key)
-        : profiler(profiler),key(key),start(profiler ? DebugProfiler::Clock::now() : DebugProfiler::Clock::time_point{}) {}
+        : profiler(profiler),key(key),start(profiler ? DebugProfiler::Clock::now() : DebugProfiler::Clock::time_point{}) {traceSimulation(key);}
     DebugMeasure(const DebugMeasure&) = delete;
     DebugMeasure& operator=(const DebugMeasure&) = delete;
     ~DebugMeasure() { if (profiler) profiler->record(key,start); }

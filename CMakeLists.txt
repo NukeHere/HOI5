@@ -176,3 +176,11 @@ if(BUILD_TESTING)
 endif()
 
 add_test(NAME air_patrol_and_visible_interception COMMAND HOI5 --check-air-patrol)
+
+add_test(NAME bot_cas_front_deployment COMMAND HOI5 --check-bot-cas-front)
+
+if(BUILD_TESTING)
+    add_executable(combat_sampling_check H5_CPP/tests/combat_sampling_check.cpp)
+    target_compile_features(combat_sampling_check PRIVATE cxx_std_20)
+    add_test(NAME bounded_air_combat_sampling COMMAND combat_sampling_check)
+endif()
