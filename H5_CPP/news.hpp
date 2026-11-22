@@ -103,9 +103,18 @@ class News {
     }
 
 public:
+    template<class Archive> void saveFields(Archive& archive) { archive(tradeRecords,lastTradeDay,battleLosses,lastLogisticsDay,alerts,items,nextId,lastDailyDay,lastTemplateDay,rng,pendingNotices,worldSeed); }
     explicit News(std::uint64_t seed = 0) : worldSeed(seed) {
         PythonSeed pythonSeed{seed};
         rng.seed(pythonSeed);
+    }
+
+    std::uint64_t seedValue() const { return worldSeed; }
+
+    void resumeLog(const std::filesystem::path& path) {
+        logPath=path;std::error_code error;
+        if(path.has_parent_path())std::filesystem::create_directories(path.parent_path(),error);
+        logFailed=bool(error);
     }
 
     void startLog(const std::filesystem::path& path,std::span<const std::string_view> countries,

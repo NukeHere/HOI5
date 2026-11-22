@@ -167,6 +167,8 @@ if(BUILD_TESTING)
     add_test(NAME available_air_payload COMMAND air_payload_check)
 endif()
 
+add_test(NAME save_game_roundtrip COMMAND HOI5 --check-save-game "${CMAKE_CURRENT_BINARY_DIR}/save-test")
+
 if(BUILD_TESTING)
     add_executable(ai_air_policy_check H5_CPP/tests/ai_air_policy_check.cpp)
     target_compile_features(ai_air_policy_check PRIVATE cxx_std_20)

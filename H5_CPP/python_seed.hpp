@@ -47,6 +47,7 @@ class PythonRandom {
     std::mt19937 engine;
 
 public:
+    template<class Archive> void saveFields(Archive& archive) { archive(engine); }
     explicit PythonRandom(std::uint64_t value = 0) { seed(value); }
 
     void seed(std::uint64_t value) {

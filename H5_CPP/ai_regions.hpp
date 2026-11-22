@@ -49,6 +49,7 @@ class BotRegionMap {
     std::vector<std::vector<int>> neighbors;
 
 public:
+    template<class Archive> void saveFields(Archive& archive) {archive(tileOrder,baseRegion,neighbors);}
     template<class Water,class VisitNeighbors>
     void build(int width,Water water,VisitNeighbors visitNeighbors) {
         const int count = width*width;

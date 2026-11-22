@@ -9,6 +9,7 @@ class EconomyTradeHistory {
     std::vector<int> firstSeen;
     std::vector<double> openingCash;
 public:
+    template<class Archive> void saveFields(Archive& archive) { archive(samples,firstSeen,openingCash); }
     std::vector<double> update(int hour,const std::vector<double>& cash) {
         if(!samples.empty() && hour<samples.back().hour) {samples.clear();firstSeen.clear();openingCash.clear();}
         const auto previous=firstSeen.size();firstSeen.resize(cash.size(),hour);openingCash.resize(cash.size());

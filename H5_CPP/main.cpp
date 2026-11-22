@@ -338,6 +338,8 @@ sf::Color countryColor(int country) {
     return countrySlotColors[std::size_t(country)%countrySlotColors.size()];
 }
 
+#include "save_archive.hpp"
+
 struct World {
     struct Army {
         int id, owner;
@@ -454,6 +456,23 @@ struct World {
     std::mt19937 combatRandom;
     int difficulty = 1;
     int controlledCountry = 0;
+
+    unsigned campaignSeed{};
+    std::shared_ptr<hoi5::save::Backing> saveBacking;
+    template<class Archive> void saveFields(Archive& archive) {
+        archive(
+            campaignSeed,armies,supplyBots,botGeography,botHours,botMarketTick,botDailyCursor,botBalanceRefresh,
+            nextBotBalanceRefresh,frontOwnershipChanges,size,capitalQ,capitalR,status,tiles,divisions,
+            bordersChanged,capitals,puppetMasters,pendingSurrender,surrenderResult,countryNames,rulers,civilNames,
+            civilWarWarnings,civilWarFactions,civilWarOrigins,lobbyNames,lobbyTeams,lobbyDifficulty,profiles,stockpiles,
+            capacities,discardedStorage,manpowerReserve,training,playerDesigns,nextTrainingId,populationHours,politicsHours,
+            production,productionPlans,productionReports,treasury,market,marketAccessState,marketAccessRevision,botLedger,
+            foodDeliveryTotals,completedEconomyProjects,completedBuildingTypes,newBuildingSites,completedBuildingArea,lastEconomicBuildHour,countryBornHour,exportRevenueEarned,
+            importMoneySpent,startingFoodPlacementMs,startingProductionPlanMs,news,economyCurrent,economyPrevious,economyMonth,economyTradeHistory,
+            derivedSupplyCapitals,diplomacy,air,salvos,airVisuals,airVisualSeconds,airVisualRandom,aircraftInterceptors,
+            construction,battles,nextBattleOrder,groundCombatRandom,combatRandom,difficulty,controlledCountry);
+        if(!archive.legacyWorld)archive(constructionNotices,tileStorageSnapshots,humanSupply,humanTradeCapacity,helipadProjects,alliedReviewAfter);
+    }
 
     World() = default;
 
@@ -8819,6 +8838,7 @@ void selectLobbySpawn(std::span<int> slots,int slot,int& selected) {
 
 World generateWorld(int size, int countries, unsigned seed, int difficulty,std::span<const int> spawnTiles = {}) {
     World world;
+    world.campaignSeed = seed;
     world.news = hoi5::News(seed);
     world.size = size;
     world.difficulty = difficulty;
@@ -9810,12 +9830,21 @@ void drawFieldHelipad(sf::RenderWindow& target,sf::Vector2f position,sf::Color o
         box(target,position+sf::Vector2f{-9,13},{float(18*std::clamp(*progress,0.,1.)),2},{170,224,144});
 }
 
+#include "save_game.hpp"
+#include "save_browser.hpp"
+#include "tests/save_game_check.hpp"
+
 int main(int argc, char** argv) try {
     const auto directory = std::filesystem::absolute(argv[0]).parent_path();
     const auto& source = directory;
     hoi5::loadCountryNames(source/"data");
     World world(directory / "reference-map.txt");
     const std::string_view mode = argc > 1 ? argv[1] : "";
+    if (mode == "--check-save-file" && argc==3) {
+        hoi5::SimulationClock savedClock;const auto saved=hoi5::save::readGame(argv[2],savedClock);
+        std::cout<<"Save loaded: map="<<saved.size<<", countries="<<saved.profiles.size()<<", divisions="<<saved.divisions.size()<<", seed="<<saved.campaignSeed<<", hours="<<savedClock.elapsedHours<<'\n';return 0;
+    }
+    if (mode == "--check-save-game") return checkSaveGame(argc>2 ? std::filesystem::path(argv[2]) : directory/"save-test");
     if (mode == "--check-political-crisis") {
         const auto run = [](int scenario) {
             hoi5::Diplomacy diplomacy;
@@ -13583,6 +13612,8 @@ int main(int argc, char** argv) try {
         }
         return 1;
     }
+    const bool saveFlowSmoke = mode == "--smoke-save-flow";
+    const bool saveMenuSmoke = mode == "--smoke-save-menu";
     const bool constructionSmoke = mode == "--smoke-construction";
     const bool resourcesSmoke = mode == "--smoke-resources" || mode == "--smoke-resources-goods";
     const bool productionSmoke = mode == "--smoke-production";
@@ -13598,14 +13629,14 @@ int main(int argc, char** argv) try {
     const bool protestSmoke = mode == "--smoke-protests";
     const bool inspectInterface = mode == "--inspect-interface" || protestSmoke;
     const bool inspectNews = mode == "--inspect-news" || inspectInterface;
-    if (!mode.empty() && !constructionSmoke && !resourcesSmoke && !productionSmoke && !tradeSmoke && !wingCreationSmoke && !countrySmoke &&
+    if (!mode.empty() && !saveFlowSmoke && !saveMenuSmoke && !constructionSmoke && !resourcesSmoke && !productionSmoke && !tradeSmoke && !wingCreationSmoke && !countrySmoke &&
         !armySmoke && !warningSmoke && !inspectBattle && !inspectNews &&
         mode != "--smoke-window" && mode != "--smoke-generation" &&
         !(mode == "--check-settings-window" && argc == 3)) {
         std::cerr << "Unknown or incomplete command: " << mode << '\n';
         return 2;
     }
-    if (constructionSmoke || resourcesSmoke || productionSmoke || tradeSmoke || wingCreationSmoke || countrySmoke || armySmoke || warningSmoke ||
+    if (saveFlowSmoke || constructionSmoke || resourcesSmoke || productionSmoke || tradeSmoke || wingCreationSmoke || countrySmoke || armySmoke || warningSmoke ||
         inspectBattle || inspectNews)
         world = generateWorld(50,countrySmoke || warningSmoke || inspectInterface ? 3 : 2,823558,1);
     if (constructionSmoke) {
@@ -13678,7 +13709,7 @@ int main(int argc, char** argv) try {
     }
     constexpr std::array<sf::Vector2u,5> resolutions{{{1024,768},{1200,800},{1366,768},{1600,900},{1920,1080}}};
     const bool generationSmoke = mode == "--smoke-generation";
-    const bool smoke = protestSmoke || mode == "--smoke-window" || generationSmoke || constructionSmoke || resourcesSmoke || productionSmoke || tradeSmoke ||
+    const bool smoke = saveFlowSmoke || saveMenuSmoke || protestSmoke || mode == "--smoke-window" || generationSmoke || constructionSmoke || resourcesSmoke || productionSmoke || tradeSmoke ||
         (wingCreationSmoke && !inspectAirPause) || countrySmoke || armySmoke || warningSmoke;
     const bool settingsCheck = mode == "--check-settings-window" && argc == 3;
     const auto settingsPaths = hoi5::settingsFiles(directory);
@@ -13759,12 +13790,12 @@ int main(int argc, char** argv) try {
     sf::View camera = window.getDefaultView();
     auto target = center(world.capitalQ, world.capitalR);
     camera.setCenter(target);
-    bool playing = mode == "--smoke-window" || constructionSmoke || resourcesSmoke || productionSmoke || tradeSmoke ||
+    bool playing = saveFlowSmoke || mode == "--smoke-window" || constructionSmoke || resourcesSmoke || productionSmoke || tradeSmoke ||
         wingCreationSmoke || countrySmoke || armySmoke || warningSmoke || inspectBattle || inspectNews;
     int& player = world.controlledCountry;
     hoi5::DeveloperMenu developerMenu;
     bool dragging = false;
-    bool setup = false, pauseMenu = false;
+    bool setup = false, pauseMenu = saveFlowSmoke;
     sf::FloatRect populationHoverRect,budgetHoverRect,resourceHoverRect;
     std::array<std::vector<std::string_view>,2> resourceProblems;
     enum class WarningAction { resources, supply, trade, construction, news, diplomacy, war, offer, joinWar };
@@ -13797,7 +13828,7 @@ int main(int argc, char** argv) try {
     sf::Clock weatherMessage;
     bool showWeatherMessage = false;
     bool resumable = false;
-    enum class MenuPage { main, settings, help };
+    enum class MenuPage { main, settings, help, saves };
     MenuPage menuPage = MenuPage::main;
     float musicVolume = settings.musicVolume, soundVolume = settings.soundVolume;
     int resolution = settings.resolution, pendingResolution = resolution;
@@ -14297,6 +14328,16 @@ int main(int argc, char** argv) try {
     sf::Vector2f dragTarget;
     std::string errorMessage;
     std::future<World> generator;
+    const auto savesDirectory = saveFlowSmoke ? directory/"save-flow"/std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) : saveMenuSmoke ? directory/"save-test" : settingsPaths.preferred.parent_path()/"saves";
+    hoi5::save::Browser saveBrowser;
+    std::shared_ptr<hoi5::SimulationClock> loadedClock;
+    const auto openSaves = [&](hoi5::save::Browser::Mode mode) {
+        errorMessage.clear();saveBrowser.open(mode,savesDirectory);menuPage=MenuPage::saves;
+    };
+    if(saveMenuSmoke) {
+        openSaves(hoi5::save::Browser::Mode::load);
+        for(int i=0;i<int(saveBrowser.files.size());++i)if(saveBrowser.files[i].version=="older-build"){saveBrowser.selection=i;saveBrowser.page=i/6;break;}
+    }
     const auto hexPanelRect = [&] {
         const auto size = sf::Vector2f(window.getSize());
         const float width = std::min(380.f,std::max(320.f,size.x-32));
@@ -14496,6 +14537,7 @@ int main(int argc, char** argv) try {
         const int capital = world.capitals[country];
         if (capital >= 0) { target = center(capital%world.size,capital/world.size); camera.setCenter(target); }
     };
+    int saveFlowStage=0,saveFlowFrames=0;double saveFlowBudget=0;
     while (window.isOpen()) {
         const auto updateStart = DebugClock::now();
         const float frameSeconds = clock.restart().asSeconds();
@@ -14513,6 +14555,34 @@ int main(int argc, char** argv) try {
             if (event->is<sf::Event::FocusLost>()) { dragging = draggingExport = false; activeSlider = -1; }
             if (const auto* resize = event->getIf<sf::Event::Resized>())
                 camera.setSize(sf::Vector2f(resize->size) / zoom);
+            // A save browser or pause menu consumes the event exactly once.
+            if(menuPage==MenuPage::saves) {
+                if(!generator.valid()) {
+                    const auto action=saveBrowser.event(*event,window.getSize(),world,simulation);
+                    if(action==hoi5::save::Browser::Action::back)menuPage=MenuPage::main;
+                    else if(action==hoi5::save::Browser::Action::load) {
+                        errorMessage.clear();saveBrowser.message.clear();
+                        const auto path=saveBrowser.files.at(saveBrowser.selection).path;
+                        loadedClock=std::make_shared<hoi5::SimulationClock>();const auto savedClock=loadedClock;
+                        generator=std::async(std::launch::async,[path,savedClock]{return hoi5::save::readGame(path,*savedClock);});
+                    }
+                }
+                continue;
+            }
+            if(playing && pauseMenu && menuPage==MenuPage::main) {
+                if(const auto* click=event->getIf<sf::Event::MouseButtonPressed>();click && click->button==sf::Mouse::Button::Left) {
+                    const int cx=window.getSize().x/2,cy=window.getSize().y/2;
+                    for(int row=0;row<5;++row)if(sf::IntRect({cx-150,cy-130+55*row},{300,42}).contains(click->position)) {
+                        if(row==0)pauseMenu=false;
+                        else if(row==1)openSaves(hoi5::save::Browser::Mode::save);
+                        else if(row==2)openSaves(hoi5::save::Browser::Mode::load);
+                        else if(row==3)openSettings();
+                        else {playing=pauseMenu=setup=false;dragging=false;menuPage=MenuPage::main;}
+                        break;
+                    }
+                    continue;
+                }
+            }
             if (const auto* key = event->getIf<sf::Event::KeyPressed>(); key && playing &&
                 hoi5::DeveloperMenu::singlePlayerSession && key->code == sf::Keyboard::Key::F4) {
                 developerMenu.open = !developerMenu.open;
@@ -14854,13 +14924,14 @@ int main(int argc, char** argv) try {
                     const int cx = window.getSize().x/2, cy = window.getSize().y/2;
                     const int x = button->position.x, y = button->position.y;
                     if (menuPage == MenuPage::main) {
-                        for (int row = 0; row < 6; ++row) {
-                            if (!sf::IntRect({cx-188,cy-186+64*row},{376,52}).contains({x,y})) continue;
+                        for (int row = 0; row < 7; ++row) {
+                            if (!sf::IntRect({cx-188,cy-218+64*row},{376,52}).contains({x,y})) continue;
                             if (row == 0) setup = true;
                             if (row == 1 && resumable) playing = true;
-                            if (row == 3) openSettings();
-                            if (row == 4) menuPage = MenuPage::help;
-                            if (row == 5) window.close();
+                            if (row == 2) openSaves(hoi5::save::Browser::Mode::load);
+                            if (row == 4) openSettings();
+                            if (row == 5) menuPage = MenuPage::help;
+                            if (row == 6) window.close();
                         }
                     } else if (menuPage == MenuPage::settings) {
                         if (resolutionOpen) {
@@ -14965,18 +15036,7 @@ int main(int argc, char** argv) try {
                     }
                     continue;
                 }
-                if (playing && pauseMenu && button->button == sf::Mouse::Button::Left) {
-                    const int cx = window.getSize().x / 2, cy = window.getSize().y / 2;
-                    if (std::abs(button->position.x-cx) < 150) {
-                        if (button->position.y >= cy-55 && button->position.y < cy-13) pauseMenu = false;
-                        if (button->position.y >= cy && button->position.y < cy+42) openSettings();
-                        if (button->position.y >= cy+55 && button->position.y < cy+97) {
-                            playing = pauseMenu = setup = false;
-                            dragging = false;
-                            menuPage = MenuPage::main;
-                        }
-                    }
-                } else if (playing && button->button == sf::Mouse::Button::Left) {
+                if (playing && !pauseMenu && button->button == sf::Mouse::Button::Left) {
                     const int x = button->position.x, y = button->position.y;
                     const int panel = static_cast<int>(window.getSize().x)-312;
                     const auto airPointer = localAirPoint(button->position);
@@ -15717,9 +15777,13 @@ int main(int argc, char** argv) try {
         if (generator.valid() && generator.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             try {
                 world = generator.get();
-                world.news.startLog(directory/"logs"/"world-news.txt",
+                closeCountryDetail();showDeferredOffer.reset();developerMenu.open=false;
+                mapPoliticsDay=-1;mapPoliticsRevision=0;automaticForecastDay=-1;
+                resourceProblems={};incomingExpeditionArmy=0;
+                if (!loadedClock) world.news.startLog(directory/"logs"/"world-news.txt",
                     std::span(world.countryNames).first(world.profiles.size()),
                     std::span(world.rulers).first(world.profiles.size()));
+                if (loadedClock) world.news.resumeLog(directory/"logs"/"world-news.txt");
                 if (music) music->newWorld();
                 (void)musicReview.restart();
                 tradePanel = diplomacyPanel = false;
@@ -15774,10 +15838,12 @@ int main(int argc, char** argv) try {
                 constructionMapDirty = true;
                 borders = makeBorders(world);
                 zoom = 1.f;
-                target = center(world.capitalQ, world.capitalR);
+                const int loadedCapital=player<int(world.capitals.size())?world.capitals[player]:-1;
+                target=loadedCapital>=0?center(loadedCapital%world.size,loadedCapital/world.size):center(world.capitalQ,world.capitalR);
                 camera.setCenter(target);
                 camera.setSize(sf::Vector2f(window.getSize()));
                 playing = resumable = true;
+                pauseMenu=false;menuPage=MenuPage::main;
                 setup = false;
                 selected = -1;
                 selectedDivisions.clear();
@@ -15792,13 +15858,15 @@ int main(int argc, char** argv) try {
                 lastDivisionClick = -1;
                 selectedBattle = -1;
                 selectedTiles.clear();
-                simulation = {};
+                simulation = loadedClock ? *loadedClock : hoi5::SimulationClock{};
+                loadedClock.reset();
                 newsPanel = {};
                 acknowledgedLosses = {};
                 warningBounds.clear();
                 topWarnings.clear();
             } catch (const std::exception& error) {
-                errorMessage = error.what();
+                loadedClock.reset();
+                errorMessage = "Не удалось загрузить или создать мир: "+std::string(error.what());
                 std::cerr << "World generation failed: " << errorMessage << '\n';
             }
         }
@@ -15809,7 +15877,7 @@ int main(int argc, char** argv) try {
         std::optional<HoverHelp> hoverHelp;
         auto drawStart = DebugClock::now();
         window.clear({18,24,31});
-        if (playing && !(pauseMenu && menuPage == MenuPage::settings)) {
+        if (playing && !(pauseMenu && (menuPage == MenuPage::settings || menuPage == MenuPage::saves))) {
             if (!pauseMenu) {
                 world.airVisualSeconds += simulation.airVisualDelta(frameSeconds,pauseMenu);
                 const int previousTick = simulation.tickCount;
@@ -18978,19 +19046,15 @@ int main(int argc, char** argv) try {
             if (pauseMenu) {
                 box(window,{0,0},size,{8,12,17,170});
                 const float x=size.x/2-150, y=size.y/2;
-                box(window,{x,y-55},{300,42},{30,39,50},{92,112,136});
-                box(window,{x,y},{300,42},{30,39,50},{92,112,136});
-                box(window,{x,y+55},{300,42},{30,39,50},{92,112,136});
-                label(window,font,"Вернуться в игру",{x+18,y-46},18);
-                label(window,font,"Настройки",{x+18,y+9},18);
-                label(window,font,"Выйти в главное меню",{x+18,y+64},18);
+                const std::array<std::string,5> entries{"Вернуться в игру","Сохранить игру","Загрузить игру","Настройки","Выйти в главное меню"};
+                for(int row=0;row<5;++row) {box(window,{x,y-130+55*row},{300,42},{30,39,50},{92,112,136});label(window,font,entries[row],{x+18,y-121+55*row},18);}
             }
         } else {
             window.setView(gui);
             box(window,{0,0},size,{13,18,24});
             box(window,{0,0},{size.x,96},{20,29,38});
             box(window,{0,size.y-88},{size.x,88},{20,29,38});
-            if (loading) label(window,font,"Мир генерируется",{size.x/2-130,size.y/2-16},30);
+            if (loading) label(window,font,loadedClock ? "Игра загружается" : "Мир генерируется",{size.x/2-130,size.y/2-16},30);
             else if (!playing && setup) {
                 label(window,font,"Новая игра",{size.x/2-100,32},36);
                 const auto b = lobbyBounds();
@@ -19094,6 +19158,8 @@ int main(int argc, char** argv) try {
                     field(rect,option(dropdown,i),i == chosen[dropdown]);
                 }
                 if (!errorMessage.empty()) label(window,font,errorMessage,{80,size.y-60});
+            } else if (menuPage == MenuPage::saves) {
+                saveBrowser.draw(window,font,errorMessage);
             } else if (menuPage == MenuPage::settings) {
                 const float x = size.x/2-230, y = size.y/2;
                 label(window,font,"Настройки",{x,32},36);
@@ -19134,14 +19200,14 @@ int main(int argc, char** argv) try {
                 box(window,{size.x/2-150,y+100},{300,42},{30,39,50},{92,112,136});
                 label(window,font,"Назад",{size.x/2-132,y+109},18);            } else {
                 label(window,font,"HOI 5",{size.x/2-48,32},36);
-                const std::array<std::string,6> buttons{"Новая игра", "Продолжить игру",
-                    "Мультиплеер", "Настройки", "Помощь", "Выход из игры"};
+                const std::array<std::string,7> buttons{"Новая игра", "Продолжить игру",
+                    "Загрузить игру", "Мультиплеер", "Настройки", "Помощь", "Выход из игры"};
                 for (std::size_t i=0;i<buttons.size();++i) {
-                    const float y=size.y/2-186+64*i;
+                    const float y=size.y/2-218+64*i;
                     box(window,{size.x/2-188,y},{376,52},{30,39,50},{92,112,136});
                     const auto value = sf::String::fromUtf8(buttons[i].begin(),buttons[i].end());
                     sf::Text text(font,value,20);
-                    if (i==2 || (i==1 && !resumable)) text.setFillColor({152,164,180});
+                    if (i==3 || (i==1 && !resumable)) text.setFillColor({152,164,180});
                     const auto bounds=text.getLocalBounds();
                     text.setPosition({std::round(size.x/2-bounds.size.x/2-bounds.position.x),
                                       std::round(y+26-bounds.size.y/2-bounds.position.y)});
@@ -20257,11 +20323,12 @@ int main(int argc, char** argv) try {
                     return 1;
             }
         }
-        if ((argc == 3 && ((warningSmoke && warningSmokeFrame == 0) || constructionSmoke || resourcesSmoke || (productionSmoke && productionSmokeFrame == 0) || tradeSmoke || wingAreaSmoke)) ||
+        if ((argc == 3 && (saveMenuSmoke || (warningSmoke && warningSmokeFrame == 0) || constructionSmoke || resourcesSmoke || (productionSmoke && productionSmokeFrame == 0) || tradeSmoke || wingAreaSmoke)) ||
             (argc == 4 && warningSmoke && warningSmokeFrame == 1)) {
             sf::Texture capture(window.getSize());
             capture.update(window);
             if (!capture.copyToImage().saveToFile(argv[argc-1])) return 1;
+            if(saveMenuSmoke)return 0;
         }
         if (playing) {
             window.setView(gui);
@@ -20272,7 +20339,64 @@ int main(int argc, char** argv) try {
                 sf::Texture capture(window.getSize()); capture.update(window);
                 if (!capture.copyToImage().saveToFile(path.parent_path()/(path.stem().string()+"-"+std::to_string(productionSmokeFrame)+".png"))) return 1;
             }
+        if(saveFlowSmoke && argc==3 && (saveFlowStage==1 || saveFlowStage==2 || saveFlowStage==4 || saveFlowStage==6)) {
+            std::filesystem::create_directories(argv[2]);sf::Texture capture(window.getSize());capture.update(window);
+            if(!capture.copyToImage().saveToFile(std::filesystem::path(argv[2])/("save-flow-"+std::to_string(saveFlowStage)+".png")))return 1;
+        }
         window.display();
+        if(saveFlowSmoke) {
+            if(++saveFlowFrames>1200)throw std::runtime_error("Save UI smoke timed out");
+            using B=hoi5::save::Browser;
+            const int cx=window.getSize().x/2,cy=window.getSize().y/2;
+            const auto click=[&](int x,int y){countrySmokeClick=sf::Event::MouseButtonPressed{sf::Mouse::Button::Left,{x,y}};};
+            const auto require=[&](bool ok,const char* text){if(!ok)throw std::runtime_error(text);};
+            switch(saveFlowStage) {
+                case 0: saveFlowBudget=world.profiles[0].budget;click(cx,cy-54);++saveFlowStage;break;
+                case 1:
+                    require(menuPage==MenuPage::saves && saveBrowser.mode==B::Mode::save,"Save button opened wrong mode");
+                    click(cx+30,cy+290);++saveFlowStage;break;
+                case 2:
+                    require(saveBrowser.dialog==B::Dialog::newName,"New save dialog missing");
+                    saveBrowser.name=U"Проверка сохранения";click(cx+100,cy+90);++saveFlowStage;break;
+                case 3:
+                    if(saveBrowser.dialog==B::Dialog::overwrite){click(cx+100,cy+90);break;}
+                    require(saveBrowser.message=="Игра сохранена","New save failed");
+                    world.profiles[0].budget+=12345;click(cx+200,cy+290);++saveFlowStage;break;
+                case 4:
+                    require(saveBrowser.dialog==B::Dialog::overwrite,"Overwrite confirmation missing");
+                    click(cx-200,cy+90);++saveFlowStage;break;
+                case 5:
+                    require(saveBrowser.dialog==B::Dialog::none && world.profiles[0].budget==saveFlowBudget+12345,"Cancel overwrite changed world");
+                    click(cx-150,cy+290);++saveFlowStage;break;
+                case 6:
+                    require(saveBrowser.dialog==B::Dialog::rename,"Rename dialog missing");
+                    saveBrowser.name=U"Переименованная партия";click(cx+100,cy+90);++saveFlowStage;break;
+                case 7:
+                    require(saveBrowser.message=="Сохранение переименовано","Rename failed");
+                    click(cx-300,cy+290);++saveFlowStage;break;
+                case 8: click(cx,cy+1);++saveFlowStage;break;
+                case 9:
+                    require(saveBrowser.mode==B::Mode::load,"Load button opened save mode");
+                    for(int i=0;i<int(saveBrowser.files.size());++i)if(hoi5::save::filenameText(saveBrowser.files[i].path)=="Переименованная партия"){saveBrowser.selection=i;saveBrowser.page=i/6;}
+                    click(cx+220,cy+290);++saveFlowStage;break;
+                case 10:
+                    if(generator.valid())break;
+                    require(!pauseMenu && playing && world.profiles[0].budget==saveFlowBudget,"Load saved instead of restoring campaign");
+                    countrySmokeClick=sf::Event::KeyPressed{sf::Keyboard::Key::Escape};++saveFlowStage;break;
+                case 11: click(cx,cy+111);++saveFlowStage;break;
+                case 12:
+                    require(!playing && menuPage==MenuPage::main,"Return to main menu failed");click(cx,cy-64);++saveFlowStage;break;
+                case 13:
+                    require(saveBrowser.mode==B::Mode::load,"Main load opened save mode");
+                    for(int i=0;i<int(saveBrowser.files.size());++i)if(hoi5::save::filenameText(saveBrowser.files[i].path)=="Переименованная партия"){saveBrowser.selection=i;saveBrowser.page=i/6;}
+                    click(cx+220,cy+290);++saveFlowStage;break;
+                case 14:
+                    if(generator.valid())break;
+                    require(!pauseMenu && playing && world.profiles[0].budget==saveFlowBudget,"Main menu load failed");
+                    std::cout<<"Save UI flow passed: named save, overwrite cancellation, rename, pause load and main load"<<'\n';return 0;
+            }
+            continue;
+        }
         if (productionSmoke) {
             auto& plan = world.productionPlans[player];
             const auto click = [&](int x,int y) { return productionUi.event(sf::Event::MouseButtonPressed{sf::Mouse::Button::Left,{x,y}}); };

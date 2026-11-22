@@ -83,6 +83,7 @@ class CompiledProductionBalance {
     std::vector<Flow> flows;
     std::vector<double> inputDemand;
 public:
+    template<class Archive> void saveFields(Archive& archive) {archive(signature,flows,inputDemand,rebuilds);}
     unsigned rebuilds{};
     void update(const Production& model) {
         const auto& passive=model.nationalPlan?model.passive:static_cast<const std::array<ProductionFlows,productionStages>&>(model);

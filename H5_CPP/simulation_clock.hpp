@@ -14,6 +14,7 @@ class SimulationClock {
     int nextMarketHour = 48;
 
 public:
+    template<class Archive> void saveFields(Archive& archive) { archive(accumulator,nextMarketHour,elapsedHours,tickCount,marketTickCount,pendingMarketTicks,speed,paused); }
     int elapsedHours{};
     int tickCount{};
     int marketTickCount{};
