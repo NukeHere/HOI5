@@ -26,6 +26,7 @@
 #include "population.hpp"
 #include "python_seed.hpp"
 #include "ai_supply.hpp"
+#include "ai_air_policy.hpp"
 
 #include <algorithm>
 #include <array>
@@ -3108,7 +3109,9 @@ struct World {
     bool airSuperioritySupport(int owner,int tile) const {
         return std::ranges::any_of(air.wings,[&](const auto& wing) {
             const int type = wing.missionType(2);
-            return wing.owner == owner && wing.readyCount() > 0 && wing.airSuperiority &&
+            return wing.owner == owner && wing.readyCount() > 0 && wing.airSuperiority && wing.interceptorAmmo>0 &&
+                owner>=0 && owner<int(stockpiles.size()) && canUseAirbase(wing) &&
+                hoi5::value(stockpiles[owner],"refined_fuel")>=hoi5::fighterSortieFuel(hoi5::airHexDistance(wing.base,tile,size)) &&
                 type >= 0 && airWingCanReach(wing,tile,type) &&
                 (wing.operationArea.empty() || std::ranges::find(wing.operationArea,tile) != wing.operationArea.end());
         });
@@ -3279,7 +3282,7 @@ struct World {
     }
 
     bool airTargetValid(int owner,int tile,bool strategic) const {
-        return strategic ? tiles[tile].owner >= 0 && diplomacy.hostile(owner,tiles[tile].owner) : defended(tile,owner);
+        return strategic ? (tiles[tile].owner >= 0 && diplomacy.hostile(owner,tiles[tile].owner)) || defended(tile,owner) : defended(tile,owner);
     }
 
     double battlePower(const std::vector<int>& participants) const {
@@ -3453,13 +3456,13 @@ struct World {
         for (auto tag : wing.targetPriorities)
             for (auto building : hoi5::buildingsForAirTarget(tag))
                 if (std::ranges::find(preferred,building) == preferred.end()) preferred.push_back(building);
-        const std::span<const hoi5::Building> priorities = preferred.empty() ?
+        const std::span<const hoi5::Building> priorities = wing.targetPriorities.empty() ?
             std::span<const hoi5::Building>(defaults) : std::span<const hoi5::Building>(preferred);
         double score = 0;
         int building = -1;
         for (int i = 0; i < hoi5::buildingCount; ++i) {
             const auto& b = tiles[cell].buildings[i];
-            if (b.area <= 0 || b.health <= 0) continue;
+            if (b.area <= 0 || b.health <= 0 || tiles[cell].owner < 0 || !diplomacy.hostile(wing.owner,tiles[cell].owner)) continue;
             const auto pos = std::ranges::find(priorities,i);
             if (pos == priorities.end() && !wing.targetPriorities.empty()) continue;
             const double priority = pos == priorities.end() ? 1. : 2.8/std::pow(pos-priorities.begin()+1,.35);
@@ -3472,6 +3475,13 @@ struct World {
         for(const auto& battery:air.defense) if((wing.targetPriorities.empty() || std::ranges::find(wing.targetPriorities,"air_defense")!=wing.targetPriorities.end()) && battery.tile==cell && battery.health>0 && diplomacy.hostile(wing.owner,battery.owner)) {
             const double value=battery.health*(2.+hoi5::defenseClasses[battery.type].fireRange*.5);
             if(value>score) {score=value;building=hoi5::buildingCount;}
+        }
+        if (wing.targetPriorities.empty() || std::ranges::find(wing.targetPriorities,"enemy_units") != wing.targetPriorities.end()) {
+            double troops = 0.;
+            for (const auto& unit : divisions)
+                if (unit.r*size+unit.q == cell && unit.combat.strength > 0 && diplomacy.hostile(wing.owner,unit.owner))
+                    troops += 1.+unit.combat.strength/std::max(1.,unit.design->combat.strength);
+            if (troops > score) { score = troops; building = hoi5::buildingCount+1; }
         }
         return {score/(1+hoi5::airHexDistance(wing.base,cell,size)*.12),building};
     }
@@ -3502,7 +3512,8 @@ struct World {
         if (!wing.strategicOperationArea.empty()) return -1;
         const int fallback = wing.target >= 0 ? wing.target :
             (wing.operationArea.empty() ? -1 : wing.operationArea.back());
-        return fallback >= 0 && airTargetValid(wing.owner,fallback,true) ? fallback : -1;
+        return fallback >= 0 && airTargetValid(wing.owner,fallback,true) &&
+            airWingCanReach(wing,fallback,type) && strategicTileScore(wing,fallback).first > 0 ? fallback : -1;
     }
     double casBattleScore(int wingIndex,int tile,const hoi5::Battle& battle) const {
         const auto& wing = air.wings[wingIndex];
@@ -3521,6 +3532,7 @@ struct World {
 
     int selectCasTarget(int wingIndex,int* candidateCount = nullptr) const {
         const auto& wing = air.wings[wingIndex];
+        if(!wing.targetPriorities.empty() && std::ranges::find(wing.targetPriorities,"enemy_units")==wing.targetPriorities.end()) return -1;
         const int type = wing.missionType(0);
         if (type < 0) return -1;
         std::vector<int> candidates;
@@ -3625,6 +3637,7 @@ struct World {
         interceptAircraft(wingIndex,origin,delivered,type);
         const int strategicObject=strategic?strategicTileScore(wing,target).second:-1;
         const auto object = strategicObject==hoi5::buildingCount ? std::string_view("air_defense") :
+            strategicObject == hoi5::buildingCount+1 ? std::string_view("enemy_units") :
             strategic ? hoi5::airTargetObject(strategicObject) : std::string_view{};
         hoi5::AirSalvo salvo{wing.owner,origin,target,origin,delivered*hoi5::munitionsPerSortie(*weapon),weapon,
             flight ? launch : 0,flight ? launch : 0,hoi5::weaponInterceptability(*weapon,flight ? launch : 0),
@@ -3808,6 +3821,8 @@ struct World {
             target->health=std::max(0.,target->health-hits*salvo.weapon->damageMult*.12);
             return impact();
         }
+        if (salvo.targetObject == "enemy_units")
+            return resolveAirDivisionImpact(salvo,infrastructureChanged) && impact();
         const auto type = salvo.weapon->type;
         const bool divisionTag = type == "unguided_rocket" || type == "guided_missile" || type == "guided_bomb";
         if (salvo.targetObject.empty() && (!salvo.strategic || divisionTag) &&
@@ -3832,7 +3847,9 @@ struct World {
         const int capacity = wing.interceptorCapacity();
         wing.interceptorAmmo = wing.interceptorAmmo < 0 ? 0 : std::min(wing.interceptorAmmo,capacity);
         const int sorties = std::max(1,int(std::ceil(ready*std::clamp(wing.sortieIntensity,0.,1.)*.18)));
-        return std::min({targets,wing.interceptorAmmo,2*sorties});
+        const int fueled=wing.owner>=0 && wing.owner<int(stockpiles.size()) ?
+            int(hoi5::value(stockpiles[wing.owner],"refined_fuel")/hoi5::fighterSortieFuel(hoi5::airHexDistance(wing.base,tile,size))) : 0;
+        return std::min({targets,wing.interceptorAmmo,2*sorties,fueled});
     }
 
     void interceptAircraft(int targetIndex,int exposure,int sorties,int targetType = -1) {
@@ -3857,6 +3874,8 @@ struct World {
             if (!engaged) break;
             auto& fighter = air.wings[candidate.wing];
             fighter.interceptorAmmo -= engaged;
+            stockpiles[fighter.owner]["refined_fuel"]-=engaged*hoi5::fighterSortieFuel(candidate.distance);
+            addAirVisual(fighter.owner,fighter.base,exposure,fighter.missionType(2));
             aircraftInterceptors.push_back({targetIndex,sorties,{fighter.owner,engaged,candidate.chance,1.},targetType,exposure});
             sorties -= engaged;
             target.defensiveHours = std::max(target.defensiveHours,2.);
@@ -4047,7 +4066,10 @@ struct World {
             return std::tuple{-a.chance,a.distance} < std::tuple{-b.chance,b.distance};
         });
         for (const auto& candidate : candidates) {
-            air.wings[candidate.wing].interceptorAmmo -= candidate.engaged;
+            auto& fighter=air.wings[candidate.wing];
+            fighter.interceptorAmmo -= candidate.engaged;
+            stockpiles[fighter.owner]["refined_fuel"]-=candidate.engaged*hoi5::fighterSortieFuel(candidate.distance);
+            addAirVisual(fighter.owner,fighter.base,salvo.current,fighter.missionType(2));
             salvo.inbound.push_back({air.wings[candidate.wing].owner,candidate.engaged,candidate.chance,1.});
             if (salvo.remaining <= 0) salvo.terminalReactionSpent = true;
         }
@@ -4160,6 +4182,42 @@ struct World {
         }
     }
 
+    int launchAirPatrol(int wingIndex,SortieCounts& usedAircraft) {
+        auto& wing=air.wings[wingIndex];const int type=wing.missionType(2);
+        if(type<0 || !(wing.airSuperiority || wing.patrol) || !canUseAirbase(wing) ||
+            wing.cooldown>0 || wing.missionCooldowns[0]>0 || wing.abortedHours>0 || wing.interceptorAmmo<=0 || wing.sortieIntensity<=0 ||
+            wing.owner<0 || wing.owner>=int(stockpiles.size()) || !botAtWar(wing.owner) || tiles[wing.base].supply<.25) return 0;
+        const int available=wing.readyForType(type)-usedAircraft[type];
+        if(available<=0) return 0;
+        int target=-1;double best=-1.;
+        const auto& area=wing.operationArea;
+        const auto samples=std::min<std::size_t>(32,area.size());
+        for(std::size_t offset=0;offset<samples;++offset) {
+            const int tile=area[(offset*area.size()/samples+wingIndex+botHours/6)%area.size()];
+            if(tile<0 || tile>=int(tiles.size()) || !airWingCanReach(wing,tile,type)) continue;
+            const int owner=tiles[tile].owner;
+            if(owner<0 || (owner!=wing.owner && !diplomacy.hostile(wing.owner,owner) && !diplomacy.allied(wing.owner,owner))) continue;
+            double score=diplomacy.hostile(wing.owner,owner)?3.:0.;
+            if(auto battle=battles.find(tile);battle!=battles.end() &&
+                (battle->second.attacker==wing.owner || battle->second.defender==wing.owner)) score+=8.;
+            for(const auto& enemy:air.wings) if(enemy.readyCount()>0 && diplomacy.hostile(wing.owner,enemy.owner) &&
+                (enemy.enabledMissions[0] || enemy.enabledMissions[1] || enemy.airSuperiority || enemy.patrol) &&
+                airWingCanReach(enemy,tile) && (enemy.operationArea.empty() || std::ranges::find(enemy.operationArea,tile)!=enemy.operationArea.end())) score+=2.;
+            if(owner==wing.owner) score+=tiles[tile].buildings[hoi5::airbase].area;
+            if(score>best) {target=tile;best=score;}
+        }
+        if(target<0 || best<=0) return 0;
+        const double cost=hoi5::fighterSortieFuel(hoi5::airHexDistance(wing.base,target,size));
+        const int sorties=std::min({available,std::max(1,int(std::ceil(available*wing.sortieIntensity*.25))),
+            int(hoi5::value(stockpiles[wing.owner],"refined_fuel")/cost)});
+        if(sorties<=0) return 0;
+        stockpiles[wing.owner]["refined_fuel"]-=sorties*cost;usedAircraft[type]+=sorties;
+        addAirVisual(wing.owner,wing.base,target,type);
+        const auto defense=groundAirDefense(wing,target,sorties,false,type);
+        if(!defense.aborted) interceptAircraft(wingIndex,target,std::min(sorties,wing.readyForType(type)),type);
+        return sorties;
+    }
+
     bool updateAir(int hours,hoi5::DebugProfiler* debug = nullptr) {
         repairAircraft(hours);
         // A physical magazine is loaded once, and replaced only after it is empty.
@@ -4229,10 +4287,13 @@ struct World {
                     wing.missionCooldowns[1] <= 0 && selectStrategicTarget(wingIndex) >= 0)
                     reservedStrike = std::max(1,int(strikeReady*.4));
                 SortieCounts usedAircraft{};
-                if (reservedStrike) usedAircraft[strikeType] = reservedStrike;
+                const int patrolled=hours>0?launchAirPatrol(wingIndex,usedAircraft):0;
+                if (reservedStrike) usedAircraft[strikeType] += reservedStrike;
                 launchAirMission(wingIndex,false,usedAircraft,infrastructureChanged);
                 if (reservedStrike) usedAircraft[strikeType] -= reservedStrike;
                 launchAirMission(wingIndex,true,usedAircraft,infrastructureChanged);
+                // Patrol shares the local sortie cycle with CAS; it must not block reactive interception.
+                if(patrolled>0) wing.missionCooldowns[0]=std::max(wing.missionCooldowns[0],3.);
             }
         }
         {
@@ -5737,7 +5798,7 @@ struct World {
             wing.risk = urgent && readiness>=.5 ? hoi5::AirRisk::aggressive :
                 readiness<.6 || !combat ? hoi5::AirRisk::cautious : hoi5::AirRisk::normal;
             wing.sortieIntensity *= readiness<.5?.5:1.;
-            wing.targetPriorities = {"supply_infrastructure","airbases","industry","air_defense"};
+
             std::set<int> area(assigned->tiles.begin(),assigned->tiles.end());
             for (const int tile : assigned->tiles) for (const int next : botGeography.adjacent(tile))
                 if (tiles[next].owner >= 0 && diplomacy.hostile(owner,tiles[next].owner)) area.insert(next);
@@ -5754,11 +5815,20 @@ struct World {
             for (int tile = 0; tile < int(tiles.size()); ++tile) {
                 if (tiles[tile].owner < 0 || !diplomacy.hostile(owner,tiles[tile].owner)) continue;
                 const double proximity = 1.+hoi5::supplyHexDistance(center,tile,size)/6.;
-                if (enemyDivisions[tile] > 0 && botAirReach(wing.base,tile,casType))
+                if (enemyDivisions[tile] > 0 && (botAirReach(wing.base,tile,casType) ||
+                    (strikeType>=0 && (enemyDivisions[tile]>=3 || support.contains(tile)) && botAirReach(wing.base,tile,strikeType))))
                     concentrations.emplace_back((2*enemyDivisions[tile]+(support.contains(tile) ? 10 : 0))/proximity,tile);
             }
             for (const auto [tile,value] : strikeTargets)
                 if (botAirReach(wing.base,tile,strikeType)) strategic.emplace_back(value,tile);
+            bool enemyAir=false,enemyDefense=false;
+            for(const auto& other:air.wings) if(other.readyCount()>0 && diplomacy.hostile(owner,other.owner) &&
+                (botAirReach(wing.base,other.base,missionType) || airWingCanReach(other,center))) {enemyAir=true;break;}
+            for(const auto& battery:air.defense) if(battery.health>0 && diplomacy.hostile(owner,battery.owner) &&
+                botAirReach(wing.base,battery.tile,strikeType>=0?strikeType:casType)) {enemyDefense=true;break;}
+            wing.targetPriorities=hoi5::botAirTargetPriorities(!concentrations.empty() || !support.empty(),enemyAir,enemyDefense,strikeType>=0);
+            if(strikeType>=0) for(const auto& [score,tile]:concentrations)
+                if(botAirReach(wing.base,tile,strikeType)) strategic.emplace_back(score,tile);
             const auto addRanked = [&](auto& targets,std::size_t limit) {
                 std::ranges::sort(targets,[&](const auto& a,const auto& b) {
                     return std::tuple{a.first,a.second%size,a.second/size} >
@@ -5769,8 +5839,10 @@ struct World {
             addRanked(concentrations,12);
             wing.strategicOperationArea.clear();
             std::ranges::sort(strategic,std::greater{});
-            for (std::size_t i = 0; i < std::min<std::size_t>(8,strategic.size()); ++i)
-                wing.strategicOperationArea.push_back(strategic[i].second);
+            for(const auto& [score,tile]:strategic) {
+                if(wing.strategicOperationArea.size()>=8) break;
+                if(std::ranges::find(wing.strategicOperationArea,tile)==wing.strategicOperationArea.end()) wing.strategicOperationArea.push_back(tile);
+            }
             wing.operationArea.assign(area.begin(),area.end());
             std::ranges::sort(wing.operationArea,{},tileKey);
             wing.target = wing.operationArea.empty() ? -1 : wing.operationArea.back();
@@ -10318,6 +10390,8 @@ int main(int argc, char** argv) try {
         World priorities;
         priorities.size = 2;
         priorities.tiles.resize(4);
+        priorities.tiles[1].owner=priorities.tiles[2].owner=1;
+        priorities.diplomacy.relation(0,1).war=true;
         priorities.tiles[1].buildings[hoi5::city].area = .9;
         priorities.tiles[1].buildings[hoi5::industry].area = .2;
         priorities.air.wings.push_back({0,0,1,4});
@@ -10430,6 +10504,7 @@ int main(int argc, char** argv) try {
         if (hoi5::value(tactical.supplies,"light_aa_ammo") != 0) { std::cerr << "--check-air-strike failed at " << __LINE__ << ": " << __FILE__ << "\n"; return 1; }
         interception.air.defense.clear();
         interception.divisions.clear();
+        interception.stockpiles.resize(2);interception.stockpiles[1]["refined_fuel"]=100000.;
         fighter = {1,1,0,8};
         fighter.interceptorAmmo = 32;
         fighter.intercept = true;
@@ -10442,6 +10517,7 @@ int main(int argc, char** argv) try {
         interception.updateAir(1);
         if (!interception.salvos.empty() || interception.air.wings[0].interceptorAmmo != 30) { std::cerr << "--check-air-strike failed at " << __LINE__ << ": " << __FILE__ << "\n"; return 1; }
         interception.air.wings.push_back({0,0,3,8});
+        interception.stockpiles.resize(2);interception.stockpiles[1]["refined_fuel"]=100000.;
         interception.interceptAircraft(1,1,2);
         if (interception.aircraftInterceptors.size() != 1 ||
             interception.air.wings[0].interceptorAmmo != 28 ||
@@ -11312,6 +11388,33 @@ int main(int argc, char** argv) try {
         }) && std::ranges::none_of(bot.tasks,[](const auto& task) {
             return task.kind == hoi5::BotTask::Kind::recruit;
         }) ? 0 : 1;
+    }
+    if(mode=="--check-air-patrol") {
+        const auto check=[](bool ok,int line){if(!ok) std::cerr<<"Air patrol failed at "<<line<<"\n";return ok;};
+        World test;test.size=6;test.tiles.resize(36);test.profiles.resize(2);test.stockpiles.resize(2);
+        test.capitals={0,5};test.diplomacy.countries.resize(2);test.diplomacy.relation(0,1).war=true;
+        for(int i=0;i<36;++i) {test.tiles[i].owner=i%6<3?0:1;test.tiles[i].supply=1.;}
+        for(int owner=0;owner<2;++owner) {
+            const int base=owner?5:0;test.tiles[base].buildings[hoi5::airbase]={1.,1.};
+            test.air.bases.push_back({owner,base,1,40,10});test.air.wings.push_back({owner,base,0,8});
+            auto& wing=test.air.wings.back();wing.airSuperiority=wing.patrol=wing.intercept=true;
+            wing.interceptorAmmo=32;wing.operationArea={3};test.stockpiles[owner]["refined_fuel"]=1000.;
+        }
+        World::SortieCounts used{};
+        if(!check(test.launchAirPatrol(0,used)>0,__LINE__) || !check(used[0]>0,__LINE__) ||
+            !check(test.aircraftInterceptors.size()==1,__LINE__) || !check(test.airVisuals.size()==2,__LINE__) ||
+            !check(test.stockpiles[0]["refined_fuel"]<1000. && test.stockpiles[1]["refined_fuel"]<1000.,__LINE__) ||
+            !check(test.air.wings[1].interceptorAmmo<32,__LINE__)) return 1;
+        test.stockpiles[0]["refined_fuel"]=0.;
+        if(!check(test.launchAirPatrol(0,used)==0,__LINE__)) return 1;
+        test.stockpiles[0]["refined_fuel"]=1000.;test.air.wings[0].interceptorAmmo=0;
+        if(!check(test.launchAirPatrol(0,used)==0,__LINE__)) return 1;
+        test.air.wings[0].interceptorAmmo=32;test.air.wings[0].abortedHours=6.;
+        if(!check(test.launchAirPatrol(0,used)==0,__LINE__)) return 1;
+        test.air.wings[0].abortedHours=0.;test.diplomacy.relation(0,1).war=false;
+        if(!check(test.launchAirPatrol(0,used)==0,__LINE__)) return 1;
+        std::cout<<"Active patrol, visible interception, fuel, ammunition, shared aircraft and no-flight gates passed\n";
+        return 0;
     }
     if (mode == "--check-bot-air") {
         {
@@ -12940,7 +13043,9 @@ int main(int argc, char** argv) try {
         if (test.breakthroughAirBonus(test.battles.at(1),0,1) != .10 ||
             test.breakthroughAirBonus(test.battles.at(1),1,1) != 0) return 1;
         auto& wing = test.air.wings[0];
-        wing.airSuperiority = true;
+        wing.airSuperiority = true;wing.interceptorAmmo=wing.interceptorCapacity();
+        test.stockpiles.resize(2);test.manpowerReserve.resize(2);test.capacities.resize(2);
+        test.stockpiles[0]["refined_fuel"]=100000.;
         if (std::abs(test.breakthroughAirBonus(test.battles.at(1),0,1)-.15) > 1e-9) return 1;
         wing.operationArea = {2};
         if (test.breakthroughAirBonus(test.battles.at(1),0,1) != .10) return 1;
@@ -13811,6 +13916,11 @@ int main(int argc, char** argv) try {
         return sf::FloatRect({20.f+81.f*(index%5),float(wingGridTop(count)+55*(index/5))},{74,48});
     };
     const auto wingCreationBottom = [&] { return wingGridTop(int(wingCards().size()))-42; };
+    const auto airTargetMenuTop = [&] {
+        const float bottom = float(window.getSize().y);
+        const float screenTop = bottom+(94.f-bottom)/airDockScale;
+        return std::max(int(std::ceil(screenTop)),wingCreationBottom()-airTargetMenuHeight);
+    };
     bool wingCreationOpen = wingCreationSmoke;
     int wingCreationType = -1, wingCreationCount = 1;
     int missionMenuWing = -1, riskMenuWing = -1;
@@ -14565,6 +14675,44 @@ int main(int argc, char** argv) try {
                     }
                     continue;
                 }
+                if (playing && !pauseMenu && targetingWing >= 0 && targetingWing == selectedWing &&
+                    selectedWing < int(world.air.wings.size())) {
+                    const auto point = localAirPoint(button->position);
+                    const int airX = int(std::floor(point.x)), airY = int(std::floor(point.y));
+                    const sf::IntRect menu({10,airTargetMenuTop()},{420,airTargetMenuHeight});
+                    if (menu.contains({airX,airY})) {
+                        if (button->button == sf::Mouse::Button::Left) {
+                            auto targetWings = selectedWings;
+                            targetWings.insert(selectedWing);
+                            const int offset = airY-(airTargetMenuTop()+29);
+                            const int row = offset/27;
+                            if (airX >= 20 && airX < 420 && offset >= 0 && offset%27 < 24 &&
+                                row <= int(std::size(airTargetOptions))) {
+                                if (row == 0) {
+                                    for (int index : targetWings) {
+                                        auto& priorities = world.air.wings[index].targetPriorities;
+                                        priorities.clear();
+                                        for (const auto& [key,name] : airTargetOptions) priorities.push_back(key);
+                                    }
+                                } else {
+                                    const auto key = airTargetOptions[row-1].first;
+                                    const auto& primary = world.air.wings[selectedWing].targetPriorities;
+                                    const bool enable = !primary.empty() && std::ranges::find(primary,key) == primary.end();
+                                    for (int index : targetWings) {
+                                        auto& priorities = world.air.wings[index].targetPriorities;
+                                        if (priorities.empty())
+                                            for (const auto& [category,name] : airTargetOptions) priorities.push_back(category);
+                                        std::erase(priorities,std::string_view("none"));
+                                        if (!enable) std::erase(priorities,key);
+                                        else if (std::ranges::find(priorities,key) == priorities.end()) priorities.push_back(key);
+                                        if (priorities.empty()) priorities.push_back("none");
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
                 if (playing && !pauseMenu && (armyCommandBounds.contains(button->position) ||
                     divisionListBounds.contains(button->position))) {
                     if (button->button == sf::Mouse::Button::Left) {
@@ -15083,29 +15231,6 @@ int main(int argc, char** argv) try {
                                 const bool enable = !*enabled;
                                 for (int index : selectedWings)
                                     if (auto* mission = wingMission(world.air.wings[index],row)) *mission = enable;
-                            }
-                        }
-                    } else if (targetingWing >= 0 && targetingWing == selectedWing && airX >= 10 && airX < 430 &&
-                               airY < wingCreationBottom() && airY >= wingCreationBottom()-airTargetMenuHeight) {
-                        const int offset = airY-(wingCreationBottom()-airTargetMenuHeight+29);
-                        const int row = offset/27;
-                        if (airX >= 20 && airX < 420 && offset >= 0 && offset%27 < 24 &&
-                            row <= int(std::size(airTargetOptions))) {
-                            if (row == 0) {
-                                for (int index : selectedWings) {
-                                    auto& priorities = world.air.wings[index].targetPriorities;
-                                    priorities.clear();
-                                    for (const auto& [key,name] : airTargetOptions) priorities.push_back(key);
-                                }
-                            } else {
-                                const auto key = airTargetOptions[row-1].first;
-                                const auto& primary = world.air.wings[selectedWing].targetPriorities;
-                                const bool enable = std::ranges::find(primary,key) == primary.end();
-                                for (int index : selectedWings) {
-                                    auto& priorities = world.air.wings[index].targetPriorities;
-                                    if (!enable) std::erase(priorities,key);
-                                    else if (std::ranges::find(priorities,key) == priorities.end()) priorities.push_back(key);
-                                }
                             }
                         }
                     } else if (editingWing >= 0 && editingWing == selectedWing && airX >= 10 && airX < 430 &&
@@ -17136,29 +17261,6 @@ int main(int argc, char** argv) try {
             }
             if (!aviationMessage.empty())
                 label(window,font,aviationMessage,{25,float(wingCreationBottom()-21)},14);
-            if (targetingWing >= 0 && targetingWing == selectedWing) {
-                const auto& priorities = world.air.wings[targetingWing].targetPriorities;
-                const float top = wingCreationBottom()-airTargetMenuHeight;
-                box(window,{10,top},{420,float(airTargetMenuHeight)},{18,24,32,244},{96,122,150});
-                label(window,font,"Список целей для миссии Удар",{22,top+6},13);
-                const bool allSelected = std::ranges::all_of(airTargetOptions,[&](const auto& option) {
-                    return std::ranges::find(priorities,option.first) != priorities.end();
-                });
-                box(window,{20,top+29},{400,24},allSelected ? sf::Color(50,70,92,230) :
-                    sf::Color(36,50,66,225),{102,136,170});
-                battleLabel(window,font,"Выбрать все",{32,top+41},10);
-                battleLabel(window,font,"все категории",{412,top+41},9,{174,194,212},1.f);
-                for (int i = 0; i < int(std::size(airTargetOptions)); ++i) {
-                    const auto [key,name] = airTargetOptions[i];
-                    const bool enabled = std::ranges::find(priorities,key) != priorities.end();
-                    const float y = top+29+27*(i+1);
-                    box(window,{20,y},{400,24},enabled ? sf::Color(48,72,58,230) :
-                        sf::Color(30,42,54,220),{78,102,128});
-                    box(window,{28,y+5},{14,14},sf::Color::Transparent,{190,206,220});
-                    if (enabled) battleLabel(window,font,"✓",{35,y+12},11,{180,238,166},.5f);
-                    battleLabel(window,font,std::string(name),{50,y+12},10);
-                }
-            }
             if (editingWing >= 0 && editingWing == selectedWing) {
                 const auto& wing = world.air.wings[editingWing];
                 const auto rows = wingEditRows(editingWing);
@@ -18679,83 +18781,111 @@ int main(int argc, char** argv) try {
                         fittedBattleLabel(window,cardFont,value,{left,row},12,right-left,color);
                         row += 19;
                     };
-                    detail(attacking ? "Сторона: атака" : "Сторона: оборона");
-                    const auto& opposing = attacking ? battle.activeDefenders : battle.activeAttackers;
-                    const auto range = [&](const auto& units,const auto& value) {
+                    const auto summaryRange = [&](bool attack) {
+                        const auto& units = attack ? active : (attacking ? active : battle.activeAttackers);
                         double low = 0., high = 0.; bool any = false;
+                        const auto& cell = world.tiles[found->first];
                         for (int index : units) {
                             const auto& unit = world.divisions[index];
                             if (unit.combat.strength <= 0) continue;
-                            const double modifier = (value(unit)-1.)*100.;
-                            if (!any) low = high = modifier;
-                            else { low = std::min(low,modifier); high = std::max(high,modifier); }
+                            const auto terrain = hoi5::groundTerrainEffects(cell.natural,unit.combat.vehicles);
+                            double multiplier = attack ? (attacking ? terrain.attack : 1.) : 1.;
+                            if (!attack && !attacking) {
+                                const auto [buildings,fort] = world.battleDefenseBonuses(found->first,battle.defender,unit.combat.vehicles);
+                                multiplier = terrain.defense*(1.+buildings+fort);
+                            }
+                            const double value = (multiplier-1.)*100.;
+                            if (!any) low = high = value;
+                            else { low = std::min(low,value); high = std::max(high,value); }
                             any = true;
                         }
-                        if (!any) return std::string("нет активных дивизий");
+                        if (!any) return std::string("—");
                         const auto percent = [&](double v) { return (v > .049 ? "+" : "")+precise(v)+"%"; };
                         return percent(low)+(high-low > .05 ? " … "+percent(high) : "");
                     };
-                    const auto& cell = world.tiles[found->first];
-                    detail("Местность, атака: "+range(active,[&](const auto& unit) {
-                        return attacking ? hoi5::groundTerrainEffects(cell.natural,unit.combat.vehicles).attack : 1.;
-                    }));
-                    detail("Местность, защита: "+range(opposing,[&](const auto& unit) {
-                        return attacking ? 1. : hoi5::groundTerrainEffects(cell.natural,unit.combat.vehicles).defense;
-                    }));
-                    const int owner = attacking ? battle.attacker : battle.defender;
-                    detail("Постройки, защита: "+range(opposing,[&](const auto& unit) {
-                        return 1.+(attacking ? 0. : world.battleDefenseBonuses(found->first,owner,unit.combat.vehicles).first);
-                    }));
-                    detail("Укрепления, защита: "+range(opposing,[&](const auto& unit) {
-                        return 1.+(attacking ? 0. : world.battleDefenseBonuses(found->first,owner,unit.combat.vehicles).second);
-                    }));
-                    detail("Ширина фронта, атака/защита: "+range(active,[](const auto& unit) {
-                        return std::max(.2,unit.combat.widthEfficiency);
-                    }));
-                    detail("Снабжение, атака: "+range(active,[&](const auto& unit) {
-                        return .90+.10*world.supplyRatio(unit);
-                    }));
-                    constexpr std::array ammoNames{"Боеприпасы, пехотная атака", "Боеприпасы, лобовая атака", "Боеприпасы, верхняя атака"};
-                    for (int channel = 0; channel < 3; ++channel)
-                        detail(std::string(ammoNames[channel])+" (посл.): "+range(active,[&](const auto& unit) {
-                            return unit.lastCombatAmmo[channel];
-                        }));
-                    const auto pairRange = [&](const auto& modifier) {
-                        double low = 0., high = 0.; bool any = false;
-                        for (int own : active) for (int enemy : opposing) {
-                            const auto& source = world.divisions[own].combat;
-                            const auto& target = world.divisions[enemy].combat;
-                            if (source.strength <= 0 || target.strength <= 0) continue;
-                            const double v = (modifier(source,target)-1.)*100;
-                            if (!any) low = high = v;
-                            else { low = std::min(low,v); high = std::max(high,v); }
-                            any = true;
-                        }
-                        if (!any) return std::string("нет активных пар");
-                        const auto percent = [&](double v) { return (v > .049 ? "+" : "")+precise(v)+"%"; };
-                        return percent(low)+(high-low > .05 ? " … "+percent(high) : "");
-                    };
-                    detail("Непробитая броня, урон: "+pairRange([](const auto& a,const auto& b) {
-                        return b.frontPiercing < a.frontArmor && b.topPiercing < a.topArmor && a.vehicles > .25 ? 1.4 : 1.;
-                    }));
-                    detail("Пробитие, лобовой урон: "+pairRange([](const auto& a,const auto& b) {
-                        return a.frontPiercing >= b.frontArmor ? 1. : .1;
-                    }));
-                    detail("Пробитие, верхний урон: "+pairRange([](const auto& a,const auto& b) {
-                        return a.topPiercing >= b.topArmor ? 1. : .1;
-                    }));
-                    detail("Низкая орг. врага, урон прочности: "+range(opposing,[](const auto& unit) {
-                        return unit.lowOrganizationStrengthMultiplier();
-                    }));
-                    const int side = attacking ? 0 : 1;
-                    const double airBonus = attacking ? world.breakthroughAirBonus(battle,owner,found->first) : 0.;
-                    detail("Авиация, прорыв: +"+precise(airBonus*100)+"%");
-                    if (battle.airHits[side]) {
-                        detail("Авиация за бой: "+std::to_string(battle.airHits[side])+" результативных залпов",{224,190,150});
-                        detail("Урон врагу: орг "+precise(battle.airOrganizationDamage[side])+
-                            "; прочность "+precise(battle.airStrengthDamage[side]),{224,190,150});
-                    } else detail("Попаданий авиации за этот бой нет");
+                    detail("Местность и постройки — итог",{224,190,150});
+                    detail("Атака: "+summaryRange(true)+"; защита: "+summaryRange(false),{224,190,150});
                     row += 8;
+                    const auto drawBattleDetails = [&] {
+                        detail(attacking ? "Сторона: атака" : "Сторона: оборона");
+                        const auto& opposing = attacking ? battle.activeDefenders : battle.activeAttackers;
+                        const auto range = [&](const auto& units,const auto& value) {
+                            double low = 0., high = 0.; bool any = false;
+                            for (int index : units) {
+                                const auto& unit = world.divisions[index];
+                                if (unit.combat.strength <= 0) continue;
+                                const double modifier = (value(unit)-1.)*100.;
+                                if (!any) low = high = modifier;
+                                else { low = std::min(low,modifier); high = std::max(high,modifier); }
+                                any = true;
+                            }
+                            if (!any) return std::string("нет активных дивизий");
+                            const auto percent = [&](double v) { return (v > .049 ? "+" : "")+precise(v)+"%"; };
+                            return percent(low)+(high-low > .05 ? " … "+percent(high) : "");
+                        };
+                        const auto& cell = world.tiles[found->first];
+                        detail("Местность, атака: "+range(active,[&](const auto& unit) {
+                            return attacking ? hoi5::groundTerrainEffects(cell.natural,unit.combat.vehicles).attack : 1.;
+                        }));
+                        detail("Местность, защита: "+range(opposing,[&](const auto& unit) {
+                            return attacking ? 1. : hoi5::groundTerrainEffects(cell.natural,unit.combat.vehicles).defense;
+                        }));
+                        const int owner = attacking ? battle.attacker : battle.defender;
+                        detail("Постройки, защита: "+range(opposing,[&](const auto& unit) {
+                            return 1.+(attacking ? 0. : world.battleDefenseBonuses(found->first,owner,unit.combat.vehicles).first);
+                        }));
+                        detail("Укрепления, защита: "+range(opposing,[&](const auto& unit) {
+                            return 1.+(attacking ? 0. : world.battleDefenseBonuses(found->first,owner,unit.combat.vehicles).second);
+                        }));
+                        detail("Ширина фронта, атака/защита: "+range(active,[](const auto& unit) {
+                            return std::max(.2,unit.combat.widthEfficiency);
+                        }));
+                        detail("Снабжение, атака: "+range(active,[&](const auto& unit) {
+                            return .90+.10*world.supplyRatio(unit);
+                        }));
+                        constexpr std::array ammoNames{"Боеприпасы, пехотная атака", "Боеприпасы, лобовая атака", "Боеприпасы, верхняя атака"};
+                        for (int channel = 0; channel < 3; ++channel)
+                            detail(std::string(ammoNames[channel])+" (посл.): "+range(active,[&](const auto& unit) {
+                                return unit.lastCombatAmmo[channel];
+                            }));
+                        const auto pairRange = [&](const auto& modifier) {
+                            double low = 0., high = 0.; bool any = false;
+                            for (int own : active) for (int enemy : opposing) {
+                                const auto& source = world.divisions[own].combat;
+                                const auto& target = world.divisions[enemy].combat;
+                                if (source.strength <= 0 || target.strength <= 0) continue;
+                                const double v = (modifier(source,target)-1.)*100;
+                                if (!any) low = high = v;
+                                else { low = std::min(low,v); high = std::max(high,v); }
+                                any = true;
+                            }
+                            if (!any) return std::string("нет активных пар");
+                            const auto percent = [&](double v) { return (v > .049 ? "+" : "")+precise(v)+"%"; };
+                            return percent(low)+(high-low > .05 ? " … "+percent(high) : "");
+                        };
+                        detail("Непробитая броня, урон: "+pairRange([](const auto& a,const auto& b) {
+                            return b.frontPiercing < a.frontArmor && b.topPiercing < a.topArmor && a.vehicles > .25 ? 1.4 : 1.;
+                        }));
+                        detail("Пробитие, лобовой урон: "+pairRange([](const auto& a,const auto& b) {
+                            return a.frontPiercing >= b.frontArmor ? 1. : .1;
+                        }));
+                        detail("Пробитие, верхний урон: "+pairRange([](const auto& a,const auto& b) {
+                            return a.topPiercing >= b.topArmor ? 1. : .1;
+                        }));
+                        detail("Низкая орг. врага, урон прочности: "+range(opposing,[](const auto& unit) {
+                            return unit.lowOrganizationStrengthMultiplier();
+                        }));
+                        const int side = attacking ? 0 : 1;
+                        const double airBonus = attacking ? world.breakthroughAirBonus(battle,owner,found->first) : 0.;
+                        detail("Авиация, прорыв: +"+precise(airBonus*100)+"%");
+                        if (battle.airHits[side]) {
+                            detail("Авиация за бой: "+std::to_string(battle.airHits[side])+" результативных залпов",{224,190,150});
+                            detail("Урон врагу: орг "+precise(battle.airOrganizationDamage[side])+
+                                "; прочность "+precise(battle.airStrengthDamage[side]),{224,190,150});
+                        } else detail("Попаданий авиации за этот бой нет");
+                        row += 8;
+
+                    };
 
                     constexpr std::array groups{"В бою","В резерве","Восстановление"};
                     for (int group = 0; group < int(groups.size()); ++group) {
@@ -18786,6 +18916,9 @@ int main(int argc, char** argv) try {
                             row += 8;
                         }
                     }
+                    row += 10;
+                    detail("Подробные модификаторы",{224,190,150});
+                    drawBattleDetails();
                     contentBottom = std::max(contentBottom,row);
                     window.setView(savedView);
                 }
@@ -18811,6 +18944,36 @@ int main(int argc, char** argv) try {
                     (size.y-wingBounds.position.y)*airDockScale+8.f : 0.f,
                     std::max(filtersInset,hexInset),armyInset);
                 newsPanel.draw(window,font);
+            }
+            if (!pauseMenu && !countryModalOpen() && !playerOffer()) {
+                const auto overlayView = window.getView();
+                auto targetView = gui;
+                targetView.setViewport({{airDockX/size.x,1.f-airDockScale},{airDockScale,airDockScale}});
+                window.setView(targetView);
+                if (targetingWing >= 0 && targetingWing == selectedWing) {
+                    const auto& priorities = world.air.wings[targetingWing].targetPriorities;
+                    const float top = float(airTargetMenuTop());
+                    box(window,{10,top},{420,float(airTargetMenuHeight)},{18,24,32,244},{96,122,150});
+                    label(window,font,"Список целей для миссии Удар",{22,top+6},13);
+                    const bool allSelected = priorities.empty() || std::ranges::all_of(airTargetOptions,[&](const auto& option) {
+                        return std::ranges::find(priorities,option.first) != priorities.end();
+                    });
+                    box(window,{20,top+29},{400,24},allSelected ? sf::Color(50,70,92,230) :
+                        sf::Color(36,50,66,225),{102,136,170});
+                    battleLabel(window,font,"Выбрать все",{32,top+41},10);
+                    battleLabel(window,font,"все категории",{412,top+41},9,{174,194,212},1.f);
+                    for (int i = 0; i < int(std::size(airTargetOptions)); ++i) {
+                        const auto [key,name] = airTargetOptions[i];
+                        const bool enabled = priorities.empty() || std::ranges::find(priorities,key) != priorities.end();
+                        const float y = top+29+27*(i+1);
+                        box(window,{20,y},{400,24},enabled ? sf::Color(48,72,58,230) :
+                            sf::Color(30,42,54,220),{78,102,128});
+                        box(window,{28,y+5},{14,14},sf::Color::Transparent,{190,206,220});
+                        if (enabled) battleLabel(window,font,"✓",{35,y+12},11,{180,238,166},.5f);
+                        battleLabel(window,font,std::string(name),{50,y+12},10);
+                    }
+                }
+                window.setView(overlayView);
             }
             if (pauseMenu) {
                 box(window,{0,0},size,{8,12,17,170});
@@ -19408,12 +19571,12 @@ int main(int argc, char** argv) try {
                         const auto& loss = total.loss;
                         row("Мощь: "+std::to_string(int(std::lround(total.power)))+
                             "   Дивизии: "+std::to_string(total.divisions),blue);
+                        row("Суммарные потери оснащения: "+formatMoney(loss.equipmentValue),gold);
                         row("Потери людей: "+formatAmount(loss.people),red);
                         row("Потери дивизий: "+std::to_string(loss.divisions),red);
                         row("Самолёты / вертолёты: "+std::to_string(loss.aircraft)+" / "+
                             std::to_string(loss.helicopters),red);
                         row("Повреждения авиации: "+std::to_string(loss.damagedAircraft),red);
-                        row("Оснащение и запасы, всего: "+formatMoney(loss.equipmentValue),gold);
                         for (const auto& [key,amount] : loss.equipment)
                             row(std::string(resourceDisplayName(key))+": "+resourceAmountLabel(amount),red);
                     };

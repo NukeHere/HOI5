@@ -166,3 +166,11 @@ if(BUILD_TESTING)
     target_link_libraries(air_payload_check PRIVATE Threads::Threads)
     add_test(NAME available_air_payload COMMAND air_payload_check)
 endif()
+
+if(BUILD_TESTING)
+    add_executable(ai_air_policy_check H5_CPP/tests/ai_air_policy_check.cpp)
+    target_compile_features(ai_air_policy_check PRIVATE cxx_std_20)
+    add_test(NAME situational_air_target_policy COMMAND ai_air_policy_check)
+endif()
+
+add_test(NAME air_patrol_and_visible_interception COMMAND HOI5 --check-air-patrol)
